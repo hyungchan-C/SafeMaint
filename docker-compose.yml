@@ -1,44 +1,84 @@
+name: safemaint
+
+x-backend-service: &backend-service
+  image: safemaint-backend:0.2.0
+  build:
+    context: ./backend
+  environment:
+    APP_ENV: ${APP_ENV:-production}
+    CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting SafeMaint}
+
 services:
   db:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.2-pg16-bookworm
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-safemaint}
       POSTGRES_USER: ${POSTGRES_USER:-safemaint}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before starting SafeMaint}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - safemaint_postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init/001-enable-vector.sql:/docker-entrypoint-initdb.d/001-enable-vector.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-safemaint} -d ${POSTGRES_DB:-safemaint}"]
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-safemaint} -d ${POSTGRES_DB:-safemaint}
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
+      start_period: 10s
 
-  backend:
-    build:
-      context: ./backend
-    environment:
-      APP_ENV: ${APP_ENV:-development}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://safemaint:change-me@db:5432/safemaint}
-    ports:
-      - "8000:8000"
+  migrate:
+    <<: *backend-service
+    command: ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"]
+    restart: "no"
     depends_on:
       db:
         condition: service_healthy
 
+  seed:
+    <<: *backend-service
+    command: ["python", "-m", "app.db.seed"]
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  backend:
+    <<: *backend-service
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_BIND_ADDRESS:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   frontend:
+    image: safemaint-frontend:0.2.0
     build:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     ports:
-      - "3000:3000"
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-3000}:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
-  postgres_data:
+  safemaint_postgres_data:
+    name: ${POSTGRES_VOLUME_NAME:-safemaint_postgres_data}
