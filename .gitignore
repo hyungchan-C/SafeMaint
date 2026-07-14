@@ -35,5 +35,8 @@ Thumbs.db
 /data/processed/
 /models/
 /uploads/
+/backups/
+*.backup
+*.dump
 *.gguf
 *.safetensors

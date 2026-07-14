@@ -39,6 +39,7 @@ SafeMaint/
 ├─ frontend/            안전관리 대시보드
 ├─ docs/                설계 문서
 ├─ infra/postgres/init/ pgvector 최초 부트스트랩
+├─ scripts/             팀원 개발환경 설정·DB 검증 스크립트
 ├─ .env.example         환경변수 예시
 ├─ docker-compose.yml   공통·고객사 실행 환경(DB 포트 비공개)
 └─ docker-compose.dev.yml 로컬 DB 포트 override
@@ -46,34 +47,140 @@ SafeMaint/
 
 DB 테이블과 관계는 [docs/database.md](docs/database.md), 전처리 결과 입력 규격은 [docs/preprocessing-contract.md](docs/preprocessing-contract.md)를 참고하세요.
 
-## 가장 간단한 전체 실행
+## 팀원 로컬 DB 온보딩
 
-Docker Desktop을 실행한 뒤 최초 한 번 `.env`를 만듭니다. `POSTGRES_PASSWORD`와 `DATABASE_URL` 안의 비밀번호는 반드시 같은 긴 임의 문자열로 변경해야 합니다.
+각 팀원은 Git, Docker Desktop, DBeaver를 설치하고 Docker Desktop을 실행한 상태에서 시작합니다. Docker DB는 팀원 PC마다 독립적으로 생성됩니다.
+
+### 최초 실행
+
+저장소를 clone한 직후 프로젝트 루트에서 실행합니다.
 
 ```powershell
 Copy-Item .env.example .env
 notepad .env
-docker compose up --build -d
-docker compose ps
 ```
 
-Compose 프로젝트 이름을 `safemaint`로 고정했으므로 한글 폴더명에서 `invalid reference format`이 발생하지 않습니다. 실행 순서는 다음과 같습니다.
+`.env`에서 `POSTGRES_PASSWORD`를 12자 이상의 영문·숫자·하이픈·밑줄 조합으로 변경하고, `DATABASE_URL` 안의 비밀번호도 똑같이 변경합니다. 예시 비밀번호를 그대로 사용하면 설정 스크립트가 실행을 중단합니다.
+
+```dotenv
+POSTGRES_DB=safemaint
+POSTGRES_USER=safemaint
+POSTGRES_PASSWORD=change-this-local-password
+POSTGRES_PORT=5432
+DATABASE_URL=postgresql+psycopg://safemaint:change-this-local-password@db:5432/safemaint
+```
+
+설정이 끝나면 다음 명령 하나로 전체 개발 환경을 실행합니다.
+
+```powershell
+.\scripts\setup-dev.ps1
+```
+
+PowerShell 실행 정책으로 차단되면 현재 터미널에서만 허용하고 다시 실행합니다.
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\setup-dev.ps1
+```
+
+스크립트를 사용하지 않을 경우의 동일한 수동 명령은 다음과 같습니다.
+
+```powershell
+docker compose `
+  -f docker-compose.yml `
+  -f docker-compose.dev.yml `
+  up -d --build
+```
+
+실행 순서는 Compose가 다음과 같이 보장합니다.
 
 ```text
-db healthy → migrate 완료 → seed 완료 → backend healthy → frontend
+db healthy → migrate 종료 코드 0 → seed 종료 코드 0 → backend healthy → frontend
 ```
 
 - 대시보드: <http://localhost:3000>
 - API 문서: <http://localhost:8000/docs>
 - 준비 상태: <http://localhost:8000/health/ready>
 
-기본 구성은 PostgreSQL 포트를 PC 외부나 호스트에 공개하지 않습니다. 로컬 DB 도구로 접속할 때만 개발 override를 함께 사용합니다.
+전체 DB 상태를 다시 확인할 때는 다음 명령을 사용합니다.
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d
+.\scripts\verify-db.ps1
 ```
 
-> `docker compose down -v`는 DB 영구 볼륨을 삭제하므로 사용하지 마세요.
+`setup-dev.ps1`과 `verify-db.ps1`은 Docker 엔진, 환경변수, PostgreSQL, pgvector, Alembic, seed, 주요 테이블과 backend 상태를 확인합니다. 실패하면 성공 메시지를 출력하지 않고 관련 Compose 상태와 최근 로그를 보여줍니다.
+
+### 포트 충돌
+
+PC에 설치된 다른 PostgreSQL이 이미 5432 포트를 사용한다면 `.env`만 변경합니다.
+
+```dotenv
+POSTGRES_PORT=5433
+```
+
+이 경우 DBeaver도 5433 포트로 연결합니다. `DATABASE_URL`의 `db:5432`는 컨테이너 내부 주소이므로 변경하지 않습니다.
+
+### DBeaver 연결
+
+| 항목 | 값 |
+|---|---|
+| Database Type | PostgreSQL |
+| Host | `127.0.0.1` |
+| Port | `.env`의 `POSTGRES_PORT`, 기본 `5432` |
+| Database | `safemaint` |
+| Username | `safemaint` |
+| Password | 각자 `.env`의 `POSTGRES_PASSWORD` |
+
+연결 후 다음 경로에서 테이블을 확인합니다.
+
+```text
+safemaint → Schemas → public → Tables
+```
+
+DBeaver SQL Editor에서 다음 쿼리를 실행하면 연결·확장·마이그레이션·seed를 직접 확인할 수 있습니다.
+
+```sql
+SELECT current_database(), current_user, version();
+
+SELECT extname, extversion
+FROM pg_extension
+WHERE extname = 'vector';
+
+SELECT version_num
+FROM alembic_version;
+
+SELECT tablename
+FROM pg_tables
+WHERE schemaname = 'public'
+ORDER BY tablename;
+
+SELECT category, COUNT(*)
+FROM reference_codes
+GROUP BY category
+ORDER BY category;
+```
+
+### 팀원별 DB와 Git 공유 범위
+
+Git으로 공유되는 것은 Docker Compose 설정, SQLAlchemy 모델, Alembic 마이그레이션, seed 코드와 `.env.example`입니다. 다음 항목은 Git으로 공유하지 않습니다.
+
+- `.env`와 실제 비밀번호
+- Docker DB 볼륨과 팀원이 직접 입력한 데이터
+- DB dump·backup 파일
+- 실제 사업장 문서와 제조사 비공개 자료
+- 개인정보와 고객 데이터
+
+각 팀원은 같은 스키마와 seed를 갖지만, 직접 입력한 데이터는 다른 팀원에게 자동으로 전달되지 않습니다.
+
+```text
+팀원 A → 팀원 A PC의 Docker DB
+팀원 B → 팀원 B PC의 Docker DB
+팀원 C → 팀원 C PC의 Docker DB
+```
+
+팀 전체가 동일한 실제 데이터를 확인해야 할 때는 로컬 DB가 아니라 접근권한과 백업 정책이 마련된 별도 staging DB를 사용해야 합니다.
+
+> `docker compose down -v`와 `docker volume rm`은 DB 데이터를 삭제할 수 있으므로 사용하지 마세요. 설정·검증 스크립트도 이 명령을 실행하지 않습니다.
 
 ## 백엔드 로컬 개발
 
@@ -125,10 +232,11 @@ python -m alembic -c backend\alembic.ini upgrade head
 
 ```powershell
 git pull
-docker compose up --build -d
+.\scripts\setup-dev.ps1
+.\scripts\verify-db.ps1
 ```
 
-현재 1단계에서는 DB 계층·자동 마이그레이션·seed·저장 API까지 구현했습니다. 운영용 `install.ps1`, `update.ps1`, `backup.ps1`, 복구 검증과 외부 DB 전용 Compose 프로필은 2단계에서 추가합니다. 그 전에는 고객사 실데이터를 넣지 마세요.
+기존 named volume은 유지되고 새로운 마이그레이션과 seed만 다시 적용됩니다. 운영용 설치·업데이트·백업·복구 자동화와 외부 DB 전용 Compose 프로필은 별도 배포 단계에서 추가합니다. 그 전에는 고객사 실데이터를 넣지 마세요.
 
 ## API
 
@@ -157,3 +265,13 @@ DB 통합 테스트는 실수로 운영 DB를 수정하지 않도록 DB 이름�
 - 버그 수정: `fix/수정명`
 - 기능별 Pull Request를 생성하고 검토 후 병합합니다.
 - `.env`, 사업장 내부 문서, 제조사 재배포 제한 자료, 개인정보, 모델 파일은 커밋하지 않습니다.
+
+### Alembic과 seed 협업 규칙
+
+- 이미 공유되거나 적용된 Alembic 마이그레이션 파일은 수정하지 않습니다.
+- 스키마 변경마다 `alembic revision --autogenerate`로 새로운 revision을 만듭니다.
+- 생성한 마이그레이션 파일을 관련 코드와 함께 Git에 커밋합니다.
+- pull 이후 `setup-dev.ps1`을 실행해 `alembic upgrade head`가 자동 적용되는지 확인합니다.
+- 여러 migration head가 의심되면 `python -m alembic -c backend\alembic.ini heads`로 확인합니다.
+- seed는 여러 번 실행해도 중복되지 않는 멱등 구조를 유지합니다.
+- 운영 DB dump, 실제 고객 데이터와 사업장 문서는 Git에 커밋하지 않습니다.
