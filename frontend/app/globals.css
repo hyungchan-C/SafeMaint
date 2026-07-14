@@ -513,3 +513,112 @@ a {
     padding: 19px;
   }
 }
+
+/* ===== SafeMaint 초기 구상 화면 통합 ===== */
+.center-screen,
+.auth-shell {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.auth-shell {
+  background: radial-gradient(circle at top, #e9f5f2 0, #f2f6f8 42%, #edf2f5 100%);
+}
+
+.auth-card {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  box-shadow: 0 20px 55px rgba(13, 40, 57, 0.12);
+  max-width: 430px;
+  padding: 38px;
+  text-align: center;
+  width: 100%;
+}
+
+.auth-card.wide { max-width: 520px; }
+.auth-icon { font-size: 52px; }
+.auth-card h1 { color: var(--navy); margin: 10px 0 6px; }
+.auth-card > p { color: var(--muted); margin: 0 0 24px; }
+.auth-form { display: grid; gap: 14px; text-align: left; }
+.auth-form label { color: #4e626f; display: grid; font-size: 13px; font-weight: 700; gap: 7px; }
+.auth-form input { background: #fbfcfd; border: 1px solid #ccd9df; border-radius: 10px; padding: 12px; }
+.checkbox-line { align-items: center; display: flex !important; font-weight: 500 !important; }
+.checkbox-line input { width: auto; }
+.secondary-button { background: white; border: 1px solid #b8c7cf; border-radius: 10px; color: var(--navy); cursor: pointer; font-weight: 700; margin-top: 10px; padding: 12px 16px; width: 100%; }
+.secondary-button.compact { margin: 0; width: auto; }
+.success-message { background: #ebf8f3; border-radius: 8px; color: #176a58; padding: 10px; }
+.prototype-note { font-size: 11px; margin-top: 18px !important; }
+
+.prototype-shell { min-height: 100vh; padding: 18px; position: relative; }
+.prototype-shell.font-small { font-size: 14px; }
+.prototype-shell.font-medium { font-size: 16px; }
+.prototype-shell.font-large { font-size: 19px; }
+.prototype-topbar { align-items: center; background: white; border: 2px solid #132b3b; border-radius: 12px 12px 0 0; display: grid; gap: 18px; grid-template-columns: auto 1fr auto; padding: 14px 18px; }
+.prototype-topbar > div:nth-child(2) { display: grid; }
+.prototype-topbar span { color: var(--muted); font-size: 0.78em; }
+.menu-button { background: white; border: 2px solid #111; border-radius: 4px; cursor: pointer; font-weight: 800; padding: 12px 16px; }
+.user-label { text-align: right; }
+.floating-menu { background: white; border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 14px 40px rgba(13, 40, 57, 0.18); display: grid; gap: 12px; left: 26px; padding: 18px; position: absolute; top: 85px; width: 270px; z-index: 10; }
+.floating-menu h2 { margin: 0; }
+.floating-menu label { display: grid; gap: 6px; }
+.floating-menu button { background: #f7fafb; border: 1px solid var(--line); border-radius: 9px; cursor: pointer; padding: 10px; text-align: left; }
+.floating-menu .logout-button { color: #a33636; }
+
+.visual-stage { align-items: center; background: linear-gradient(145deg, #fff, #f0f5f7); border: 2px solid #132b3b; border-top: 0; display: flex; flex-direction: column; justify-content: center; min-height: 330px; padding: 30px; text-align: center; }
+.visual-stage h1 { color: var(--navy); margin: 5px 0; }
+.visual-stage p { color: var(--muted); }
+.avatar-placeholder { font-size: 64px; }
+.result-badge { background: var(--teal-soft); border-radius: 999px; color: var(--teal); font-size: 12px; font-weight: 800; padding: 8px 12px; }
+.manual-row { align-items: center; background: white; border: 2px solid #132b3b; border-top: 0; display: grid; gap: 16px; grid-template-columns: minmax(220px, 340px) 1fr; padding: 14px 18px; }
+.file-card { background: var(--navy); border-radius: 9px; color: white; cursor: pointer; font-weight: 800; padding: 12px 16px; text-align: center; }
+.file-card input { display: none; }
+.manual-row > div { display: grid; }
+.manual-row span { color: var(--muted); font-size: 12px; }
+.chat-stage { background: white; border: 2px solid #132b3b; border-top: 0; }
+.chat-history { min-height: 250px; overflow-y: auto; padding: 22px; }
+.chat-empty { color: var(--muted); padding: 90px 0; text-align: center; }
+.chat-bubble { border-radius: 14px; display: grid; gap: 6px; margin: 9px 0; max-width: 76%; padding: 12px 14px; }
+.chat-bubble.user { background: #e9f1ff; margin-left: auto; }
+.chat-bubble.ai { background: #eaf6ef; }
+.chat-input-row { border-top: 2px solid #132b3b; display: grid; gap: 10px; grid-template-columns: 1fr 90px; padding: 12px; }
+.chat-input-row input { border: 1px solid #c4d1d8; border-radius: 9px; padding: 13px; }
+.chat-input-row button { background: var(--navy); border: 0; border-radius: 9px; color: white; cursor: pointer; font-weight: 800; }
+.assessment-drawer { background: white; border: 2px solid #132b3b; border-top: 0; padding: 0 18px 18px; }
+.assessment-drawer summary { color: var(--navy); cursor: pointer; font-weight: 800; padding: 16px 0; }
+.workspace-grid.embedded { grid-template-columns: minmax(380px, .85fr) minmax(440px, 1.15fr); }
+.safety-footer { background: #132b3b; color: white; font-size: 12px; padding: 12px; text-align: center; }
+
+.history-shell { margin: 0 auto; max-width: 1100px; min-height: 100vh; padding: 40px 24px; }
+.simple-header { align-items: center; display: flex; justify-content: space-between; }
+.simple-header h1 { color: var(--navy); margin: 4px 0 24px; }
+.history-list { display: grid; gap: 14px; }
+.history-card { background: white; border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+.history-card > div { display: flex; gap: 12px; justify-content: space-between; }
+.history-card span { color: var(--muted); font-size: 12px; }
+.history-card p { color: #536773; }
+
+@media (max-width: 900px) {
+  .prototype-topbar { grid-template-columns: auto 1fr; }
+  .user-label { display: none; }
+  .manual-row, .workspace-grid.embedded { grid-template-columns: 1fr; }
+  .visual-stage { min-height: 260px; }
+}
+
+@media (max-width: 620px) {
+  .prototype-shell { padding: 0; }
+  .prototype-topbar { border-radius: 0; padding: 12px; }
+  .prototype-topbar span { display: none; }
+  .menu-button { padding: 9px 11px; }
+  .floating-menu { left: 10px; top: 67px; width: calc(100% - 20px); }
+  .visual-stage { min-height: 230px; }
+  .manual-row { padding: 12px; }
+  .chat-history { min-height: 300px; }
+  .chat-input-row { grid-template-columns: 1fr 70px; }
+  .assessment-drawer { padding: 0 10px 10px; }
+  .form-grid { grid-template-columns: 1fr; }
+  .auth-card { padding: 26px 20px; }
+}
