@@ -246,7 +246,6 @@ function WorkspaceScreen({
   onHistory: () => void;
   onLogout: () => void;
 }) {
-  const [menuOpen, setMenuOpen] = useState(false);
   const [volume, setVolume] = useState(70);
   const [fontSize, setFontSize] = useState<FontSize>("medium");
   const [manualName, setManualName] = useState("");
@@ -318,21 +317,20 @@ function WorkspaceScreen({
   return (
     <main className={`prototype-shell ${fontClass}`}>
       <header className="prototype-topbar">
-        <button className="menu-button" onClick={() => setMenuOpen((value) => !value)}>☰ 메뉴</button>
+        <details className="menu-control">
+          <summary className="menu-button">☰ 메뉴</summary>
+          <aside className="floating-menu">
+            <h2>메뉴</h2>
+            <label>🔊 음량 <strong>{volume}</strong><input type="range" min="0" max="100" value={volume} onChange={(event) => setVolume(Number(event.target.value))} /></label>
+            <label>글자 크기<select value={fontSize} onChange={(event) => setFontSize(event.target.value as FontSize)}><option value="small">작게</option><option value="medium">보통</option><option value="large">크게</option></select></label>
+            <button onClick={onHistory}>📋 결과 기록 확인</button>
+            <button onClick={() => setMessages([])}>🧹 대화 초기화</button>
+            <button className="logout-button" onClick={onLogout}>↺ 게스트 세션 초기화</button>
+          </aside>
+        </details>
         <div><strong>SafeMaint AI</strong><span>작업 전 위험성평가 · 사고예방 · 근거 기반 안전 안내</span></div>
         <div className="user-label"><strong>{displayName}</strong> 님</div>
       </header>
-
-      {menuOpen && (
-        <aside className="floating-menu">
-          <h2>메뉴</h2>
-          <label>🔊 음량 <strong>{volume}</strong><input type="range" min="0" max="100" value={volume} onChange={(event) => setVolume(Number(event.target.value))} /></label>
-          <label>글자 크기<select value={fontSize} onChange={(event) => setFontSize(event.target.value as FontSize)}><option value="small">작게</option><option value="medium">보통</option><option value="large">크게</option></select></label>
-          <button onClick={onHistory}>📋 결과 기록 확인</button>
-          <button onClick={() => setMessages([])}>🧹 대화 초기화</button>
-          <button className="logout-button" onClick={onLogout}>🚪 로그아웃</button>
-        </aside>
-      )}
 
       <section className="visual-stage">
         <div className="avatar-placeholder">🧑‍🏭</div>
@@ -389,7 +387,27 @@ function WorkspaceScreen({
 }
 
 function AssessmentResult({ result }: { result: AssessmentResponse }) {
-  return <div className="result-content"><div className="notice">{result.disclaimer}</div><div className="hazard-list">{result.hazards.map((hazard) => <article className={`hazard-card ${hazard.risk_level}`} key={hazard.name}><div className="hazard-title"><div><span>{hazard.accident_type}</span><h3>{hazard.name}</h3></div><strong>{levelLabel[hazard.risk_level]} · {hazard.score}점</strong></div><ul>{hazard.safety_actions.map((action) => <li key={action}>{action}</li>)}</ul></article>)}</div><div className="checklist"><h3>작업 전 TBM 체크리스트</h3>{result.tbm_checklist.map((item) => <label key={item}><input type="checkbox" /><span>{item}</span></label>)}</div><div className="evidence-state"><strong>문서 근거</strong><span>{result.evidence_status === "connected" ? `${result.evidence.length}건 연결됨` : "하이브리드 RAG 연결 전"}</span></div></div>;
+  const mustStop = result.hazards.some((hazard) => hazard.risk_level === "high");
+  const decision = mustStop ? "작업 중지 및 안전관리자 확인 필요" : result.evidence_status === "connected" ? "안전관리자 검토 가능" : "근거 부족으로 판단 불가";
+
+  return <div className="result-content">
+    <section className={`work-decision ${mustStop ? "stop" : result.evidence_status === "connected" ? "review" : "unknown"}`}>
+      <span>작업 판단</span><strong>{decision}</strong>
+      <p>AI 결과는 작업 승인이 아닙니다. 현장 안전관리자의 최종 확인 전에는 작업을 시작하지 마세요.</p>
+    </section>
+    <div className="notice">{result.disclaimer}</div>
+    <div className="hazard-list">{result.hazards.map((hazard) => <article className={`hazard-card ${hazard.risk_level}`} key={hazard.name}><div className="hazard-title"><div><span>{hazard.accident_type}</span><h3>{hazard.name}</h3></div><strong>{levelLabel[hazard.risk_level]} · {hazard.score}점</strong></div><ul>{hazard.safety_actions.map((action) => <li key={action}>{action}</li>)}</ul></article>)}</div>
+    <div className="checklist"><h3>작업 전 TBM 체크리스트</h3>{result.tbm_checklist.map((item) => <label key={item}><input type="checkbox" /><span>{item}</span></label>)}</div>
+    <section className="evidence-section">
+      <div className="evidence-state"><strong>근거 문서 및 출처</strong><span>{result.evidence_status === "connected" ? `${result.evidence.length}건 연결됨` : "검색 근거가 연결되지 않았습니다"}</span></div>
+      {result.evidence.length > 0 ? <div className="evidence-list">{result.evidence.map((item) => <article className="evidence-card" key={item.document_id}>
+        <div><span>{item.source_type}</span><strong>{item.title}</strong><small>{item.page ? `${item.page}페이지` : "페이지 정보 없음"}</small></div>
+        <p>{item.excerpt}</p>
+        {item.url && <a href={item.url} target="_blank" rel="noreferrer">원문 확인</a>}
+      </article>)}</div> : <p className="evidence-warning">근거가 없으므로 작업 안전성을 판단할 수 없습니다. 문서를 등록하거나 안전관리자에게 확인해 주세요.</p>}
+    </section>
+    <section className="manager-review"><strong>안전관리자 확인사항</strong><label><input type="checkbox" /> 작업조건과 에너지 차단 여부를 현장에서 재확인했습니다.</label><label><input type="checkbox" /> 근거 문서와 필수 안전조치를 검토했습니다.</label></section>
+  </div>;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
