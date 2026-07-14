@@ -51,6 +51,31 @@ DB 테이블과 관계는 [docs/database.md](docs/database.md), 전처리 결과
 
 각 팀원은 Git, Docker Desktop, DBeaver를 설치하고 Docker Desktop을 실행한 상태에서 시작합니다. Docker DB는 팀원 PC마다 독립적으로 생성됩니다.
 
+### `feature/chan` 브랜치 받기
+
+현재 팀원 DB 온보딩 기능은 `feature/chan` 브랜치에 있습니다. 저장소를 새로 받는 팀원은 다음과 같이 clone합니다.
+
+```powershell
+git clone --branch feature/chan https://github.com/hyungchan-C/SafeMaint.git
+Set-Location SafeMaint
+```
+
+이미 저장소를 clone했지만 로컬에 `feature/chan`이 없는 팀원은 다음 명령으로 원격 브랜치를 연결합니다.
+
+```powershell
+git fetch origin
+git switch --track origin/feature/chan
+```
+
+이미 `feature/chan`을 사용 중인 팀원은 다음 명령으로 최신 내용을 받습니다.
+
+```powershell
+git switch feature/chan
+git pull origin feature/chan
+```
+
+Pull Request가 `main`에 병합된 이후에는 팀 공통 브랜치 정책에 따라 `main`에서 같은 온보딩 절차를 사용할 수 있습니다.
+
 ### 최초 실행
 
 저장소를 clone한 직후 프로젝트 루트에서 실행합니다.
@@ -170,7 +195,7 @@ Git으로 공유되는 것은 Docker Compose 설정, SQLAlchemy 모델, Alembic 
 - 실제 사업장 문서와 제조사 비공개 자료
 - 개인정보와 고객 데이터
 
-각 팀원은 같은 스키마와 seed를 갖지만, 직접 입력한 데이터는 다른 팀원에게 자동으로 전달되지 않습니다.
+각 팀원은 동일한 주요 테이블 12개와 `reference_codes` seed 25건을 갖지만, `assessments` 등에 직접 입력한 데이터는 다른 팀원에게 자동으로 전달되지 않습니다. 각자 `setup-dev.ps1` 실행 후 DBeaver로 자신의 로컬 DB에 접속해 확인합니다.
 
 ```text
 팀원 A → 팀원 A PC의 Docker DB
@@ -231,7 +256,7 @@ python -m alembic -c backend\alembic.ini upgrade head
 프로그램 업데이트 시 새 코드를 받은 뒤 같은 실행 명령을 사용하면 기존 named volume은 유지되고 새로운 마이그레이션과 seed만 적용됩니다.
 
 ```powershell
-git pull
+git pull origin feature/chan
 .\scripts\setup-dev.ps1
 .\scripts\verify-db.ps1
 ```
