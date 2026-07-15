@@ -49,6 +49,10 @@ SafeMaint/
 
 DB 테이블과 관계는 [docs/database.md](docs/database.md), 전처리 결과 입력 규격은 [docs/preprocessing-contract.md](docs/preprocessing-contract.md), 실행 방법은 [ai/README.md](ai/README.md)를 참고하세요.
 
+사고 데이터 샘플 적재와 BGE-M3/pgvector 실험은 운영·개발 DB가 아닌 이름이
+`_test`로 끝나는 격리 DB에서만 실행합니다. 상세 준비와 재실행 명령은
+[ai/README.md](ai/README.md)의 **BGE-M3 임베딩 실험**을 참고하세요.
+
 ## 팀원 로컬 DB 온보딩
 
 각 팀원은 Git, Docker Desktop, DBeaver를 설치하고 Docker Desktop을 실행한 상태에서 시작합니다. Docker DB는 팀원 PC마다 독립적으로 생성됩니다.
