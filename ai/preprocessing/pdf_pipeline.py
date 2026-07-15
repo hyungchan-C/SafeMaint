@@ -8,18 +8,24 @@
 문서별 매직넘버 튜닝 없이도 제조사가 다른 PDF에 일반적으로 적용하기 위함입니다.
 GPU(CUDA)가 있으면 자동으로 사용합니다.
 
+출력은 docs/preprocessing-contract.md 규격을 따르는 {"document": {...}, "chunks": [...]}
+입니다. document는 문서 레코드 1건, chunks는 청크 레코드 N건입니다.
+
 사용법:
     from pdf_pipeline import process_pdf
-    chunks = process_pdf(
+    result = process_pdf(
         pdf_path="파일경로.pdf",
         product_type="포토센서",
         model_name="BTS Series",
         manufacturer="오토닉스",  # 기본값이라 생략 가능
         exclude_sections=["외형치수도", "모터 특성도", "제품 특성 데이터"],
     )
+    result["document"]  # 문서 레코드 1건
+    result["chunks"]    # 청크 레코드 N건
 """
 
 import fitz  # PyMuPDF (스캔본 여부 판단용)
+import hashlib
 import re
 import json
 from pathlib import Path
@@ -94,11 +100,24 @@ def _table_item_to_block(item: TableItem) -> dict | None:
     return {"type": "table", "header": "\n".join(header_lines), "rows": body_lines}
 
 
+def _push_header(stack: list[tuple[int, str]], level: int, text: str) -> list[str]:
+    """
+    제목 스택에 (레벨, 텍스트)를 쌓아 상위 제목이 남도록 관리한다.
+    현재 레벨 이상인 항목은 하위 제목이 끝난 것으로 보고 스택에서 제거한다.
+    반환값은 최상위->현재 순서의 section_path (예: ["3. 안전", "3.2 전원 차단"]).
+    """
+    while stack and stack[-1][0] >= level:
+        stack.pop()
+    stack.append((level, text))
+    return [t for _, t in stack]
+
+
 def extract_sections_with_docling(pdf_path: str) -> list[dict]:
     """
     docling으로 문서를 파싱해 SECTION_HEADER/TITLE 라벨을 기준으로 섹션을 묶는다.
     각 섹션은 본문/표를 구분한 blocks 리스트를 가지며, 표는 나중에 행 단위로 청킹하기 위해
     header/rows를 분리해서 보관한다 (문장 중간이 아니라 표 중간에서 잘리는 것을 막기 위함).
+    section_path는 제목 레벨을 스택으로 추적해 상위 제목까지 포함한 경로로 남긴다.
     """
     do_ocr = _needs_ocr(pdf_path)
     if do_ocr:
@@ -108,7 +127,8 @@ def extract_sections_with_docling(pdf_path: str) -> list[dict]:
     doc = converter.convert(pdf_path).document
 
     sections = []
-    current_header = "머리말"
+    header_stack: list[tuple[int, str]] = []
+    current_section_path = ["머리말"]
     current_start_page = None
     buf_blocks: list[dict] = []
     buf_pages: list[int] = []
@@ -116,13 +136,14 @@ def extract_sections_with_docling(pdf_path: str) -> list[dict]:
     def flush():
         if buf_blocks:
             sections.append({
-                "header": current_header,
+                "header": current_section_path[-1],
+                "section_path": list(current_section_path),
                 "start_page": current_start_page or 1,
                 "end_page": buf_pages[-1] if buf_pages else (current_start_page or 1),
                 "blocks": buf_blocks,
             })
 
-    for item, _level in doc.iterate_items():
+    for item, level in doc.iterate_items():
         label = str(getattr(item, "label", "") or "")
         if label in _SKIP_LABELS:
             continue
@@ -131,7 +152,9 @@ def extract_sections_with_docling(pdf_path: str) -> list[dict]:
 
         if label in _HEADER_LABELS:
             flush()
-            current_header = (getattr(item, "text", "") or "").strip() or current_header
+            text = (getattr(item, "text", "") or "").strip()
+            if text:
+                current_section_path = _push_header(header_stack, level, text)
             current_start_page = page_no
             buf_blocks = []
             buf_pages = []
@@ -240,6 +263,7 @@ def extract_sections_with_pymupdf(pdf_path: str, header_min_size: float = 8.8) -
         if buf:
             sections.append({
                 "header": current_header,
+                "section_path": [current_header],
                 "start_page": current_start_page,
                 "end_page": buf[-1]["page"],
                 "blocks": [{"type": "text", "text": b["text"]} for b in buf],
@@ -419,7 +443,7 @@ def chunk_section(blocks: list[dict], chunk_size: int = 600, overlap: int = 100)
     return chunks
 
 
-# ---------- 5. 메타데이터 부여 + 전체 조립 ----------
+# ---------- 5. 메타데이터 부여 + 전체 조립 (docs/preprocessing-contract.md 규격) ----------
 def process_pdf(
     pdf_path: str,
     product_type: str,
@@ -428,14 +452,40 @@ def process_pdf(
     exclude_sections: list[str] = None,
     chunk_size: int = 600,
     overlap: int = 100,
-) -> list[dict]:
-    """PDF 한 개를 받아서 임베딩 직전 형태의 청크 리스트를 반환."""
+    source_type: str = "manual",
+    access_level: str = "restricted",
+) -> dict:
+    """
+    PDF 한 개를 받아서 docs/preprocessing-contract.md 규격의
+    {"document": {...}, "chunks": [...]}를 반환.
+
+    access_level 기본값은 "restricted"로 둔다. 제조사 매뉴얼의 재배포 조건이
+    확인되기 전까지는 공개로 단정하지 않기 위함 (architecture.md 데이터 계층 정책 참고).
+    """
     if exclude_sections is None:
         exclude_sections = ["외형치수도", "모터 특성도", "제품 특성 데이터", "판넬 가공 치수도",
                              "모터특성도", "TYPICAL", "검출 영역", "검출 재질별",
                              "Table of Content", "목차", "차례"]
 
     doc_name = Path(pdf_path).stem
+    external_id = f"{source_type}:{manufacturer}:{model_name}:{doc_name}"
+    file_sha256 = hashlib.sha256(Path(pdf_path).read_bytes()).hexdigest()
+
+    doc_metadata = {
+        "manufacturer": manufacturer,
+        "model_number": model_name,
+        "product_type": product_type,
+    }
+
+    document = {
+        "external_id": external_id,
+        "title": doc_name,
+        "source_type": source_type,
+        "publisher": manufacturer,
+        "access_level": access_level,
+        "file_sha256": file_sha256,
+        "metadata": doc_metadata,
+    }
 
     sections = extract_sections(pdf_path)
     for s in sections:
@@ -443,26 +493,30 @@ def process_pdf(
 
     sections = filter_sections(sections, exclude_sections)
 
-    all_chunks = []
+    chunks = []
     for s in sections:
         text_chunks = chunk_section(s["blocks"], chunk_size, overlap)
-        for idx, chunk in enumerate(text_chunks):
-            if not chunk.strip():
+        if s["start_page"] == s["end_page"]:
+            page_fields = {"page_number": s["start_page"]}
+        else:
+            page_fields = {"page_start": s["start_page"], "page_end": s["end_page"]}
+
+        for chunk in text_chunks:
+            content = chunk.strip()
+            if not content:
                 continue
-            all_chunks.append({
-                "chunk_id": f"{doc_name}_{s['header']}_{idx}".replace(" ", "_"),
-                "text": chunk,
-                "metadata": {
-                    "문서명": doc_name,
-                    "제조사": manufacturer,
-                    "제품군": product_type,
-                    "모델명": model_name,
-                    "챕터": s["header"],
-                    "페이지": f"{s['start_page']}-{s['end_page']}",
-                },
+            chunks.append({
+                "document_external_id": external_id,
+                "chunk_index": len(chunks),
+                **page_fields,
+                "section_path": s["section_path"],
+                "content": content,
+                "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "metadata": doc_metadata,
+                "embedding_status": "pending",
             })
 
-    return all_chunks
+    return {"document": document, "chunks": chunks}
 
 
 if __name__ == "__main__":

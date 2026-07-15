@@ -41,24 +41,34 @@ files = [
     },
 ]
 
+all_documents = []
 all_chunks = []
 for f in files:
-    chunks = process_pdf(
+    result = process_pdf(
         pdf_path=f["path"],
         product_type=f["product_type"],
         model_name=f["model_name"],
     )
-    print(f"{f['model_name']}: {len(chunks)}개 청크 생성")
-    all_chunks.extend(chunks)
+    print(f"{f['model_name']}: {len(result['chunks'])}개 청크 생성")
+    all_documents.append(result["document"])
+    all_chunks.extend(result["chunks"])
 
 print(f"\n총 청크 수: {len(all_chunks)}")
 
-# 결과 저장
+# 결과 저장 (docs/preprocessing-contract.md의 JSONL 교환 규격)
 os.makedirs(PROCESSED_DIR, exist_ok=True)
-out_path = os.path.join(PROCESSED_DIR, "autonics_chunks.json")
-with open(out_path, "w", encoding="utf-8") as fp:
-    json.dump(all_chunks, fp, ensure_ascii=False, indent=2)
-print(f"저장 완료: {out_path}")
+
+documents_path = os.path.join(PROCESSED_DIR, "autonics_documents.jsonl")
+with open(documents_path, "w", encoding="utf-8") as fp:
+    for doc in all_documents:
+        fp.write(json.dumps(doc, ensure_ascii=False) + "\n")
+print(f"저장 완료: {documents_path}")
+
+chunks_path = os.path.join(PROCESSED_DIR, "autonics_chunks.jsonl")
+with open(chunks_path, "w", encoding="utf-8") as fp:
+    for chunk in all_chunks:
+        fp.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+print(f"저장 완료: {chunks_path}")
 
 # 샘플 3개 미리보기
 print("\n=== 샘플 청크 미리보기 ===")
