@@ -540,12 +540,19 @@ a {
 }
 
 .auth-card.wide { max-width: 520px; }
+.auth-card.signup-card { max-width: 760px; }
 .auth-icon { font-size: 52px; }
 .auth-card h1 { color: var(--navy); margin: 10px 0 6px; }
 .auth-card > p { color: var(--muted); margin: 0 0 24px; }
 .auth-form { display: grid; gap: 14px; text-align: left; }
 .auth-form label { color: #4e626f; display: grid; font-size: 13px; font-weight: 700; gap: 7px; }
 .auth-form input { background: #fbfcfd; border: 1px solid #ccd9df; border-radius: 10px; padding: 12px; }
+.auth-link { display: block; text-align: center; text-decoration: none; }
+.signup-grid { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.signup-grid label:last-child { grid-column: 1 / -1; }
+.required-mark, .optional-mark { display: inline; font-size: 0.78em; font-weight: 600; margin-left: 4px; }
+.required-mark { color: #a33636; }
+.optional-mark { color: var(--muted); }
 .checkbox-line { align-items: center; display: flex !important; font-weight: 500 !important; }
 .checkbox-line input { width: auto; }
 .secondary-button { background: white; border: 1px solid #b8c7cf; border-radius: 10px; color: var(--navy); cursor: pointer; font-weight: 700; margin-top: 10px; padding: 12px 16px; width: 100%; }
@@ -631,6 +638,8 @@ a {
 }
 
 @media (max-width: 620px) {
+  .signup-grid { grid-template-columns: 1fr; }
+  .signup-grid label:last-child { grid-column: auto; }
   .prototype-shell { padding: 0; }
   .prototype-topbar { border-radius: 0; padding: 12px; }
   .prototype-topbar span { display: none; }

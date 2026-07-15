@@ -8,6 +8,7 @@ from app.db.models.asset import Component, Equipment, Site
 from app.db.models.audit import AuditEvent
 from app.db.models.document import Document, DocumentChunk
 from app.db.models.reference import ReferenceCode
+from app.db.models.user import User
 
 __all__ = [
     "Assessment",
@@ -21,4 +22,5 @@ __all__ = [
     "Equipment",
     "ReferenceCode",
     "Site",
+    "User",
 ]

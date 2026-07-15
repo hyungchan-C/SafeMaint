@@ -76,7 +76,7 @@ git pull origin feature/chan
 
 Pull Request가 `main`에 병합된 이후에는 팀 공통 브랜치 정책에 따라 `main`에서 같은 온보딩 절차를 사용할 수 있습니다.
 
-### 최초 실행
+### 권장 실행: DB·백엔드·프론트엔드 전체 Docker
 
 저장소를 clone한 직후 프로젝트 루트에서 실행합니다.
 
@@ -95,7 +95,9 @@ POSTGRES_PORT=5432
 DATABASE_URL=postgresql+psycopg://safemaint:change-this-local-password@db:5432/safemaint
 ```
 
-설정이 끝나면 다음 명령 하나로 전체 개발 환경을 실행합니다.
+설정이 끝나면 로컬에서 실행 중인 `npm run dev`와 `uvicorn`을 먼저 `Ctrl+C`로 종료합니다. 로컬 프로세스가 3000·8000 포트를 사용 중이면 Docker의 `frontend`·`backend` 컨테이너가 `Created` 상태에 머물며 브라우저에는 `Failed to fetch`가 표시됩니다.
+
+이후 다음 명령 하나로 DB, migration, seed, backend, frontend를 모두 Docker에서 실행합니다.
 
 ```powershell
 .\scripts\setup-dev.ps1
@@ -112,6 +114,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ```powershell
 docker compose `
+  --env-file .env `
   -f docker-compose.yml `
   -f docker-compose.dev.yml `
   up -d --build
@@ -126,6 +129,21 @@ db healthy → migrate 종료 코드 0 → seed 종료 코드 0 → backend heal
 - 대시보드: <http://localhost:3000>
 - API 문서: <http://localhost:8000/docs>
 - 준비 상태: <http://localhost:8000/health/ready>
+
+실행 상태와 로그는 다음 명령으로 확인합니다. `db`와 `backend`는 `healthy`, `frontend`는 `running`이어야 합니다.
+
+```powershell
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml ps -a
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml logs --tail 100 backend frontend
+```
+
+종료할 때는 DB 볼륨을 유지하는 다음 명령을 사용합니다.
+
+```powershell
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml down
+```
+
+> `down -v`는 PostgreSQL 데이터를 삭제하므로 사용하지 마세요.
 
 전체 DB 상태를 다시 확인할 때는 다음 명령을 사용합니다.
 
@@ -207,18 +225,18 @@ Git으로 공유되는 것은 Docker Compose 설정, SQLAlchemy 모델, Alembic 
 
 > `docker compose down -v`와 `docker volume rm`은 DB 데이터를 삭제할 수 있으므로 사용하지 마세요. 설정·검증 스크립트도 이 명령을 실행하지 않습니다.
 
-## 백엔드 로컬 개발
+## 선택 실행: DB는 Docker, 백엔드 앱은 로컬
 
 필수 환경은 Python 3.13 이상, Node.js 22.13 이상입니다.
 
-DB만 Docker에서 실행하고 FastAPI는 로컬에서 실행하는 방법입니다. `.env`의 DB 비밀번호와 아래 `DATABASE_URL` 비밀번호를 일치시키세요.
+백엔드 코드를 `--reload`로 개발할 때만 사용하는 방식입니다. 전체 Docker 방식과 동시에 실행하면 8000 포트가 충돌합니다. 먼저 전체 Compose를 종료한 후 DB만 시작하세요. `.env`의 DB 비밀번호와 PowerShell의 `DATABASE_URL` 비밀번호를 일치시켜야 합니다.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r backend\requirements-dev.txt
 
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml up -d db
 $env:DATABASE_URL="postgresql+psycopg://safemaint:설정한비밀번호@127.0.0.1:5432/safemaint"
 python -m alembic -c backend\alembic.ini upgrade head
 $env:PYTHONPATH="backend"
@@ -232,9 +250,15 @@ python -m uvicorn app.main:app --app-dir backend --reload
 
 SQLAlchemy는 현재 규칙 엔진·검색 서비스가 동기 인터페이스이고 초기 MVP 트래픽이 크지 않다는 점을 기준으로 동기 세션을 사용합니다. 구현 복잡도와 트랜잭션 경계를 단순하게 유지하고, 실제 부하 측정에서 DB 대기 병목이 확인될 때 비동기 전환을 검토합니다.
 
-## 프론트엔드 로컬 개발
+## 선택 실행: 프론트엔드 앱은 로컬
 
-새 터미널에서 실행합니다.
+프론트엔드 코드를 Hot Reload로 개발할 때만 사용합니다. Docker의 `frontend`가 실행 중이면 3000 포트가 충돌하므로 먼저 해당 컨테이너를 중지합니다. 백엔드는 Docker 또는 로컬 방식 중 하나로 8000 포트에서 실행되어 있어야 합니다.
+
+```powershell
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml stop frontend
+```
+
+그다음 새 터미널에서 실행합니다.
 
 ```powershell
 Set-Location frontend
@@ -243,6 +267,18 @@ npm.cmd run dev
 ```
 
 - 대시보드: <http://localhost:3000>
+- 회원가입: <http://localhost:3000/signup>
+
+### `Failed to fetch` 점검
+
+회원가입·로그인에서 `Failed to fetch`가 나오면 백엔드가 실행되지 않았거나 8000 포트가 다른 로컬 프로세스와 충돌한 상태입니다.
+
+```powershell
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/health/ready
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml ps -a
+```
+
+정상 응답은 HTTP 200과 `"database":"connected"`입니다. `backend`가 `Created` 상태라면 로컬 `uvicorn`을 `Ctrl+C`로 종료하고 `setup-dev.ps1`을 다시 실행하세요.
 
 ## DB 마이그레이션과 업데이트
 
@@ -267,6 +303,8 @@ git pull origin feature/chan
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
+| `POST` | `/api/v1/auth/register` | 사원정보 기반 회원가입 |
+| `POST` | `/api/v1/auth/login` | 사원번호·비밀번호 로그인 |
 | `POST` | `/api/v1/assessments/preview` | DB 저장 없는 기존 규칙 기반 미리보기 |
 | `POST` | `/api/v1/assessments` | 평가·위험요인·체크리스트·감사 이벤트 트랜잭션 저장 |
 | `GET` | `/api/v1/assessments/{id}` | 저장된 평가 조회 |

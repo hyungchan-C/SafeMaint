@@ -3,16 +3,15 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import type { AssessmentResponse } from "@/types/assessment";
+import { getApiBaseUrl } from "@/lib/api";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
-
-type PageMode = "login" | "signup" | "workspace" | "history";
+type PageMode = "login" | "workspace" | "history";
 type FontSize = "small" | "medium" | "large";
 
 type LocalUser = {
+  id: string;
   username: string;
   displayName: string;
-  password: string;
 };
 
 type HistoryItem = {
@@ -54,17 +53,27 @@ function readStorage<T>(key: string, fallback: T): T {
   }
 }
 
-function writeStorage<T>(key: string, value: T) {
-  window.localStorage.setItem(key, JSON.stringify(value));
+function writeStorage<T>(key: string, value: T): boolean {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeStorage(key: string) {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // Authentication remains usable for the current tab when storage is blocked.
+  }
 }
 
 export default function HomePage() {
-  // Temporary prototype mode: open the workspace without requiring an account.
-  // Keep the authentication screens in place so backend authentication can be
-  // connected later without rebuilding the UI flow.
-  const [page, setPage] = useState<PageMode>("workspace");
-  const [username, setUsername] = useState("guest");
-  const [displayName, setDisplayName] = useState("게스트");
+  const [page, setPage] = useState<PageMode>("login");
+  const [username, setUsername] = useState("");
+  const [displayName, setDisplayName] = useState("");
 
   useEffect(() => {
     const session = readStorage<{ username: string; displayName: string } | null>(STORAGE_KEYS.session, null);
@@ -83,18 +92,14 @@ export default function HomePage() {
   }
 
   function handleLogout() {
-    window.localStorage.removeItem(STORAGE_KEYS.session);
-    setUsername("guest");
-    setDisplayName("게스트");
-    setPage("workspace");
+    removeStorage(STORAGE_KEYS.session);
+    setUsername("");
+    setDisplayName("");
+    setPage("login");
   }
 
   if (page === "login") {
-    return <LoginScreen onLogin={handleLogin} onSignup={() => setPage("signup")} />;
-  }
-
-  if (page === "signup") {
-    return <SignupScreen onComplete={() => setPage("login")} onBack={() => setPage("login")} />;
+    return <LoginScreen onLogin={handleLogin} />;
   }
 
   if (page === "history") {
@@ -111,20 +116,33 @@ export default function HomePage() {
   );
 }
 
-function LoginScreen({ onLogin, onSignup }: { onLogin: (user: LocalUser) => void; onSignup: () => void }) {
+function LoginScreen({ onLogin }: { onLogin: (user: LocalUser) => void }) {
   const [loginId, setLoginId] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  const [isLoading, setIsLoading] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const users = readStorage<LocalUser[]>(STORAGE_KEYS.users, []);
-    const user = users.find((item) => item.username === loginId && item.password === password);
-    if (!user) {
-      setError("아이디 또는 비밀번호가 올바르지 않습니다.");
-      return;
+    setError("");
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ employee_number: loginId, password }),
+      });
+      const payload = await response.json() as { id?: string; employee_number?: string; name?: string; detail?: string };
+      if (!response.ok || !payload.id || !payload.employee_number || !payload.name) {
+        throw new Error(payload.detail || "로그인에 실패했습니다.");
+      }
+      onLogin({ id: payload.id, username: payload.employee_number, displayName: payload.name });
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.");
+    } finally {
+      setIsLoading(false);
     }
-    onLogin(user);
   }
 
   return (
@@ -135,7 +153,7 @@ function LoginScreen({ onLogin, onSignup }: { onLogin: (user: LocalUser) => void
         <p>제조설비 정비작업 안전관리 Assistant</p>
         <form onSubmit={submit} className="auth-form">
           <label>
-            아이디
+            사원번호(ID)
             <input value={loginId} onChange={(event) => setLoginId(event.target.value)} required />
           </label>
           <label>
@@ -143,10 +161,10 @@ function LoginScreen({ onLogin, onSignup }: { onLogin: (user: LocalUser) => void
             <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required />
           </label>
           {error && <p className="error-message">{error}</p>}
-          <button className="primary-button" type="submit">로그인</button>
+          <button className="primary-button" disabled={isLoading} type="submit">{isLoading ? "로그인 중..." : "로그인"}</button>
         </form>
-        <button className="secondary-button" onClick={onSignup}>회원가입</button>
-        <p className="prototype-note">초기 프로토타입에서는 브라우저 저장소로 계정 흐름을 확인합니다.</p>
+        <a className="secondary-button auth-link" href="/signup">회원가입</a>
+        <p className="prototype-note">계정은 SafeMaint 데이터베이스에 안전하게 저장됩니다.</p>
       </section>
     </main>
   );
@@ -161,9 +179,10 @@ function SignupScreen({ onComplete, onBack }: { onComplete: () => void; onBack: 
   const [message, setMessage] = useState("");
   const [isError, setIsError] = useState(false);
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  const [isLoading, setIsLoading] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const users = readStorage<LocalUser[]>(STORAGE_KEYS.users, []);
     if (signupId.length < 4 || password.length < 8) {
       setMessage("아이디는 4자 이상, 비밀번호는 8자 이상 입력해 주세요.");
       setIsError(true);
@@ -179,18 +198,24 @@ function SignupScreen({ onComplete, onBack }: { onComplete: () => void; onBack: 
       setIsError(true);
       return;
     }
-    if (users.some((item) => item.username === signupId)) {
-      setMessage("이미 사용 중인 아이디입니다.");
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: signupId, display_name: name, password }),
+      });
+      const payload = await response.json() as { detail?: string };
+      if (!response.ok) throw new Error(payload.detail || "회원가입에 실패했습니다.");
+      setMessage("회원가입이 완료되었습니다. 로그인 화면으로 이동합니다.");
+      setIsError(false);
+      window.setTimeout(onComplete, 700);
+    } catch (requestError) {
+      setMessage(requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.");
       setIsError(true);
-      return;
+    } finally {
+      setIsLoading(false);
     }
-    writeStorage(STORAGE_KEYS.users, [
-      ...users,
-      { username: signupId, displayName: name || signupId, password },
-    ]);
-    setMessage("회원가입이 완료되었습니다. 로그인 화면으로 이동합니다.");
-    setIsError(false);
-    window.setTimeout(onComplete, 600);
   }
 
   return (
@@ -204,7 +229,7 @@ function SignupScreen({ onComplete, onBack }: { onComplete: () => void; onBack: 
           <label>비밀번호 확인<input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} required /></label>
           <label className="checkbox-line"><input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} />서비스 이용 및 개인정보 처리 안내에 동의합니다.</label>
           {message && <p className={isError ? "error-message" : "success-message"}>{message}</p>}
-          <button className="primary-button" type="submit">가입하기</button>
+          <button className="primary-button" disabled={isLoading} type="submit">{isLoading ? "가입 중..." : "가입하기"}</button>
         </form>
         <button className="secondary-button" onClick={onBack}>로그인 화면으로</button>
       </section>
@@ -282,7 +307,7 @@ function WorkspaceScreen({
     setIsLoading(true);
     setError("");
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/assessments/preview`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/assessments/preview`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...form, manufacturer: form.manufacturer || null, energy_sources: form.energy_source ? [form.energy_source] : [] }),
