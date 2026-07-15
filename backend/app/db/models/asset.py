@@ -28,6 +28,9 @@ class Site(UuidPrimaryKeyMixin, TimestampMixin, Base):
     equipment: Mapped[list["Equipment"]] = relationship(
         back_populates="site", passive_deletes=True
     )
+    user_assignments: Mapped[list["UserSite"]] = relationship(
+        back_populates="site", passive_deletes=True
+    )
 
 
 class Equipment(UuidPrimaryKeyMixin, TimestampMixin, Base):

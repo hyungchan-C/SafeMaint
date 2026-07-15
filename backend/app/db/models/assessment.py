@@ -47,6 +47,16 @@ class Assessment(UuidPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("components.id", ondelete="RESTRICT"),
         index=True,
     )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        index=True,
+    )
     site_name: Mapped[str] = mapped_column(String(200), nullable=False)
     equipment_name: Mapped[str] = mapped_column(String(200), nullable=False)
     component_name: Mapped[str | None] = mapped_column(String(200))
@@ -66,6 +76,7 @@ class Assessment(UuidPrimaryKeyMixin, TimestampMixin, Base):
     request_snapshot: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False
     )
+    # TODO: Remove after legacy actor strings are backfilled to user UUIDs.
     reviewed_by: Mapped[str | None] = mapped_column(String(200))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -86,6 +97,12 @@ class Assessment(UuidPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="AssessmentEvidence.retrieval_rank",
+    )
+    created_by_user: Mapped["User | None"] = relationship(
+        foreign_keys=[created_by_user_id]
+    )
+    reviewed_by_user: Mapped["User | None"] = relationship(
+        foreign_keys=[reviewed_by_user_id]
     )
 
 
@@ -142,10 +159,17 @@ class ChecklistItem(UuidPrimaryKeyMixin, TimestampMixin, Base):
     is_completed: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false"), index=True
     )
+    # TODO: Remove after legacy actor strings are backfilled to user UUIDs.
     completed_by: Mapped[str | None] = mapped_column(String(200))
+    completed_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        index=True,
+    )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     assessment: Mapped[Assessment] = relationship(back_populates="checklist_items")
+    completed_by_user: Mapped["User | None"] = relationship()
 
 
 class AssessmentEvidence(UuidPrimaryKeyMixin, TimestampMixin, Base):

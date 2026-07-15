@@ -6,7 +6,7 @@
 - 모든 운영 스키마 변경은 버전이 있는 Alembic 마이그레이션으로 적용합니다.
 - UUID 기본키와 timezone 포함 시각을 사용합니다.
 - 평가 당시 입력, 규칙 버전, likelihood, severity, score, risk level을 저장해 이후 규칙 변경이 과거 결과를 바꾸지 않게 합니다.
-- 초기 seed에는 기준 코드만 포함하며 가짜 사업장이나 개인정보를 넣지 않습니다.
+- 초기 seed에는 기준 코드와 역할만 포함하며 가짜 사용자, 비밀번호, 사업장이나 개인정보를 넣지 않습니다.
 - Docker named volume은 설치와 업데이트 사이에 계속 유지합니다.
 
 ## 테이블과 관계
@@ -22,6 +22,14 @@ sites 1 ── N equipment 1 ── N components
 
 reference_codes  (평가 상태·위험등급·사고유형·작업유형·에너지원)
 audit_events     (평가 생성 등 변경 이력)
+
+users N ── N roles       (user_roles)
+  │
+  └──── N ── N sites     (user_sites, 사용자당 주 사업장 최대 1개)
+  │
+  ├──── assessments.created_by_user_id / reviewed_by_user_id
+  ├──── checklist_items.completed_by_user_id
+  └──── audit_events.actor_user_id
 ```
 
 | 테이블 | 주요 내용 |
@@ -37,6 +45,38 @@ audit_events     (평가 생성 등 변경 이력)
 | `assessment_evidence` | 평가와 검색 청크 사이의 순위·점수·사용 여부 |
 | `reference_codes` | 멱등 seed 대상 최소 기준 코드 |
 | `audit_events` | append-only 방식으로 사용할 변경 이력 |
+| `users` | UUID 내부 식별자, 사원번호 로그인 ID, 인증 제공자와 계정 상태 |
+| `roles` | `worker`, `safety_manager`, `admin` 역할 seed |
+| `user_roles` | 사용자와 역할 N:M 배정 및 배정자·시각 |
+| `user_sites` | 사용자와 접근 가능 사업장 N:M 배정 및 주 사업장 표시 |
+
+`users` 컬럼은 다음과 같습니다.
+
+| 컬럼 | 타입·규칙 |
+|---|---|
+| `id` | UUID PK, `gen_random_uuid()` |
+| `employee_number` | `VARCHAR(30)`, 로그인 ID, NOT NULL, UNIQUE |
+| `name` | `VARCHAR(100)`, NOT NULL |
+| `email` | `VARCHAR(255)`, NULL 허용, 값이 있으면 대소문자 무시 UNIQUE |
+| `department`, `job_title` | 각각 `VARCHAR(100)`, NULL 허용 |
+| `auth_provider` | `local`, `ldap`, `oidc`, 기본 `local` |
+| `password_hash` | `VARCHAR(255)`, 로컬 인증이면 필수, 평문 저장 금지 |
+| `status` | `active`, `locked`, `retired`, 기본 `active` |
+| `failed_login_count` | 0 이상 정수, 기본 0 |
+| `locked_until`, `last_login_at` | timezone 포함 시각, NULL 허용 |
+| `password_changed_at`, `deactivated_at` | timezone 포함 시각, NULL 허용 |
+| `created_at`, `updated_at` | timezone 포함 시각, NOT NULL, 기본 `now()` |
+
+## 회원·권한 무결성 원칙
+
+- 사원번호는 숫자형이 아닌 문자열로 저장해 앞자리 `0`을 보존하고, 공백 제거·대문자 정규화 상태만 DB가 허용합니다.
+- 이메일은 NULL을 허용하되 값이 있으면 대소문자를 무시한 부분 UNIQUE 인덱스로 중복을 막습니다.
+- 로컬 인증 사용자는 비어 있지 않은 `password_hash`가 필수이며 평문 비밀번호는 어떤 테이블에도 저장하지 않습니다.
+- 계정은 `active`, `locked`, `retired` 상태로 관리하고 업무 이력 때문에 사용자를 물리 삭제하지 않습니다.
+- 동일 역할·동일 사업장은 사용자에게 중복 배정할 수 없고 주 사업장은 사용자당 최대 하나입니다.
+- 역할과 사업장 권한의 부여·회수는 후속 서비스 계층에서 `audit_events`에 남깁니다.
+- 기존 작성자 문자열 컬럼은 과거 데이터 호환용으로 유지하고 UUID 참조 전환 완료 후 별도 마이그레이션에서 정리합니다.
+- 현재는 고객사별 독립 설치 구조입니다. 멀티테넌트 전환 시 `organizations`와 `organization_id` 범위를 먼저 설계합니다.
 
 ## 임베딩 후속 전략
 
@@ -73,7 +113,7 @@ $env:PYTHONPATH="backend"
 .\.venv\Scripts\python.exe -m pytest backend\tests\test_database_integration.py
 ```
 
-테스트는 pgvector 확장, Alembic head, 주요 테이블·제약조건, seed 멱등성, 평가 저장·재조회, DB 대시보드 집계를 확인합니다.
+테스트는 pgvector 확장, Alembic head, 주요 테이블·제약조건, 기준 코드·역할 seed 멱등성, 사용자 식별자와 권한 배정 무결성, 평가 저장·재조회, DB 대시보드 집계를 확인합니다.
 
 ## 데이터 보존 주의
 

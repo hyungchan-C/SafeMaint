@@ -183,7 +183,17 @@ SELECT category, COUNT(*)
 FROM reference_codes
 GROUP BY category
 ORDER BY category;
+
+SELECT code, name, is_active
+FROM roles
+ORDER BY code;
+
+SELECT employee_number, name, department, status
+FROM users
+ORDER BY employee_number;
 ```
+
+최초 seed 후 `roles`에는 `admin`, `safety_manager`, `worker` 3건이 보이고 `users`는 비어 있는 것이 정상입니다. 실제 사용자와 비밀번호는 seed나 Git으로 배포하지 않습니다.
 
 ### 팀원별 DB와 Git 공유 범위
 
@@ -195,7 +205,7 @@ Git으로 공유되는 것은 Docker Compose 설정, SQLAlchemy 모델, Alembic 
 - 실제 사업장 문서와 제조사 비공개 자료
 - 개인정보와 고객 데이터
 
-각 팀원은 동일한 주요 테이블 12개와 `reference_codes` seed 25건을 갖지만, `assessments` 등에 직접 입력한 데이터는 다른 팀원에게 자동으로 전달되지 않습니다. 각자 `setup-dev.ps1` 실행 후 DBeaver로 자신의 로컬 DB에 접속해 확인합니다.
+각 팀원은 동일한 주요 테이블 16개, `reference_codes` seed 25건과 역할 seed 3건을 갖지만, `users`나 `assessments` 등에 직접 입력한 데이터는 다른 팀원에게 자동으로 전달되지 않습니다. 각자 `setup-dev.ps1` 실행 후 DBeaver로 자신의 로컬 DB에 접속해 확인합니다.
 
 ```text
 팀원 A → 팀원 A PC의 Docker DB
@@ -206,6 +216,27 @@ Git으로 공유되는 것은 Docker Compose 설정, SQLAlchemy 모델, Alembic 
 팀 전체가 동일한 실제 데이터를 확인해야 할 때는 로컬 DB가 아니라 접근권한과 백업 정책이 마련된 별도 staging DB를 사용해야 합니다.
 
 > `docker compose down -v`와 `docker volume rm`은 DB 데이터를 삭제할 수 있으므로 사용하지 마세요. 설정·검증 스크립트도 이 명령을 실행하지 않습니다.
+
+## 사원번호 기반 회원·권한 DB
+
+이번 단계는 회원과 권한을 저장할 DB 기반만 구현합니다. 회원가입·로그인 API, 비밀번호 해시 생성 서비스, JWT·세션 발급과 화면은 후속 단계에서 구현합니다.
+
+- `users.id`: 다른 테이블이 참조하는 내부 UUID 기본키
+- `users.employee_number`: 실제 로그인 ID로 사용할 최대 30자의 문자열. 앞자리 `0`을 보존하며 입력 시 공백 제거·대문자 정규화 후 저장합니다.
+- `users.auth_provider`: `local`, `ldap`, `oidc` 중 하나
+- `users.status`: `active`, `locked`, `retired` 중 하나. 이력 보존을 위해 퇴사자는 삭제하지 않고 `retired`로 전환합니다.
+- `users.password_hash`: 로컬 인증 사용자에게만 필수입니다. 평문 비밀번호는 DB, 로그, API 응답과 Git에 저장하지 않습니다.
+- `roles`: `worker`, `safety_manager`, `admin`을 멱등 seed로 관리합니다.
+- `user_roles`: 사용자와 역할의 N:M 관계이며 같은 역할을 중복 부여할 수 없습니다.
+- `user_sites`: 사용자와 사업장의 N:M 접근 관계이며 사용자당 주 사업장은 최대 하나입니다.
+
+이메일은 값이 있을 때 대소문자를 무시하고 유일해야 합니다. 사용자·역할·사업장 권한은 물리 삭제보다 비활성화와 이력 보존을 우선하며, 향후 권한 부여·회수 API는 `audit_events`에 행위자와 변경 내용을 남겨야 합니다.
+
+`assessments.created_by_user_id`, `assessments.reviewed_by_user_id`, `checklist_items.completed_by_user_id`, `audit_events.actor_user_id`는 새 사용자 UUID를 선택적으로 참조합니다. 기존 `reviewed_by`, `completed_by`, `actor_id` 문자열은 과거 데이터 호환을 위해 이번 단계에서 유지하고 애플리케이션 전환이 끝난 뒤 별도 마이그레이션으로 정리합니다.
+
+현재 구조는 한 고객사 내부 설치를 기준으로 합니다. 여러 고객사를 한 DB에 함께 저장하는 SaaS 구조로 전환할 때는 `organizations`와 각 업무 테이블의 `organization_id`를 별도 마이그레이션으로 추가해야 합니다.
+
+백엔드 인증의 다음 단계는 Argon2id 비밀번호 해시 서비스, 관리자 전용 계정 생성·퇴직 처리 API, 로그인 실패 잠금, JWT access/refresh 토큰과 회수 정책, 역할·사업장 범위 인가, 권한 변경 감사 이벤트 구현입니다. 이 기능이 준비되기 전에는 DBeaver에서 임의로 평문 비밀번호나 기본 관리자 계정을 넣지 않습니다.
 
 ## 백엔드 로컬 개발
 
