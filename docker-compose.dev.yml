@@ -1,0 +1,12 @@
+services:
+  db:
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+
+  backend:
+    environment:
+      APP_ENV: development
+
+volumes:
+  safemaint_postgres_data:
+    name: ${POSTGRES_VOLUME_NAME:-safemaint_postgres_dev_data}

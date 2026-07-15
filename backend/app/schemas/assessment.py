@@ -1,6 +1,7 @@
 from datetime import datetime
 from enum import Enum
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -11,7 +12,17 @@ class RiskLevel(str, Enum):
     HIGH = "high"
 
 
+class AssessmentStatus(str, Enum):
+    DRAFT = "draft"
+    PENDING_REVIEW = "pending_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 class AssessmentRequest(BaseModel):
+    site_id: UUID | None = None
+    equipment_id: UUID | None = None
+    component_id: UUID | None = None
     site_name: str = Field(min_length=1, max_length=100)
     equipment_name: str = Field(min_length=1, max_length=100)
     manufacturer: str | None = Field(default=None, max_length=100)
@@ -43,7 +54,7 @@ class EvidenceItem(BaseModel):
 
 class AssessmentResponse(BaseModel):
     assessment_id: str
-    status: Literal["draft"]
+    status: AssessmentStatus
     created_at: datetime
     hazards: list[HazardItem]
     tbm_checklist: list[str]

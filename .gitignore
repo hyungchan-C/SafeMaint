@@ -31,9 +31,13 @@ yarn-error.log*
 Thumbs.db
 
 # Local data and model artifacts
-data/raw/
-data/processed/
-models/
-uploads/
+/data/raw/
+/data/processed/
+/전처리된데이터/
+/models/
+/uploads/
+/backups/
+*.backup
+*.dump
 *.gguf
 *.safetensors
