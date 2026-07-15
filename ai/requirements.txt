@@ -1,0 +1,14 @@
+# ai/pdf_pipeline.py 전용 의존성 (venv: ai/.venv)
+#
+# 설치 순서가 중요합니다. docling을 먼저 설치하면 docling이 요구하는 torch가
+# PyPI 기본 인덱스에서 CPU 전용 버전으로 딸려 들어와 CUDA 빌드를 덮어씁니다.
+# 그래서 아래 순서대로 두 단계로 설치해야 합니다.
+#
+#   1) pip install -r requirements.txt
+#   2) pip install torch==2.6.0 torchvision==0.21.0 \
+#        --index-url https://download.pytorch.org/whl/cu124 --force-reinstall
+#
+# GPU가 없는 환경이라면 2번 단계 없이 1번만 실행해도 동작합니다 (CPU로 추론, 느림).
+
+docling==2.113.0
+PyMuPDF==1.28.0
