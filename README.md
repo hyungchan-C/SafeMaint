@@ -51,30 +51,30 @@ DB 테이블과 관계는 [docs/database.md](docs/database.md), 전처리 결과
 
 각 팀원은 Git, Docker Desktop, DBeaver를 설치하고 Docker Desktop을 실행한 상태에서 시작합니다. Docker DB는 팀원 PC마다 독립적으로 생성됩니다.
 
-### `feature/chan` 브랜치 받기
+### `dev` 브랜치 받기
 
-현재 팀원 DB 온보딩 기능은 `feature/chan` 브랜치에 있습니다. 저장소를 새로 받는 팀원은 다음과 같이 clone합니다.
+현재 팀 통합 개발 코드는 `dev` 브랜치에 있습니다. 저장소를 새로 받는 팀원은 다음과 같이 clone합니다.
 
 ```powershell
-git clone --branch feature/chan https://github.com/hyungchan-C/SafeMaint.git
+git clone --branch dev https://github.com/hyungchan-C/SafeMaint.git
 Set-Location SafeMaint
 ```
 
-이미 저장소를 clone했지만 로컬에 `feature/chan`이 없는 팀원은 다음 명령으로 원격 브랜치를 연결합니다.
+이미 저장소를 clone했지만 로컬에 `dev`가 없는 팀원은 다음 명령으로 원격 브랜치를 연결합니다.
 
 ```powershell
 git fetch origin
-git switch --track origin/feature/chan
+git switch --track origin/dev
 ```
 
-이미 `feature/chan`을 사용 중인 팀원은 다음 명령으로 최신 내용을 받습니다.
+이미 `dev`를 사용 중인 팀원은 다음 명령으로 최신 내용을 받습니다.
 
 ```powershell
-git switch feature/chan
-git pull origin feature/chan
+git switch dev
+git pull origin dev
 ```
 
-Pull Request가 `main`에 병합된 이후에는 팀 공통 브랜치 정책에 따라 `main`에서 같은 온보딩 절차를 사용할 수 있습니다.
+기능 브랜치는 검토 후 `dev`에 병합하고, 배포 준비가 끝난 통합 버전만 `main`으로 승격합니다.
 
 ### 권장 실행: DB·백엔드·프론트엔드 전체 Docker
 
@@ -338,7 +338,7 @@ python -m alembic -c backend\alembic.ini upgrade head
 프로그램 업데이트 시 새 코드를 받은 뒤 같은 실행 명령을 사용하면 기존 named volume은 유지되고 새로운 마이그레이션과 seed만 적용됩니다.
 
 ```powershell
-git pull origin feature/chan
+git pull origin dev
 .\scripts\setup-dev.ps1
 .\scripts\verify-db.ps1
 ```
@@ -351,6 +351,7 @@ git pull origin feature/chan
 |---|---|---|
 | `POST` | `/api/v1/auth/register` | 로컬 계정 생성, Argon2id 해시 저장, 기본 `worker` 역할 부여 |
 | `POST` | `/api/v1/auth/login` | 사원번호·비밀번호 확인, 실패 횟수 및 15분 잠금 처리 |
+| `POST` | `/api/v1/speech/synthesize` | Supertonic 기반 한국어 안전 안내 WAV 생성 |
 | `POST` | `/api/v1/assessments/preview` | DB 저장 없는 기존 규칙 기반 미리보기 |
 | `POST` | `/api/v1/assessments` | 평가·위험요인·체크리스트·감사 이벤트 트랜잭션 저장 |
 | `GET` | `/api/v1/assessments/{id}` | 저장된 평가 조회 |
@@ -389,11 +390,11 @@ DB 통합 테스트는 실수로 운영 DB를 수정하지 않도록 DB 이름�
 
 현재 프론트엔드에는 다음 화면 흐름이 통합되어 있습니다.
 
-- 브라우저 로컬 저장소 기반 로그인·회원가입 프로토타입
+- PostgreSQL 기반 회원가입·로그인과 브라우저 화면 세션
 - 메뉴: 음량, 글자 크기, 결과 기록, 대화 초기화, 로그아웃
 - 아바타·검색 결과·영상 표시 영역
 - 사용자 보유 PDF 매뉴얼 선택 영역
 - 채팅 UI와 결과 기록 저장
 - 기존 FastAPI `/api/v1/assessments/preview` 연동 위험성평가 미리보기
 
-계정과 기록은 UI 검증을 위해 브라우저 localStorage에 저장됩니다. 실제 서비스 단계에서는 FastAPI 인증·이력 API와 PostgreSQL로 교체해야 합니다.
+계정은 FastAPI와 PostgreSQL에 저장됩니다. 현재 브라우저 `localStorage`에는 화면 세션·설정·결과 기록만 저장되며, 서버가 발급하는 JWT와 보호 API는 후속 단계에서 구현합니다.

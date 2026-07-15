@@ -14,7 +14,6 @@ from pydantic import (
 
 
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-ASCII_PASSWORD_PATTERN = re.compile(r"^[\x21-\x7E]+$")
 
 
 class AuthProvider(str, Enum):
@@ -78,10 +77,6 @@ class UserCreate(BaseModel):
             raise ValueError("local users require a password")
         if self.auth_provider is not AuthProvider.LOCAL and self.password is not None:
             raise ValueError("external authentication users must not include a password")
-        if self.password is not None and not ASCII_PASSWORD_PATTERN.fullmatch(
-            self.password.get_secret_value()
-        ):
-            raise ValueError("password must use English letters, numbers, or ASCII symbols")
         return self
 
 

@@ -15,10 +15,6 @@ class Settings:
     cors_origins: tuple[str, ...] = _csv_env(
         "CORS_ORIGINS", "http://localhost:3000"
     )
-    cors_origin_regex: str = getenv(
-        "CORS_ORIGIN_REGEX",
-        r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}):3000$",
-    )
     database_url: str = getenv(
         "DATABASE_URL",
         "postgresql+psycopg://safemaint:change-me@localhost:5432/safemaint",

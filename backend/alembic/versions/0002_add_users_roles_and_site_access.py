@@ -1,7 +1,7 @@
 """Add users, roles, and per-site access assignments.
 
-Revision ID: 0004_users_roles_sites
-Revises: 0003_align_user_accounts
+Revision ID: 0002_users_roles_sites
+Revises: 0001_initial_schema
 Create Date: 2026-07-15
 """
 from typing import Sequence, Union
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 
-revision: str = "0004_users_roles_sites"
-down_revision: Union[str, Sequence[str], None] = "0003_align_user_accounts"
+revision: str = "0002_users_roles_sites"
+down_revision: Union[str, Sequence[str], None] = "0001_initial_schema"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -47,12 +47,73 @@ def _timestamp_columns() -> tuple[sa.Column, sa.Column]:
 
 
 def upgrade() -> None:
-    op.execute("UPDATE users SET employee_number = upper(btrim(employee_number))")
-    op.create_check_constraint("ck_users_employee_number_nonempty", "users", "length(btrim(employee_number)) > 0")
-    op.create_check_constraint("ck_users_employee_number_normalized", "users", "employee_number = upper(btrim(employee_number))")
-    op.create_check_constraint("ck_users_name_nonempty", "users", "length(btrim(name)) > 0")
-    op.create_check_constraint("ck_users_email_nonempty", "users", "email IS NULL OR length(btrim(email)) > 0")
-    op.create_check_constraint("ck_users_local_password_hash", "users", "auth_provider <> 'local' OR (password_hash IS NOT NULL AND length(btrim(password_hash)) > 0)")
+    op.create_table(
+        "users",
+        _id_column(),
+        sa.Column("employee_number", sa.String(length=30), nullable=False),
+        sa.Column("name", sa.String(length=100), nullable=False),
+        sa.Column("email", sa.String(length=255), nullable=True),
+        sa.Column("department", sa.String(length=100), nullable=True),
+        sa.Column("job_title", sa.String(length=100), nullable=True),
+        sa.Column(
+            "auth_provider",
+            sa.String(length=20),
+            server_default=sa.text("'local'"),
+            nullable=False,
+        ),
+        sa.Column("password_hash", sa.String(length=255), nullable=True),
+        sa.Column(
+            "status",
+            sa.String(length=20),
+            server_default=sa.text("'active'"),
+            nullable=False,
+        ),
+        sa.Column(
+            "failed_login_count",
+            sa.Integer(),
+            server_default=sa.text("0"),
+            nullable=False,
+        ),
+        sa.Column("locked_until", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("password_changed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("deactivated_at", sa.DateTime(timezone=True), nullable=True),
+        *_timestamp_columns(),
+        sa.PrimaryKeyConstraint("id", name="pk_users"),
+        sa.UniqueConstraint("employee_number", name="uq_users_employee_number"),
+        sa.CheckConstraint(
+            "length(btrim(employee_number)) > 0",
+            name="ck_users_employee_number_nonempty",
+        ),
+        sa.CheckConstraint(
+            "employee_number = upper(btrim(employee_number))",
+            name="ck_users_employee_number_normalized",
+        ),
+        sa.CheckConstraint(
+            "length(btrim(name)) > 0", name="ck_users_name_nonempty"
+        ),
+        sa.CheckConstraint(
+            "email IS NULL OR length(btrim(email)) > 0",
+            name="ck_users_email_nonempty",
+        ),
+        sa.CheckConstraint(
+            "auth_provider IN ('local', 'ldap', 'oidc')",
+            name="ck_users_auth_provider",
+        ),
+        sa.CheckConstraint(
+            "status IN ('active', 'locked', 'retired')",
+            name="ck_users_status",
+        ),
+        sa.CheckConstraint(
+            "failed_login_count >= 0",
+            name="ck_users_failed_login_count_nonnegative",
+        ),
+        sa.CheckConstraint(
+            "auth_provider <> 'local' OR "
+            "(password_hash IS NOT NULL AND length(btrim(password_hash)) > 0)",
+            name="ck_users_local_password_hash",
+        ),
+    )
     op.create_index("ix_users_department", "users", ["department"])
     op.create_index("ix_users_status", "users", ["status"])
     op.create_index(
@@ -253,8 +314,4 @@ def downgrade() -> None:
     op.drop_index("uq_users_email_lower", table_name="users")
     op.drop_index("ix_users_status", table_name="users")
     op.drop_index("ix_users_department", table_name="users")
-    op.drop_constraint("ck_users_local_password_hash", "users", type_="check")
-    op.drop_constraint("ck_users_email_nonempty", "users", type_="check")
-    op.drop_constraint("ck_users_name_nonempty", "users", type_="check")
-    op.drop_constraint("ck_users_employee_number_normalized", "users", type_="check")
-    op.drop_constraint("ck_users_employee_number_nonempty", "users", type_="check")
+    op.drop_table("users")
