@@ -281,6 +281,21 @@ python -m uvicorn app.main:app --app-dir backend --reload
 
 SQLAlchemy는 현재 규칙 엔진·검색 서비스가 동기 인터페이스이고 초기 MVP 트래픽이 크지 않다는 점을 기준으로 동기 세션을 사용합니다. 구현 복잡도와 트랜잭션 경계를 단순하게 유지하고, 실제 부하 측정에서 DB 대기 병목이 확인될 때 비동기 전환을 검토합니다.
 
+## Supertonic 3 한국어 음성 안내
+
+메인 화면의 `음성 안내` 버튼은 backend의 `POST /api/v1/speech/synthesize`를 호출해 WAV 음성을 재생합니다. 음성 엔진은 CPU용 Supertonic 3이며 `ko` 한국어 모드로 실행됩니다. 첫 음성 생성 시 약 400MB 모델 파일을 내려받기 때문에 인터넷 연결이 필요하고 시간이 걸릴 수 있으며, 이후에는 `safemaint_model_cache` Docker 볼륨을 재사용합니다.
+
+기본 설정은 `.env`에서 변경할 수 있습니다.
+
+```dotenv
+TTS_VOICE=F1
+TTS_LANGUAGE=ko
+TTS_STEPS=8
+MODEL_CACHE_VOLUME_NAME=safemaint_model_cache
+```
+
+DB 볼륨과 마찬가지로 모델 캐시를 유지하려면 `docker compose down -v`를 사용하지 마세요. `TTS_VOICE`는 `M1`~`M5`, `F1`~`F5` 중 선택할 수 있고, `TTS_STEPS`는 5~12 범위에서 높일수록 품질과 생성 시간이 증가합니다.
+
 ## 선택 실행: 프론트엔드 앱은 로컬
 
 프론트엔드 코드를 Hot Reload로 개발할 때만 사용합니다. Docker의 `frontend`가 실행 중이면 3000 포트가 충돌하므로 먼저 해당 컨테이너를 중지합니다. 백엔드는 Docker 또는 로컬 방식 중 하나로 8000 포트에서 실행되어 있어야 합니다.

@@ -8,6 +8,13 @@ x-backend-service: &backend-service
     APP_ENV: ${APP_ENV:-production}
     CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting SafeMaint}
+    TTS_VOICE: ${TTS_VOICE:-F1}
+    TTS_LANGUAGE: ${TTS_LANGUAGE:-ko}
+    TTS_STEPS: ${TTS_STEPS:-8}
+    HF_HOME: /root/.cache/huggingface
+    XDG_CACHE_HOME: /root/.cache
+  volumes:
+    - safemaint_model_cache:/root/.cache
 
 services:
   db:
@@ -82,3 +89,5 @@ services:
 volumes:
   safemaint_postgres_data:
     name: ${POSTGRES_VOLUME_NAME:-safemaint_postgres_data}
+  safemaint_model_cache:
+    name: ${MODEL_CACHE_VOLUME_NAME:-safemaint_model_cache}

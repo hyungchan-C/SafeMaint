@@ -282,6 +282,8 @@ function WorkspaceScreen({
   const [form, setForm] = useState(initialForm);
   const [result, setResult] = useState<AssessmentResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [activeAudio, setActiveAudio] = useState<HTMLAudioElement | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -362,6 +364,53 @@ function WorkspaceScreen({
     );
   }
 
+  async function speakGuidance() {
+    if (activeAudio) {
+      activeAudio.pause();
+      setActiveAudio(null);
+      setIsSpeaking(false);
+      return;
+    }
+
+    const latestAnswer = [...messages].reverse().find((message) => message.role === "ai")?.text;
+    const text = latestAnswer ?? (result
+      ? `현재 분석된 위험요인은 ${result.hazards.length}건입니다. ${result.hazards.map((hazard) => `${hazard.name}. ${hazard.safety_actions.join(". ")}`).join(". ")}`
+      : `현재 작업은 ${form.equipment_name}의 ${form.task_type}입니다. 위험성평가를 실행한 뒤 음성 안전 안내를 들을 수 있습니다.`);
+
+    setIsSpeaking(true);
+    setError("");
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/speech/synthesize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, speed: 0.92 }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { detail?: string } | null;
+        throw new Error(payload?.detail || "음성 안내를 생성하지 못했습니다.");
+      }
+      const audioUrl = URL.createObjectURL(await response.blob());
+      const audio = new Audio(audioUrl);
+      audio.volume = volume / 100;
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl);
+        setActiveAudio(null);
+        setIsSpeaking(false);
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(audioUrl);
+        setActiveAudio(null);
+        setIsSpeaking(false);
+        setError("생성된 음성을 재생하지 못했습니다.");
+      };
+      setActiveAudio(audio);
+      await audio.play();
+    } catch (speechError) {
+      setIsSpeaking(false);
+      setError(speechError instanceof Error ? speechError.message : "음성 안내 중 오류가 발생했습니다.");
+    }
+  }
+
   return (
     <main className={`prototype-shell ${fontClass}`}>
       <header className="prototype-topbar">
@@ -384,6 +433,7 @@ function WorkspaceScreen({
         <button type="button" onClick={requestLocation}>📍 현재 위치</button>
         <label className="toolbar-upload">📷 현장 사진<input type="file" accept="image/*" onChange={(event) => setSitePhotoName(event.target.files?.[0]?.name ?? "")} /></label>
         <button type="button" onClick={() => window.alert("음성 입력은 STT 연결 예정입니다.")}>🎤 음성 입력</button>
+        <button type="button" onClick={speakGuidance}>{isSpeaking ? "⏹ 음성 중지" : "🔊 음성 안내"}</button>
         <button type="button" onClick={onHistory}>🗂 결과 기록</button>
         <span>{locationStatus}</span>
       </section>
