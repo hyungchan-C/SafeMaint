@@ -219,7 +219,7 @@ Git으로 공유되는 것은 Docker Compose 설정, SQLAlchemy 모델, Alembic 
 
 ## 사원번호 기반 회원·권한 DB
 
-이번 단계는 회원과 권한을 저장할 DB 기반만 구현합니다. 회원가입·로그인 API, 비밀번호 해시 생성 서비스, JWT·세션 발급과 화면은 후속 단계에서 구현합니다.
+회원가입·로그인 화면은 기존 회원·권한 DB와 연결되어 있습니다. 로컬 계정 비밀번호는 Argon2id로 해시한 뒤 저장하고, 회원가입 시 기본 `worker` 역할을 자동 부여합니다. 로그인 실패가 5회 누적되면 15분간 계정을 잠그며 가입·로그인·잠금 이벤트는 `audit_events`에 기록합니다.
 
 - `users.id`: 다른 테이블이 참조하는 내부 UUID 기본키
 - `users.employee_number`: 실제 로그인 ID로 사용할 최대 30자의 문자열. 앞자리 `0`을 보존하며 입력 시 공백 제거·대문자 정규화 후 저장합니다.
@@ -236,7 +236,7 @@ Git으로 공유되는 것은 Docker Compose 설정, SQLAlchemy 모델, Alembic 
 
 현재 구조는 한 고객사 내부 설치를 기준으로 합니다. 여러 고객사를 한 DB에 함께 저장하는 SaaS 구조로 전환할 때는 `organizations`와 각 업무 테이블의 `organization_id`를 별도 마이그레이션으로 추가해야 합니다.
 
-백엔드 인증의 다음 단계는 Argon2id 비밀번호 해시 서비스, 관리자 전용 계정 생성·퇴직 처리 API, 로그인 실패 잠금, JWT access/refresh 토큰과 회수 정책, 역할·사업장 범위 인가, 권한 변경 감사 이벤트 구현입니다. 이 기능이 준비되기 전에는 DBeaver에서 임의로 평문 비밀번호나 기본 관리자 계정을 넣지 않습니다.
+현재 로그인 성공 정보는 프런트엔드 화면 전환을 위해 브라우저 `localStorage`에만 보관하며, 아직 서버가 발급한 인증 토큰은 아닙니다. 다음 단계에서는 JWT access/refresh 토큰과 회수 정책, 보호 API의 역할·사업장 범위 인가, 관리자 전용 계정 관리와 권한 변경 감사 이벤트를 구현해야 합니다. DBeaver에서 임의로 평문 비밀번호나 기본 관리자 계정을 넣지 마세요.
 
 ## 백엔드 로컬 개발
 
@@ -298,6 +298,8 @@ git pull origin feature/chan
 
 | 메서드 | 경로 | 설명 |
 |---|---|---|
+| `POST` | `/api/v1/auth/register` | 로컬 계정 생성, Argon2id 해시 저장, 기본 `worker` 역할 부여 |
+| `POST` | `/api/v1/auth/login` | 사원번호·비밀번호 확인, 실패 횟수 및 15분 잠금 처리 |
 | `POST` | `/api/v1/assessments/preview` | DB 저장 없는 기존 규칙 기반 미리보기 |
 | `POST` | `/api/v1/assessments` | 평가·위험요인·체크리스트·감사 이벤트 트랜잭션 저장 |
 | `GET` | `/api/v1/assessments/{id}` | 저장된 평가 조회 |

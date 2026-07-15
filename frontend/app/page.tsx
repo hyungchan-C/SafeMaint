@@ -37,7 +37,6 @@ const initialForm = {
 const levelLabel = { low: "낮음", medium: "보통", high: "높음" } as const;
 
 const STORAGE_KEYS = {
-  users: "safemaint.users",
   session: "safemaint.session",
   history: "safemaint.history",
   settings: "safemaint.settings",
@@ -133,9 +132,10 @@ function LoginScreen({ onLogin }: { onLogin: (user: LocalUser) => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ employee_number: loginId, password }),
       });
-      const payload = await response.json() as { id?: string; employee_number?: string; name?: string; detail?: string };
+      const payload = await response.json() as { id?: string; employee_number?: string; name?: string; detail?: string | Array<{ msg: string }> };
       if (!response.ok || !payload.id || !payload.employee_number || !payload.name) {
-        throw new Error(payload.detail || "로그인에 실패했습니다.");
+        const detail = Array.isArray(payload.detail) ? payload.detail[0]?.msg : payload.detail;
+        throw new Error(detail || "로그인에 실패했습니다.");
       }
       onLogin({ id: payload.id, username: payload.employee_number, displayName: payload.name });
     } catch (requestError) {
@@ -154,84 +154,17 @@ function LoginScreen({ onLogin }: { onLogin: (user: LocalUser) => void }) {
         <form onSubmit={submit} className="auth-form">
           <label>
             사원번호(ID)
-            <input value={loginId} onChange={(event) => setLoginId(event.target.value)} required />
+            <input value={loginId} onChange={(event) => setLoginId(event.target.value)} maxLength={30} autoComplete="username" required />
           </label>
           <label>
             비밀번호
-            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required />
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} maxLength={128} autoComplete="current-password" required />
           </label>
           {error && <p className="error-message">{error}</p>}
           <button className="primary-button" disabled={isLoading} type="submit">{isLoading ? "로그인 중..." : "로그인"}</button>
         </form>
         <a className="secondary-button auth-link" href="/signup">회원가입</a>
         <p className="prototype-note">계정은 SafeMaint 데이터베이스에 안전하게 저장됩니다.</p>
-      </section>
-    </main>
-  );
-}
-
-function SignupScreen({ onComplete, onBack }: { onComplete: () => void; onBack: () => void }) {
-  const [name, setName] = useState("");
-  const [signupId, setSignupId] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [agreed, setAgreed] = useState(false);
-  const [message, setMessage] = useState("");
-  const [isError, setIsError] = useState(false);
-
-  const [isLoading, setIsLoading] = useState(false);
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (signupId.length < 4 || password.length < 8) {
-      setMessage("아이디는 4자 이상, 비밀번호는 8자 이상 입력해 주세요.");
-      setIsError(true);
-      return;
-    }
-    if (password !== confirm) {
-      setMessage("비밀번호가 일치하지 않습니다.");
-      setIsError(true);
-      return;
-    }
-    if (!agreed) {
-      setMessage("이용 안내에 동의해 주세요.");
-      setIsError(true);
-      return;
-    }
-    setIsLoading(true);
-    try {
-      const response = await fetch(`${getApiBaseUrl()}/api/v1/auth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: signupId, display_name: name, password }),
-      });
-      const payload = await response.json() as { detail?: string };
-      if (!response.ok) throw new Error(payload.detail || "회원가입에 실패했습니다.");
-      setMessage("회원가입이 완료되었습니다. 로그인 화면으로 이동합니다.");
-      setIsError(false);
-      window.setTimeout(onComplete, 700);
-    } catch (requestError) {
-      setMessage(requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.");
-      setIsError(true);
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
-  return (
-    <main className="auth-shell">
-      <section className="auth-card wide">
-        <h1>회원가입</h1>
-        <form onSubmit={submit} className="auth-form">
-          <label>이름<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
-          <label>아이디<input value={signupId} onChange={(event) => setSignupId(event.target.value)} required /></label>
-          <label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
-          <label>비밀번호 확인<input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} required /></label>
-          <label className="checkbox-line"><input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} />서비스 이용 및 개인정보 처리 안내에 동의합니다.</label>
-          {message && <p className={isError ? "error-message" : "success-message"}>{message}</p>}
-          <button className="primary-button" disabled={isLoading} type="submit">{isLoading ? "가입 중..." : "가입하기"}</button>
-        </form>
-        <button className="secondary-button" onClick={onBack}>로그인 화면으로</button>
       </section>
     </main>
   );

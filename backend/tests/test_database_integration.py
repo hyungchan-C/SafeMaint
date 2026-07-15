@@ -9,10 +9,19 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
-from app.db.models import ReferenceCode, Role, Site, User, UserRole, UserSite
+from app.db.models import (
+    AuditEvent,
+    ReferenceCode,
+    Role,
+    Site,
+    User,
+    UserRole,
+    UserSite,
+)
 from app.db.seed import REFERENCE_CODES, ROLES, seed_reference_data, seed_roles
 from app.db.session import SessionLocal, engine
 from app.main import app
+from app.services.passwords import verify_password
 
 
 INTEGRATION_ENABLED = (
@@ -249,6 +258,132 @@ def test_role_and_site_assignments_enforce_uniqueness() -> None:
         with pytest.raises(IntegrityError):
             session.commit()
 
+
+def test_registration_login_and_temporary_lock_use_database() -> None:
+    _assert_isolated_test_database()
+    suffix = uuid4().hex[:10].upper()
+    employee_number = f"AUTH-{suffix}"
+    email = f"auth-{suffix.lower()}@example.com"
+    password = "Correct-Horse-2026!"
+
+    with SessionLocal() as session:
+        seed_roles(session)
+
+    registration = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/register",
+            json={
+                "employee_number": f" {employee_number.lower()} ",
+                "name": " 통합 인증 사용자 ",
+                "password": password,
+                "email": email.upper(),
+                "department": " 안전관리팀 ",
+                "job_title": " 작업자 ",
+            },
+        )
+    )
+    assert registration.status_code == 201
+    body = registration.json()
+    assert body["employee_number"] == employee_number
+    assert body["email"] == email
+    assert body["roles"] == ["worker"]
+    assert "password" not in body
+    assert "password_hash" not in body
+
+    with SessionLocal() as session:
+        user = session.scalar(
+            select(User).where(User.employee_number == employee_number)
+        )
+        assert user is not None
+        user_id = user.id
+        assert user.password_hash is not None
+        assert user.password_hash.startswith("$argon2id$")
+        assert user.password_hash != password
+        assert verify_password(password, user.password_hash)
+        assert session.scalar(
+            select(func.count(UserRole.role_id)).where(UserRole.user_id == user.id)
+        ) == 1
+        assert session.scalar(
+            select(func.count(AuditEvent.id)).where(
+                AuditEvent.actor_user_id == user.id,
+                AuditEvent.event_type == "user.registered",
+            )
+        ) == 1
+
+    duplicate = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/register",
+            json={
+                "employee_number": employee_number,
+                "name": "Duplicate",
+                "password": password,
+            },
+        )
+    )
+    assert duplicate.status_code == 409
+
+    wrong_login = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/login",
+            json={"employee_number": employee_number, "password": "wrong-password"},
+        )
+    )
+    assert wrong_login.status_code == 401
+
+    successful_login = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/login",
+            json={"employee_number": employee_number.lower(), "password": password},
+        )
+    )
+    assert successful_login.status_code == 200
+    assert successful_login.json()["roles"] == ["worker"]
+    assert successful_login.json()["last_login_at"] is not None
+
+    with SessionLocal() as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        assert user.failed_login_count == 0
+        assert user.last_login_at is not None
+
+    for _ in range(5):
+        failed = asyncio.run(
+            _request(
+                "POST",
+                "/api/v1/auth/login",
+                json={
+                    "employee_number": employee_number,
+                    "password": "wrong-password",
+                },
+            )
+        )
+        assert failed.status_code == 401
+
+    locked = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/login",
+            json={"employee_number": employee_number, "password": password},
+        )
+    )
+    assert locked.status_code == 423
+
+    with SessionLocal() as session:
+        user = session.get(User, user_id)
+        assert user is not None
+        assert user.status == "locked"
+        assert user.failed_login_count == 5
+        assert user.locked_until is not None
+        assert session.scalar(
+            select(func.count(AuditEvent.id)).where(
+                AuditEvent.actor_user_id == user.id,
+                AuditEvent.event_type == "user.login_locked",
+            )
+        ) == 1
 
 def test_assessment_is_persisted_and_dashboard_uses_database() -> None:
     _assert_isolated_test_database()
