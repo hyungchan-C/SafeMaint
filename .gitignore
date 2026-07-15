@@ -13,6 +13,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+__pycache__
 
 # Node / Next.js
 node_modules/
@@ -31,8 +32,8 @@ yarn-error.log*
 Thumbs.db
 
 # Local data and model artifacts
-/data/raw/
-/data/processed/
+/ai/data/raw/
+/ai/data/processed/
 /전처리된데이터/
 /models/
 /uploads/
@@ -41,3 +42,9 @@ Thumbs.db
 *.dump
 *.gguf
 *.safetensors
+
+
+.history
+
+# Personal notes (not shared)
+sr_할 일.md
