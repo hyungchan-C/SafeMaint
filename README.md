@@ -25,6 +25,7 @@
 | 프론트엔드 | Next.js, React, TypeScript |
 | 백엔드 | FastAPI, Pydantic, SQLAlchemy 2, psycopg 3, Alembic |
 | 데이터베이스 | PostgreSQL 16, pgvector 0.8.2 |
+| 문서 전처리 | Docling, PyMuPDF |
 | 목표 검색 구조 | 메타데이터 필터 + BM25 + BGE-M3 + Reranker |
 | 목표 생성 구조 | 파운데이션 모델 + 검색 근거 기반 답변 |
 | 위험도 | 규칙 기반 위험성평가 엔진 |
@@ -37,6 +38,7 @@
 SafeMaint/
 ├─ backend/             FastAPI API, 위험도 규칙, ORM, Alembic
 ├─ frontend/            안전관리 대시보드
+├─ ai/                  PDF 추출·정제·청킹 파이프라인
 ├─ docs/                설계 문서
 ├─ infra/postgres/init/ pgvector 최초 부트스트랩
 ├─ scripts/             팀원 개발환경 설정·DB 검증 스크립트
@@ -45,7 +47,7 @@ SafeMaint/
 └─ docker-compose.dev.yml 로컬 DB 포트 override
 ```
 
-DB 테이블과 관계는 [docs/database.md](docs/database.md), 전처리 결과 입력 규격은 [docs/preprocessing-contract.md](docs/preprocessing-contract.md)를 참고하세요.
+DB 테이블과 관계는 [docs/database.md](docs/database.md), 전처리 결과 입력 규격은 [docs/preprocessing-contract.md](docs/preprocessing-contract.md), 실행 방법은 [ai/README.md](ai/README.md)를 참고하세요.
 
 ## 팀원 로컬 DB 온보딩
 
