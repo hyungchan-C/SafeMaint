@@ -630,7 +630,60 @@ a {
 .history-card span { color: var(--muted); font-size: 12px; }
 .history-card p { color: #536773; }
 
+/* 현장형 UI 확장 */
+.quick-toolbar { align-items: center; background: white; border: 1px solid var(--line); border-radius: 14px; display: flex; flex-wrap: wrap; gap: 10px; margin: 18px auto; max-width: 1500px; padding: 12px 14px; }
+.quick-toolbar button, .toolbar-upload { align-items: center; background: #f7fafb; border: 1px solid #cfdde3; border-radius: 10px; color: var(--navy); cursor: pointer; display: inline-flex; font-weight: 700; min-height: 40px; padding: 9px 13px; }
+.quick-toolbar > span { color: var(--muted); font-size: 12px; margin-left: auto; }
+.toolbar-upload input, .file-icon input { display: none; }
+.field-overview-grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1.3fr) minmax(290px, .7fr); margin: 0 auto 18px; max-width: 1500px; }
+.risk-overview-card { align-items: center; background: white; border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 280px; padding: 25px; text-align: center; }
+.risk-overview-card.risk-high { border-top: 6px solid #c53f3f; }
+.risk-overview-card.risk-medium { border-top: 6px solid #e5a22f; }
+.risk-overview-card.risk-low { border-top: 6px solid #2f9a6f; }
+.risk-overview-card.risk-pending { border-top: 6px solid #9fb0ba; }
+.risk-symbol { font-size: 3.5rem; line-height: 1; }
+.risk-overview-card h1 { color: var(--navy); margin: 8px 0; }
+.risk-overview-card p, .risk-overview-card small, .muted-copy { color: var(--muted); }
+.accident-chip-list { display: flex; flex-wrap: wrap; gap: 7px; justify-content: center; margin: 10px 0 15px; }
+.accident-chip-list span { background: #fff4e8; border: 1px solid #f1d2ae; border-radius: 999px; color: #8d541d; font-size: 12px; font-weight: 700; padding: 7px 10px; }
+.ppe-grid { display: grid; gap: 9px; grid-template-columns: repeat(2, 1fr); }
+.ppe-grid span { align-items: center; background: #f5f8fa; border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; font-size: 24px; gap: 5px; padding: 13px 7px; }
+.ppe-grid b { font-size: 12px; }
+.compact-heading { margin-bottom: 15px; }
+.upgraded-manual-row { grid-template-columns: minmax(220px, 340px) minmax(240px, 1fr); }
+.document-chip-list { display: flex !important; flex-direction: row; flex-wrap: wrap; gap: 7px; grid-column: 1 / -1; }
+.document-chip-list > span { align-items: center; background: #f4f8fa; border: 1px solid var(--line); border-radius: 999px; display: inline-flex; gap: 5px; max-width: 100%; padding: 6px 9px; }
+.document-chip-list button { background: transparent; border: 0; color: var(--red); cursor: pointer; font-weight: 900; }
+.chat-heading { align-items: center; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; padding: 15px 18px; }
+.chat-heading div { display: grid; gap: 3px; }
+.chat-heading span { color: var(--muted); font-size: 12px; }
+.chat-heading button { background: transparent; border: 0; color: var(--red); cursor: pointer; font-weight: 700; }
+.upgraded-chat .chat-input-row { grid-template-columns: 42px 42px 42px minmax(0, 1fr) 90px; }
+.icon-action { align-items: center; background: #f5f8fa !important; border: 1px solid #d5e0e5 !important; border-radius: 9px !important; color: var(--navy) !important; cursor: pointer; display: flex; height: 42px; justify-content: center; min-width: 42px; padding: 0 !important; }
+.search-progress { background: #f8fafb; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 18px; padding: 16px; }
+.status-pill.active { animation: status-pulse 1.2s ease-in-out infinite; }
+@keyframes status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+.progress-steps { display: grid; gap: 9px; grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.progress-steps div { align-items: center; background: #fff; border: 1px solid #dce5e9; border-radius: 10px; display: flex; flex-direction: column; gap: 7px; min-height: 78px; padding: 11px 6px; text-align: center; }
+.progress-steps div span { align-items: center; background: #dbe4e8; border-radius: 50%; color: #60737d; display: flex; font-size: 12px; font-weight: 800; height: 27px; justify-content: center; width: 27px; }
+.progress-steps div.active, .progress-steps div.done { background: #eef8f6; border-color: #b7ddd5; }
+.progress-steps div.active span, .progress-steps div.done span { background: var(--teal); color: white; }
+.progress-steps strong { font-size: 12px; }
+.result-tabs { border-bottom: 1px solid var(--line); display: flex; gap: 5px; margin-bottom: 18px; overflow-x: auto; padding-bottom: 10px; }
+.result-tabs button { background: transparent; border: 0; border-radius: 9px; color: var(--muted); cursor: pointer; font-weight: 700; padding: 10px 14px; white-space: nowrap; }
+.result-tabs button.active { background: var(--teal-soft); color: var(--teal); }
+.large-checklist label { min-height: 52px; }
+.similar-accident-list { display: grid; gap: 12px; }
+.accident-card { background: #f8fafb; border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+.accident-card > div { display: flex; flex-direction: column; gap: 5px; }
+.accident-card > div span { color: var(--teal); font-size: 12px; font-weight: 800; }
+.accident-card p, .accident-card li { color: var(--muted); font-size: 13px; }
+.pending-document-list { display: grid; gap: 6px; margin-top: 12px; }
+.pending-document-list span { background: #f5f8fa; border-radius: 8px; font-size: 12px; padding: 8px; }
+
 @media (max-width: 900px) {
+  .field-overview-grid { grid-template-columns: 1fr; }
+  .progress-steps { grid-template-columns: repeat(3, 1fr); }
   .prototype-topbar { grid-template-columns: auto 1fr; }
   .user-label { display: none; }
   .manual-row, .workspace-grid.embedded { grid-template-columns: 1fr; }
@@ -638,6 +691,10 @@ a {
 }
 
 @media (max-width: 620px) {
+  .progress-steps { grid-template-columns: repeat(2, 1fr); }
+  .upgraded-chat .chat-input-row { grid-template-columns: 40px 40px 40px 1fr; }
+  .upgraded-chat .chat-input-row > input { grid-column: 1 / -1; grid-row: 2; }
+  .upgraded-chat .chat-input-row > button[type="submit"] { grid-column: 4; grid-row: 1; }
   .signup-grid { grid-template-columns: 1fr; }
   .signup-grid label:last-child { grid-column: auto; }
   .prototype-shell { padding: 0; }

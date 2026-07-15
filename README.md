@@ -76,7 +76,7 @@ git pull origin feature/chan
 
 Pull Request가 `main`에 병합된 이후에는 팀 공통 브랜치 정책에 따라 `main`에서 같은 온보딩 절차를 사용할 수 있습니다.
 
-### 최초 실행
+### 권장 실행: DB·백엔드·프론트엔드 전체 Docker
 
 저장소를 clone한 직후 프로젝트 루트에서 실행합니다.
 
@@ -95,7 +95,9 @@ POSTGRES_PORT=5432
 DATABASE_URL=postgresql+psycopg://safemaint:change-this-local-password@db:5432/safemaint
 ```
 
-설정이 끝나면 다음 명령 하나로 전체 개발 환경을 실행합니다.
+설정이 끝나면 로컬에서 실행 중인 `npm run dev`와 `uvicorn`을 먼저 `Ctrl+C`로 종료합니다. 로컬 프로세스가 3000·8000 포트를 사용 중이면 Docker의 `frontend`·`backend` 컨테이너가 `Created` 상태에 머물며 브라우저에는 `Failed to fetch`가 표시됩니다.
+
+이후 다음 명령 하나로 DB, migration, seed, backend, frontend를 모두 Docker에서 실행합니다.
 
 ```powershell
 .\scripts\setup-dev.ps1
@@ -112,6 +114,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ```powershell
 docker compose `
+  --env-file .env `
   -f docker-compose.yml `
   -f docker-compose.dev.yml `
   up -d --build
@@ -126,6 +129,21 @@ db healthy → migrate 종료 코드 0 → seed 종료 코드 0 → backend heal
 - 대시보드: <http://localhost:3000>
 - API 문서: <http://localhost:8000/docs>
 - 준비 상태: <http://localhost:8000/health/ready>
+
+실행 상태와 로그는 다음 명령으로 확인합니다. `db`와 `backend`는 `healthy`, `frontend`는 `running`이어야 합니다.
+
+```powershell
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml ps -a
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml logs --tail 100 backend frontend
+```
+
+종료할 때는 DB 볼륨을 유지하는 다음 명령을 사용합니다.
+
+```powershell
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml down
+```
+
+> `down -v`는 PostgreSQL 데이터를 삭제하므로 사용하지 마세요.
 
 전체 DB 상태를 다시 확인할 때는 다음 명령을 사용합니다.
 
@@ -238,18 +256,18 @@ Git으로 공유되는 것은 Docker Compose 설정, SQLAlchemy 모델, Alembic 
 
 현재 로그인 성공 정보는 프런트엔드 화면 전환을 위해 브라우저 `localStorage`에만 보관하며, 아직 서버가 발급한 인증 토큰은 아닙니다. 다음 단계에서는 JWT access/refresh 토큰과 회수 정책, 보호 API의 역할·사업장 범위 인가, 관리자 전용 계정 관리와 권한 변경 감사 이벤트를 구현해야 합니다. DBeaver에서 임의로 평문 비밀번호나 기본 관리자 계정을 넣지 마세요.
 
-## 백엔드 로컬 개발
+## 선택 실행: DB는 Docker, 백엔드 앱은 로컬
 
 필수 환경은 Python 3.13 이상, Node.js 22.13 이상입니다.
 
-DB만 Docker에서 실행하고 FastAPI는 로컬에서 실행하는 방법입니다. `.env`의 DB 비밀번호와 아래 `DATABASE_URL` 비밀번호를 일치시키세요.
+백엔드 코드를 `--reload`로 개발할 때만 사용하는 방식입니다. 전체 Docker 방식과 동시에 실행하면 8000 포트가 충돌합니다. 먼저 전체 Compose를 종료한 후 DB만 시작하세요. `.env`의 DB 비밀번호와 PowerShell의 `DATABASE_URL` 비밀번호를 일치시켜야 합니다.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r backend\requirements-dev.txt
 
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml up -d db
 $env:DATABASE_URL="postgresql+psycopg://safemaint:설정한비밀번호@127.0.0.1:5432/safemaint"
 python -m alembic -c backend\alembic.ini upgrade head
 $env:PYTHONPATH="backend"
@@ -263,9 +281,30 @@ python -m uvicorn app.main:app --app-dir backend --reload
 
 SQLAlchemy는 현재 규칙 엔진·검색 서비스가 동기 인터페이스이고 초기 MVP 트래픽이 크지 않다는 점을 기준으로 동기 세션을 사용합니다. 구현 복잡도와 트랜잭션 경계를 단순하게 유지하고, 실제 부하 측정에서 DB 대기 병목이 확인될 때 비동기 전환을 검토합니다.
 
-## 프론트엔드 로컬 개발
+## Supertonic 3 한국어 음성 안내
 
-새 터미널에서 실행합니다.
+메인 화면의 `음성 안내` 버튼은 backend의 `POST /api/v1/speech/synthesize`를 호출해 WAV 음성을 재생합니다. 음성 엔진은 CPU용 Supertonic 3이며 `ko` 한국어 모드로 실행됩니다. 첫 음성 생성 시 약 400MB 모델 파일을 내려받기 때문에 인터넷 연결이 필요하고 시간이 걸릴 수 있으며, 이후에는 `safemaint_model_cache` Docker 볼륨을 재사용합니다.
+
+기본 설정은 `.env`에서 변경할 수 있습니다.
+
+```dotenv
+TTS_VOICE=F1
+TTS_LANGUAGE=ko
+TTS_STEPS=8
+MODEL_CACHE_VOLUME_NAME=safemaint_model_cache
+```
+
+DB 볼륨과 마찬가지로 모델 캐시를 유지하려면 `docker compose down -v`를 사용하지 마세요. `TTS_VOICE`는 `M1`~`M5`, `F1`~`F5` 중 선택할 수 있고, `TTS_STEPS`는 5~12 범위에서 높일수록 품질과 생성 시간이 증가합니다.
+
+## 선택 실행: 프론트엔드 앱은 로컬
+
+프론트엔드 코드를 Hot Reload로 개발할 때만 사용합니다. Docker의 `frontend`가 실행 중이면 3000 포트가 충돌하므로 먼저 해당 컨테이너를 중지합니다. 백엔드는 Docker 또는 로컬 방식 중 하나로 8000 포트에서 실행되어 있어야 합니다.
+
+```powershell
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml stop frontend
+```
+
+그다음 새 터미널에서 실행합니다.
 
 ```powershell
 Set-Location frontend
@@ -274,6 +313,18 @@ npm.cmd run dev
 ```
 
 - 대시보드: <http://localhost:3000>
+- 회원가입: <http://localhost:3000/signup>
+
+### `Failed to fetch` 점검
+
+회원가입·로그인에서 `Failed to fetch`가 나오면 백엔드가 실행되지 않았거나 8000 포트가 다른 로컬 프로세스와 충돌한 상태입니다.
+
+```powershell
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/health/ready
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml ps -a
+```
+
+정상 응답은 HTTP 200과 `"database":"connected"`입니다. `backend`가 `Created` 상태라면 로컬 `uvicorn`을 `Ctrl+C`로 종료하고 `setup-dev.ps1`을 다시 실행하세요.
 
 ## DB 마이그레이션과 업데이트
 
@@ -333,3 +384,16 @@ DB 통합 테스트는 실수로 운영 DB를 수정하지 않도록 DB 이름�
 - 여러 migration head가 의심되면 `python -m alembic -c backend\alembic.ini heads`로 확인합니다.
 - seed는 여러 번 실행해도 중복되지 않는 멱등 구조를 유지합니다.
 - 운영 DB dump, 실제 고객 데이터와 사업장 문서는 Git에 커밋하지 않습니다.
+
+## 프론트엔드 초기 구상 화면
+
+현재 프론트엔드에는 다음 화면 흐름이 통합되어 있습니다.
+
+- 브라우저 로컬 저장소 기반 로그인·회원가입 프로토타입
+- 메뉴: 음량, 글자 크기, 결과 기록, 대화 초기화, 로그아웃
+- 아바타·검색 결과·영상 표시 영역
+- 사용자 보유 PDF 매뉴얼 선택 영역
+- 채팅 UI와 결과 기록 저장
+- 기존 FastAPI `/api/v1/assessments/preview` 연동 위험성평가 미리보기
+
+계정과 기록은 UI 검증을 위해 브라우저 localStorage에 저장됩니다. 실제 서비스 단계에서는 FastAPI 인증·이력 API와 PostgreSQL로 교체해야 합니다.
