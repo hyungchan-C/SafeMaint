@@ -336,8 +336,6 @@ git pull origin feature/chan
 |---|---|---|
 | `POST` | `/api/v1/auth/register` | 로컬 계정 생성, Argon2id 해시 저장, 기본 `worker` 역할 부여 |
 | `POST` | `/api/v1/auth/login` | 사원번호·비밀번호 확인, 실패 횟수 및 15분 잠금 처리 |
-| `POST` | `/api/v1/auth/register` | 사원정보 기반 회원가입 |
-| `POST` | `/api/v1/auth/login` | 사원번호·비밀번호 로그인 |
 | `POST` | `/api/v1/assessments/preview` | DB 저장 없는 기존 규칙 기반 미리보기 |
 | `POST` | `/api/v1/assessments` | 평가·위험요인·체크리스트·감사 이벤트 트랜잭션 저장 |
 | `GET` | `/api/v1/assessments/{id}` | 저장된 평가 조회 |

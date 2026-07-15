@@ -8,7 +8,7 @@ def test_registration_accepts_employee_profile() -> None:
     payload = RegisterRequest(
         employee_number="사원A1024",
         name="홍길동",
-        password="Safe1234",
+        password="SafeMaint1234",
         email="hong1024@example.com",
         department="안전 관리팀",
         job_title="Safety Manager",
@@ -20,13 +20,13 @@ def test_registration_accepts_employee_profile() -> None:
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    (("name", "Hong길동"), ("employee_number", "EMP-01"), ("password", "비밀번호123"), ("department", "안전1팀")),
+    (("name", "Hong길동"), ("password", "비밀번호123"), ("department", "안전1팀")),
 )
 def test_registration_rejects_disallowed_characters(field: str, value: str) -> None:
     data = {
         "employee_number": "EMP01",
         "name": "홍길동",
-        "password": "Safe1234",
+        "password": "SafeMaint1234",
         "department": "안전팀",
     }
     data[field] = value

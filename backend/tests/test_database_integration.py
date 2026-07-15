@@ -66,11 +66,8 @@ def test_schema_extension_and_alembic_head() -> None:
         "reference_codes",
         "roles",
         "sites",
-<<<<<<< HEAD
-=======
         "user_roles",
         "user_sites",
->>>>>>> 6e06e1f47f85e9e6fab7929c3ba2671f5dd9597a
         "users",
     }
     assert expected_tables <= set(inspect(engine).get_table_names())
@@ -93,11 +90,7 @@ def test_schema_extension_and_alembic_head() -> None:
         )
 
     assert extension_version
-<<<<<<< HEAD
-    assert alembic_revision == "0003_align_user_accounts"
-=======
-    assert alembic_revision == "0002_users_roles_sites"
->>>>>>> 6e06e1f47f85e9e6fab7929c3ba2671f5dd9597a
+    assert alembic_revision == "0004_users_roles_sites"
     assert "ck_assessment_hazards_likelihood_range" in constraints
     assert "ck_assessment_hazards_severity_range" in constraints
     assert "ck_assessments_status" in constraints

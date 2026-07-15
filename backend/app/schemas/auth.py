@@ -1,9 +1,14 @@
 from datetime import datetime
+import re
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from app.schemas.user import UserCreate, UserStatus
+from app.schemas.user import ASCII_PASSWORD_PATTERN, UserCreate, UserStatus
+
+
+KOREAN_NAME_PATTERN = re.compile(r"^[가-힣]+(?: [가-힣]+)*$")
+ORGANIZATION_TEXT_PATTERN = re.compile(r"^[A-Za-z가-힣]+(?: [A-Za-z가-힣]+)*$")
 
 
 class RegisterRequest(BaseModel):
@@ -22,7 +27,10 @@ class RegisterRequest(BaseModel):
     @field_validator("name")
     @classmethod
     def normalize_name(cls, value: str) -> str:
-        return UserCreate.normalize_name(value)
+        normalized = UserCreate.normalize_name(value)
+        if not KOREAN_NAME_PATTERN.fullmatch(normalized):
+            raise ValueError("name must contain Korean characters only")
+        return normalized
 
     @field_validator("email")
     @classmethod
@@ -32,13 +40,19 @@ class RegisterRequest(BaseModel):
     @field_validator("department", "job_title")
     @classmethod
     def normalize_optional_text(cls, value: str | None) -> str | None:
-        return UserCreate.normalize_optional_text(value)
+        normalized = UserCreate.normalize_optional_text(value)
+        if normalized is not None and not ORGANIZATION_TEXT_PATTERN.fullmatch(normalized):
+            raise ValueError("department and job_title must contain Korean or English letters only")
+        return normalized
 
     @field_validator("password")
     @classmethod
     def reject_blank_password(cls, value: SecretStr) -> SecretStr:
-        if not value.get_secret_value().strip():
+        password = value.get_secret_value()
+        if not password.strip():
             raise ValueError("password must not be blank")
+        if not ASCII_PASSWORD_PATTERN.fullmatch(password):
+            raise ValueError("password must use English letters, numbers, or ASCII symbols")
         return value
 
 

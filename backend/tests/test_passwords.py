@@ -1,15 +1,3 @@
-<<<<<<< HEAD
-from app.services.passwords import hash_password, verify_password
-
-
-def test_password_hash_round_trip() -> None:
-    encoded = hash_password("correct-horse-123")
-
-    assert encoded != "correct-horse-123"
-    assert verify_password("correct-horse-123", encoded)
-    assert not verify_password("wrong-password", encoded)
-
-=======
 from app.services.passwords import (
     hash_password,
     password_needs_rehash,
@@ -33,4 +21,3 @@ def test_argon2id_password_hash_round_trip() -> None:
 def test_invalid_password_hash_is_rejected_safely() -> None:
     assert not verify_password("any-password", "not-an-argon-hash")
     assert not password_needs_rehash("not-an-argon-hash")
->>>>>>> 6e06e1f47f85e9e6fab7929c3ba2671f5dd9597a
