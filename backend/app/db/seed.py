@@ -5,7 +5,7 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.db.models import ReferenceCode
+from app.db.models import ReferenceCode, Role
 from app.db.session import SessionLocal
 
 
@@ -14,6 +14,12 @@ class ReferenceCodeSeed(TypedDict):
     code: str
     label: str
     sort_order: int
+
+
+class RoleSeed(TypedDict):
+    code: str
+    name: str
+    description: str
 
 
 REFERENCE_CODES: Sequence[ReferenceCodeSeed] = (
@@ -45,6 +51,25 @@ REFERENCE_CODES: Sequence[ReferenceCodeSeed] = (
 )
 
 
+ROLES: Sequence[RoleSeed] = (
+    {
+        "code": "worker",
+        "name": "작업자",
+        "description": "본인에게 허용된 사업장의 작업 및 점검 정보를 사용합니다.",
+    },
+    {
+        "code": "safety_manager",
+        "name": "안전관리자",
+        "description": "위험성평가를 검토하고 안전조치 이행을 관리합니다.",
+    },
+    {
+        "code": "admin",
+        "name": "시스템 관리자",
+        "description": "사용자, 역할 및 사업장 접근 권한을 관리합니다.",
+    },
+)
+
+
 def seed_reference_data(session: Session) -> int:
     statement = insert(ReferenceCode).values(list(REFERENCE_CODES))
     statement = statement.on_conflict_do_update(
@@ -65,10 +90,34 @@ def seed_reference_data(session: Session) -> int:
     return max(result.rowcount or 0, 0)
 
 
+def seed_roles(session: Session) -> int:
+    statement = insert(Role).values(list(ROLES))
+    statement = statement.on_conflict_do_update(
+        constraint="uq_roles_code",
+        set_={
+            "name": statement.excluded.name,
+            "description": statement.excluded.description,
+            "is_active": True,
+            "updated_at": func.now(),
+        },
+    )
+    try:
+        result = session.execute(statement)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    return max(result.rowcount or 0, 0)
+
+
 def main() -> None:
     with SessionLocal() as session:
-        affected_rows = seed_reference_data(session)
-    print(f"SafeMaint reference seed completed: {affected_rows} rows applied")
+        reference_rows = seed_reference_data(session)
+        role_rows = seed_roles(session)
+    print(
+        "SafeMaint seed completed: "
+        f"{reference_rows} reference rows and {role_rows} role rows applied"
+    )
 
 
 if __name__ == "__main__":

@@ -71,12 +71,19 @@ try {
     if ($alembicVersion.Count -ne 1) {
         throw "Alembic 현재 버전을 확인할 수 없습니다."
     }
+    if ($alembicVersion[0] -ne "0002_users_roles_sites") {
+        throw "Alembic이 최신 버전이 아닙니다: $($alembicVersion[0])"
+    }
 
     Write-Host "[5/7] 주요 테이블 확인"
     $expectedTables = @(
         "alembic_version",
         "reference_codes",
+        "roles",
         "sites",
+        "user_roles",
+        "user_sites",
+        "users",
         "equipment",
         "components",
         "assessments",
@@ -91,7 +98,7 @@ try {
 SELECT tablename
 FROM pg_tables
 WHERE schemaname = 'public'
-  AND tablename IN ('alembic_version', 'reference_codes', 'sites', 'equipment', 'components', 'assessments', 'assessment_hazards', 'checklist_items', 'documents', 'document_chunks', 'assessment_evidence', 'audit_events')
+  AND tablename IN ('alembic_version', 'reference_codes', 'roles', 'sites', 'user_roles', 'user_sites', 'users', 'equipment', 'components', 'assessments', 'assessment_hazards', 'checklist_items', 'documents', 'document_chunks', 'assessment_evidence', 'audit_events')
 ORDER BY tablename;
 "@
     $actualTables = @(Invoke-SafeMaintDbQuery -Sql $tableSql)
@@ -100,12 +107,16 @@ ORDER BY tablename;
         throw "필수 테이블이 없습니다: $($missingTables -join ', ')"
     }
 
-    Write-Host "[6/7] reference_codes seed 확인"
+    Write-Host "[6/7] reference_codes와 roles seed 확인"
     $seedCountRows = @(Invoke-SafeMaintDbQuery -Sql "SELECT COUNT(*) FROM reference_codes;")
     $seedCountText = $seedCountRows[0]
     $seedCount = 0
     if (-not [int]::TryParse($seedCountText, [ref]$seedCount) -or $seedCount -le 0) {
         throw "reference_codes seed 데이터가 없습니다."
+    }
+    $roleSeedRows = @(Invoke-SafeMaintDbQuery -Sql "SELECT COUNT(*) || '|' || string_agg(code, ',' ORDER BY code) FROM roles WHERE is_active AND code IN ('admin', 'safety_manager', 'worker');")
+    if ($roleSeedRows.Count -ne 1 -or $roleSeedRows[0] -ne "3|admin,safety_manager,worker") {
+        throw "roles seed 데이터가 올바르지 않습니다: $($roleSeedRows -join ', ')"
     }
 
     Write-Host "[7/7] backend readiness HTTP 확인"
@@ -123,6 +134,7 @@ ORDER BY tablename;
     Write-Host "- Alembic: $($alembicVersion[0])"
     Write-Host "- 주요 테이블: $($actualTables.Count)/$($expectedTables.Count)"
     Write-Host "- reference_codes: $seedCount rows"
+    Write-Host "- roles: admin, safety_manager, worker"
     Write-Host "- Backend readiness: HTTP $($response.StatusCode)"
     exit 0
 }

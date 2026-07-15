@@ -1,50 +1,66 @@
+from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-
-EMPLOYEE_PATTERN = r"^[가-힣A-Za-z0-9]+$"
-NAME_PATTERN = r"^[가-힣]+$"
-ORGANIZATION_PATTERN = r"^[가-힣A-Za-z ]+$"
-PASSWORD_PATTERN = r"^[A-Za-z0-9]+$"
-EMAIL_PATTERN = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+from app.schemas.user import UserCreate, UserStatus
 
 
 class RegisterRequest(BaseModel):
-    employee_number: str = Field(min_length=1, max_length=30, pattern=EMPLOYEE_PATTERN)
-    name: str = Field(min_length=1, max_length=100, pattern=NAME_PATTERN)
-    password: str = Field(min_length=8, max_length=128, pattern=PASSWORD_PATTERN)
-    email: str | None = Field(default=None, max_length=255, pattern=EMAIL_PATTERN)
-    department: str | None = Field(default=None, max_length=100, pattern=ORGANIZATION_PATTERN)
-    job_title: str | None = Field(default=None, max_length=100, pattern=ORGANIZATION_PATTERN)
-
-    @field_validator("employee_number", "name")
-    @classmethod
-    def strip_required(cls, value: str) -> str:
-        return value.strip()
-
-    @field_validator("email", "department", "job_title")
-    @classmethod
-    def empty_to_none(cls, value: str | None) -> str | None:
-        return value.strip() if value and value.strip() else None
-
-
-class LoginRequest(BaseModel):
-    employee_number: str = Field(min_length=1, max_length=30, pattern=EMPLOYEE_PATTERN)
-    password: str = Field(min_length=1, max_length=128, pattern=PASSWORD_PATTERN)
+    employee_number: str = Field(min_length=1, max_length=30)
+    name: str = Field(min_length=1, max_length=100)
+    password: SecretStr = Field(min_length=12, max_length=128)
+    email: str | None = Field(default=None, max_length=255)
+    department: str | None = Field(default=None, max_length=100)
+    job_title: str | None = Field(default=None, max_length=100)
 
     @field_validator("employee_number")
     @classmethod
-    def strip_employee_number(cls, value: str) -> str:
-        return value.strip()
+    def normalize_employee_number(cls, value: str) -> str:
+        return UserCreate.normalize_employee_number(value)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        return UserCreate.normalize_name(value)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str | None) -> str | None:
+        return UserCreate.normalize_email(value)
+
+    @field_validator("department", "job_title")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        return UserCreate.normalize_optional_text(value)
+
+    @field_validator("password")
+    @classmethod
+    def reject_blank_password(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("password must not be blank")
+        return value
 
 
-class UserResponse(BaseModel):
+class LoginRequest(BaseModel):
+    employee_number: str = Field(min_length=1, max_length=30)
+    password: SecretStr = Field(min_length=1, max_length=128)
+
+    @field_validator("employee_number")
+    @classmethod
+    def normalize_employee_number(cls, value: str) -> str:
+        return UserCreate.normalize_employee_number(value)
+
+
+class AuthUserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     employee_number: str
     name: str
     email: str | None
     department: str | None
     job_title: str | None
-    status: str
-
+    status: UserStatus
+    roles: list[str] = Field(default_factory=list)
+    last_login_at: datetime | None

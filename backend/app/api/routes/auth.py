@@ -1,23 +1,43 @@
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import User
+from app.db.models import AuditEvent, Role, User, UserRole
 from app.db.session import get_db
-from app.schemas.auth import LoginRequest, RegisterRequest, UserResponse
-from app.services.passwords import hash_password, verify_password
+from app.schemas.auth import AuthUserResponse, LoginRequest, RegisterRequest
+from app.services.passwords import (
+    DUMMY_PASSWORD_HASH,
+    hash_password,
+    password_needs_rehash,
+    verify_password,
+)
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+DEFAULT_ROLE_CODE = "worker"
 MAX_FAILED_LOGINS = 5
-LOCK_MINUTES = 15
+LOCK_DURATION = timedelta(minutes=15)
 
 
-def _response(user: User) -> UserResponse:
-    return UserResponse(
+def _role_codes(db: Session, user_id: UUID) -> list[str]:
+    return list(
+        db.scalars(
+            select(Role.code)
+            .join(UserRole, UserRole.role_id == Role.id)
+            .where(UserRole.user_id == user_id)
+            .order_by(Role.code)
+        )
+    )
+
+
+def _response(db: Session, user: User) -> AuthUserResponse:
+    return AuthUserResponse(
         id=user.id,
         employee_number=user.employee_number,
         name=user.name,
@@ -25,22 +45,40 @@ def _response(user: User) -> UserResponse:
         department=user.department,
         job_title=user.job_title,
         status=user.status,
+        roles=_role_codes(db, user.id),
+        last_login_at=user.last_login_at,
     )
 
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> UserResponse:
-    duplicate = db.scalar(
-        select(User).where(
-            or_(
-                User.employee_number == payload.employee_number,
-                User.email == payload.email if payload.email else False,
-            )
+@router.post(
+    "/register",
+    response_model=AuthUserResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def register(
+    payload: RegisterRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> AuthUserResponse:
+    worker_role = db.scalar(
+        select(Role).where(
+            Role.code == DEFAULT_ROLE_CODE,
+            Role.is_active.is_(True),
         )
     )
-    if duplicate:
-        detail = "이미 등록된 이메일입니다." if payload.email and duplicate.email == payload.email else "이미 사용 중인 사원번호입니다."
-        raise HTTPException(status_code=409, detail=detail)
+    if worker_role is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="기본 작업자 권한이 준비되지 않았습니다. seed 실행 상태를 확인해 주세요.",
+        )
+
+    duplicate_filters = [User.employee_number == payload.employee_number]
+    if payload.email is not None:
+        duplicate_filters.append(func.lower(User.email) == payload.email)
+    if db.scalar(select(User.id).where(or_(*duplicate_filters))) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이미 사용 중인 사원번호 또는 이메일입니다.",
+        )
 
     now = datetime.now(timezone.utc)
     user = User(
@@ -50,43 +88,114 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> UserRes
         department=payload.department,
         job_title=payload.job_title,
         auth_provider="local",
-        password_hash=hash_password(payload.password),
+        password_hash=hash_password(payload.password.get_secret_value()),
         status="active",
-        failed_login_count=0,
         password_changed_at=now,
     )
-    db.add(user)
+
     try:
+        db.add(user)
+        db.flush()
+        db.add(UserRole(user_id=user.id, role_id=worker_role.id))
+        db.add(
+            AuditEvent(
+                event_type="user.registered",
+                actor_user_id=user.id,
+                entity_type="user",
+                entity_id=user.id,
+                payload={"role": DEFAULT_ROLE_CODE},
+            )
+        )
         db.commit()
-    except IntegrityError as exc:
+    except IntegrityError as error:
         db.rollback()
-        raise HTTPException(status_code=409, detail="이미 등록된 사원번호 또는 이메일입니다.") from exc
-    db.refresh(user)
-    return _response(user)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이미 사용 중인 사원번호 또는 이메일입니다.",
+        ) from error
+
+    return _response(db, user)
 
 
-@router.post("/login", response_model=UserResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> UserResponse:
-    user = db.scalar(select(User).where(User.employee_number == payload.employee_number))
-    now = datetime.now(timezone.utc)
+@router.post("/login", response_model=AuthUserResponse)
+def login(
+    payload: LoginRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> AuthUserResponse:
+    user = db.scalar(
+        select(User)
+        .where(User.employee_number == payload.employee_number)
+        .with_for_update()
+    )
+    supplied_password = payload.password.get_secret_value()
+
     if user is None or user.auth_provider != "local" or not user.password_hash:
-        raise HTTPException(status_code=401, detail="사원번호 또는 비밀번호가 올바르지 않습니다.")
+        verify_password(supplied_password, DUMMY_PASSWORD_HASH)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="사원번호 또는 비밀번호가 올바르지 않습니다.",
+        )
+
+    now = datetime.now(timezone.utc)
+    if user.status == "locked":
+        if user.locked_until is None or user.locked_until > now:
+            raise HTTPException(
+                status_code=status.HTTP_423_LOCKED,
+                detail="로그인이 잠겨 있습니다. 잠시 후 다시 시도하거나 관리자에게 문의해 주세요.",
+            )
+        user.status = "active"
+        user.failed_login_count = 0
+        user.locked_until = None
+
+    password_matches = verify_password(supplied_password, user.password_hash)
+
     if user.status == "retired":
-        raise HTTPException(status_code=403, detail="비활성화된 계정입니다. 관리자에게 문의하세요.")
-    if user.locked_until and user.locked_until > now:
-        raise HTTPException(status_code=423, detail="로그인 실패가 반복되어 계정이 잠겼습니다. 잠시 후 다시 시도하세요.")
-    if not verify_password(payload.password, user.password_hash):
+        if not password_matches:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="사원번호 또는 비밀번호가 올바르지 않습니다.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="사용할 수 없는 계정입니다. 관리자에게 문의해 주세요.",
+        )
+
+    if not password_matches:
         user.failed_login_count += 1
         if user.failed_login_count >= MAX_FAILED_LOGINS:
             user.status = "locked"
-            user.locked_until = now + timedelta(minutes=LOCK_MINUTES)
+            user.locked_until = now + LOCK_DURATION
+            db.add(
+                AuditEvent(
+                    event_type="user.login_locked",
+                    actor_user_id=user.id,
+                    entity_type="user",
+                    entity_id=user.id,
+                    payload={"failed_login_count": user.failed_login_count},
+                )
+            )
         db.commit()
-        raise HTTPException(status_code=401, detail="사원번호 또는 비밀번호가 올바르지 않습니다.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="사원번호 또는 비밀번호가 올바르지 않습니다.",
+        )
 
+    user.status = "active"
     user.failed_login_count = 0
     user.locked_until = None
-    user.status = "active"
     user.last_login_at = now
+    if password_needs_rehash(user.password_hash):
+        user.password_hash = hash_password(supplied_password)
+        user.password_changed_at = now
+    db.add(
+        AuditEvent(
+            event_type="user.login_succeeded",
+            actor_user_id=user.id,
+            entity_type="user",
+            entity_id=user.id,
+            payload={},
+        )
+    )
     db.commit()
-    db.refresh(user)
-    return _response(user)
+
+    return _response(db, user)

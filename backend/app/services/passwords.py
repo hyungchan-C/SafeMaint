@@ -1,35 +1,35 @@
-import base64
-import hashlib
-import hmac
-import secrets
+"""Password hashing helpers for local SafeMaint accounts."""
+
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
 
-ALGORITHM = "pbkdf2_sha256"
-ITERATIONS = 600_000
+_password_hasher = PasswordHasher()
+
+# Missing users still perform one Argon2 verification to reduce account-enumeration
+# timing differences. This value is process-local and is never stored in the DB.
+DUMMY_PASSWORD_HASH = _password_hasher.hash("SafeMaint-Dummy-Password-Only")
 
 
 def hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, ITERATIONS)
-    return "$".join(
-        (
-            ALGORITHM,
-            str(ITERATIONS),
-            base64.urlsafe_b64encode(salt).decode(),
-            base64.urlsafe_b64encode(digest).decode(),
-        )
-    )
+    """Return an Argon2id hash with a fresh random salt."""
+
+    return _password_hasher.hash(password)
 
 
-def verify_password(password: str, encoded: str) -> bool:
+def verify_password(password: str, encoded_hash: str) -> bool:
+    """Return False for a mismatch or an invalid/unsupported stored hash."""
+
     try:
-        algorithm, iterations, salt_text, digest_text = encoded.split("$", 3)
-        if algorithm != ALGORITHM:
-            return False
-        salt = base64.urlsafe_b64decode(salt_text.encode())
-        expected = base64.urlsafe_b64decode(digest_text.encode())
-        actual = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, int(iterations))
-        return hmac.compare_digest(actual, expected)
-    except (TypeError, ValueError):
+        return _password_hasher.verify(encoded_hash, password)
+    except (VerifyMismatchError, InvalidHashError, VerificationError):
         return False
 
+
+def password_needs_rehash(encoded_hash: str) -> bool:
+    """Return whether a valid hash should be upgraded to current parameters."""
+
+    try:
+        return _password_hasher.check_needs_rehash(encoded_hash)
+    except (InvalidHashError, VerificationError):
+        return False
