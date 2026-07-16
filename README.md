@@ -53,6 +53,22 @@ DB 테이블과 관계는 [docs/database.md](docs/database.md), 전처리 결과
 `_test`로 끝나는 격리 DB에서만 실행합니다. 상세 준비와 재실행 명령은
 [ai/README.md](ai/README.md)의 **BGE-M3 임베딩 실험**을 참고하세요.
 
+채팅 화면에서 실제 BGE-M3 검색과 사고사례 출처를 사용하려면 샘플 실험 완료 후
+RAG Compose 구성을 함께 실행합니다.
+
+```powershell
+docker compose `
+  -f docker-compose.yml `
+  -f docker-compose.dev.yml `
+  -f docker-compose.rag.yml `
+  up -d --build
+```
+
+RAG 서비스가 실행되지 않거나 검색 DB가 준비되지 않은 경우에도 채팅 API는 작업
+키워드에 맞는 공통 안전수칙을 반환하며, 화면에 근거 검색이 연결되지 않았다는
+경고를 표시합니다. 화면에서 선택한 매뉴얼은 아직 파일 업로드·전처리 대상이
+아니므로 사고사례 검색 근거와 구분됩니다.
+
 ## 팀원 로컬 DB 온보딩
 
 각 팀원은 Git, Docker Desktop, DBeaver를 설치하고 Docker Desktop을 실행한 상태에서 시작합니다. Docker DB는 팀원 PC마다 독립적으로 생성됩니다.

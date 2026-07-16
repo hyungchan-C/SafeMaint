@@ -68,3 +68,38 @@ Git에 포함되지 않습니다.
 
 스크립트와 Python 명령은 DB 이름이 `_test`로 끝나지 않으면 실제 적재를 거부합니다.
 전체 9,223개 문서와 12,296개 청크는 이 실험에서 적재하지 않습니다.
+
+### 프런트 채팅과 BGE-M3 검색 연결
+
+위 실험으로 `safemaint_rag_test`에 임베딩이 준비된 뒤 다음 개발용 overlay를
+사용합니다. 무거운 Sentence Transformers 의존성은 기존 backend 이미지가 아닌
+별도 `rag` 서비스에만 설치됩니다.
+
+```powershell
+docker compose `
+  -f docker-compose.yml `
+  -f docker-compose.dev.yml `
+  -f docker-compose.rag.yml `
+  up -d --build
+```
+
+처음 실행할 때 RAG 이미지 빌드와 BGE-M3 로딩에 시간이 걸릴 수 있습니다.
+
+```powershell
+Invoke-RestMethod http://localhost:8010/health/ready
+
+$body = @{
+  question = "컨베이어밸트 베어링을 교체하려고 합니다"
+  context = @{ equipment_name = "컨베이어 CV-203"; component_name = "베어링" }
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://localhost:8000/api/v1/chat `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+응답의 `retrieval_mode`이 `bge-m3`이면 벡터 검색이 연결된 상태이고,
+`safety-fallback`이면 RAG 서비스 또는 격리 DB를 확인해야 합니다. 검색 결과는
+사고사례 기반 참고자료이며 작업 승인이나 제조사 정비 매뉴얼을 대체하지 않습니다.

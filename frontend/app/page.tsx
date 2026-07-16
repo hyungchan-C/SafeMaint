@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import type { AssessmentResponse } from "@/types/assessment";
+import type { ChatMessage, ChatResponse } from "@/types/chat";
 import { getApiBaseUrl } from "@/lib/api";
 
 type PageMode = "login" | "workspace" | "history";
@@ -278,10 +279,11 @@ function WorkspaceScreen({
   const [locationStatus, setLocationStatus] = useState("위치 미확인");
   const [activeTab, setActiveTab] = useState<"summary" | "accidents" | "evidence" | "tbm">("summary");
   const [question, setQuestion] = useState("");
-  const [messages, setMessages] = useState<{ role: "user" | "ai"; text: string }[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [form, setForm] = useState(initialForm);
   const [result, setResult] = useState<AssessmentResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isChatLoading, setIsChatLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [activeAudio, setActiveAudio] = useState<HTMLAudioElement | null>(null);
   const [error, setError] = useState("");
@@ -331,15 +333,57 @@ function WorkspaceScreen({
     }
   }
 
-  function sendChat(event: FormEvent<HTMLFormElement>) {
+  async function sendChat(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!question.trim()) return;
-    const answer = manuals.length
-      ? `등록된 매뉴얼 ${manuals.length}개와 공통 안전자료를 검색할 예정입니다. 현재 프로토타입에서는 전원 차단, LOTO, 잔류에너지 제거 여부를 먼저 확인하세요.`
-      : "설비·부품 매뉴얼을 등록하면 해당 문서 근거와 공통 안전자료를 함께 검색합니다. 현재 정보만으로는 작업 승인 여부를 확정할 수 없습니다.";
-    setMessages((current) => [...current, { role: "user", text: question.trim() }, { role: "ai", text: answer }]);
-    saveHistory(question.trim(), answer, "검토 필요");
+    const submittedQuestion = question.trim();
+    if (!submittedQuestion || isChatLoading) return;
+
     setQuestion("");
+    setIsChatLoading(true);
+    setMessages((current) => [...current, { role: "user", text: submittedQuestion }]);
+
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: submittedQuestion,
+          context: {
+            site_name: form.site_name,
+            equipment_name: form.equipment_name,
+            manufacturer: form.manufacturer || null,
+            model_number: form.model_number || null,
+            component_name: form.component_name || null,
+            task_type: form.task_type,
+            registered_manuals: manuals,
+          },
+        }),
+      });
+      const payload = (await response.json()) as ChatResponse & { detail?: string };
+      if (!response.ok || !payload.answer) {
+        throw new Error(payload.detail || "안전자료 검색에 실패했습니다.");
+      }
+      setMessages((current) => [
+        ...current,
+        {
+          role: "ai",
+          text: payload.answer,
+          sources: payload.sources,
+          retrievalMode: payload.retrieval_mode,
+          warning: payload.warning,
+        },
+      ]);
+      saveHistory(
+        submittedQuestion,
+        `${payload.answer.slice(0, 180)}${payload.answer.length > 180 ? "…" : ""}`,
+        "검토 필요",
+      );
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.";
+      setMessages((current) => [...current, { role: "ai", text: message, warning: "검색 결과를 생성하지 못했습니다." }]);
+    } finally {
+      setIsChatLoading(false);
+    }
   }
 
   function updateField(field: keyof typeof initialForm, value: string) {
@@ -463,14 +507,44 @@ function WorkspaceScreen({
       <section className="chat-stage upgraded-chat">
         <div className="chat-heading"><div><strong>SafeMaint AI 상담</strong><span>분석 결과와 등록 문서를 바탕으로 후속 질문을 입력하세요.</span></div><button type="button" onClick={() => setMessages([])}>대화 지우기</button></div>
         <div className="chat-history">
-          {messages.length === 0 ? <div className="chat-empty">💬 작업 내용이나 부품 관련 질문을 입력하세요.</div> : messages.map((message, index) => <div className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}><strong>{message.role === "user" ? "사용자" : "SafeMaint AI"}</strong>{message.text}</div>)}
+          {messages.length === 0 ? (
+            <div className="chat-empty">💬 작업 내용이나 부품 관련 질문을 입력하세요.</div>
+          ) : messages.map((message, index) => (
+            <div className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}>
+              <strong>{message.role === "user" ? "사용자" : "SafeMaint AI"}</strong>
+              {message.role === "ai" && message.retrievalMode && (
+                <span className={`retrieval-badge ${message.retrievalMode}`}>
+                  {message.retrievalMode === "bge-m3" ? "BGE-M3 근거 검색" : "공통 안전수칙"}
+                </span>
+              )}
+              <p className="chat-answer-text">{message.text}</p>
+              {message.warning && <p className="chat-warning">⚠ {message.warning}</p>}
+              {message.sources && message.sources.length > 0 && (
+                <div className="chat-source-list">
+                  <strong>검색 근거 {message.sources.length}건</strong>
+                  {message.sources.map((source) => (
+                    <article key={source.chunk_id} className="chat-source-card">
+                      <div>
+                        <span>{source.source_type}</span>
+                        <span>유사도 {(source.similarity * 100).toFixed(1)}%</span>
+                      </div>
+                      <strong>{source.title}</strong>
+                      <p>{source.excerpt}</p>
+                      {source.url && <a href={source.url} target="_blank" rel="noreferrer">원문 확인</a>}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+          {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>BGE-M3 안전자료를 검색하고 있습니다…</div>}
         </div>
         <form className="chat-input-row" onSubmit={sendChat}>
           <button type="button" className="icon-action" title="음성 입력" onClick={() => window.alert("음성 입력 기능은 STT 연결 예정입니다.")}>🎤</button>
           <label className="icon-action file-icon" title="사진 첨부">📷<input type="file" accept="image/*" onChange={(event) => setSitePhotoName(event.target.files?.[0]?.name ?? "")} /></label>
           <label className="icon-action file-icon" title="문서 첨부">📎<input type="file" accept="application/pdf" multiple onChange={(event) => addManuals(event.target.files)} /></label>
-          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="예: 전원을 차단하지 않고 센서만 빠르게 교체해도 될까요?" />
-          <button type="submit">전송</button>
+          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="예: 전원을 차단하지 않고 센서만 빠르게 교체해도 될까요?" disabled={isChatLoading} />
+          <button type="submit" disabled={isChatLoading || !question.trim()}>{isChatLoading ? "검색 중" : "전송"}</button>
         </form>
       </section>
 

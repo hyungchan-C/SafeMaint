@@ -21,6 +21,10 @@ class Settings:
     )
     db_pool_size: int = int(getenv("DB_POOL_SIZE", "5"))
     db_max_overflow: int = int(getenv("DB_MAX_OVERFLOW", "10"))
+    rag_service_url: str | None = getenv("RAG_SERVICE_URL") or None
+    rag_request_timeout_seconds: float = float(
+        getenv("RAG_REQUEST_TIMEOUT_SECONDS", "180")
+    )
     tts_voice: str = getenv("TTS_VOICE", "F1")
     tts_language: str = getenv("TTS_LANGUAGE", "ko")
     tts_steps: int = int(getenv("TTS_STEPS", "8"))
