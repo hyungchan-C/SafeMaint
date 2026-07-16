@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import patch
 
 from httpx import ASGITransport, AsyncClient
 
@@ -43,3 +44,20 @@ def test_assessment_preview_returns_rule_based_draft() -> None:
     assert any(item["accident_type"] == "끼임" for item in body["hazards"])
     assert any(item["accident_type"] == "감전" for item in body["hazards"])
     assert body["tbm_checklist"]
+
+
+def test_ai_chat_returns_model_answer() -> None:
+    with patch("app.api.routes.ai.AIService.answer", return_value="전원을 차단하고 LOTO를 적용하세요."):
+        response = asyncio.run(
+            request(
+                "POST",
+                "/api/v1/ai/chat",
+                json={"question": "센서를 교체해도 될까요?", "context": "에너지원: 전기"},
+            )
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": "전원을 차단하고 LOTO를 적용하세요.",
+        "model": "gpt-4o-mini",
+    }

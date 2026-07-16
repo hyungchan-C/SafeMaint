@@ -1,0 +1,10 @@
+.git
+.env
+**/__pycache__/
+**/*.py[cod]
+ai/.model-cache/
+ai/.venv*/
+frontend/.next/
+frontend/node_modules/
+reports/
+전처리된데이터/

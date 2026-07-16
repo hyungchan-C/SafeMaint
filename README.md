@@ -53,6 +53,29 @@ DB 테이블과 관계는 [docs/database.md](docs/database.md), 전처리 결과
 `_test`로 끝나는 격리 DB에서만 실행합니다. 상세 준비와 재실행 명령은
 [ai/README.md](ai/README.md)의 **BGE-M3 임베딩 실험**을 참고하세요.
 
+채팅 화면에서 실제 BGE-M3 검색과 사고사례 출처를 사용하려면 샘플 실험 완료 후
+RAG Compose 구성을 함께 실행합니다.
+
+```powershell
+docker compose `
+  --env-file .env `
+  -f docker-compose.yml `
+  -f docker-compose.dev.yml `
+  -f docker-compose.rag.yml `
+  up -d --build
+```
+
+RAG 서비스가 실행되지 않거나 검색 DB가 준비되지 않은 경우에도 채팅 API는 작업
+키워드에 맞는 공통 안전수칙을 반환하며, 화면에 근거 검색이 연결되지 않았다는
+경고를 표시합니다. 화면에서 선택한 매뉴얼은 아직 파일 업로드·전처리 대상이
+아니므로 사고사례 검색 근거와 구분됩니다.
+
+`OPENAI_API_KEY`가 설정되어 있으면 채팅은 **BGE-M3·pgvector 검색 → 검색 근거와
+작업정보를 OpenAI 모델에 전달 → 답변과 검색 출처를 함께 표시**하는 순서로
+동작합니다. 키가 없거나 OpenAI 요청이 실패하면 검색 서비스의 기본 안전 안내로
+자동 전환하므로 RAG 근거는 유지됩니다. 현재 OpenAI 연동은 Qwen3 적용 전 실험용이며,
+모델 호출부는 `backend/app/services/ai.py`에 분리되어 있습니다.
+
 ## 팀원 로컬 DB 온보딩
 
 각 팀원은 Git, Docker Desktop, DBeaver를 설치하고 Docker Desktop을 실행한 상태에서 시작합니다. Docker DB는 팀원 PC마다 독립적으로 생성됩니다.
@@ -99,6 +122,28 @@ POSTGRES_USER=safemaint
 POSTGRES_PASSWORD=change-this-local-password
 POSTGRES_PORT=5432
 DATABASE_URL=postgresql+psycopg://safemaint:change-this-local-password@db:5432/safemaint
+```
+
+실험용 OpenAI 답변 생성을 사용하려면 API 키도 입력합니다. 사용하지 않으면 BGE-M3
+검색과 규칙 기반 안전 안내만 동작합니다. `.env`는 Git에서 제외되므로 실제 키를
+`.env.example`이나 소스 코드에 넣지 마세요.
+
+```dotenv
+OPENAI_API_KEY=sk-여기에_본인의_API_키
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_TIMEOUT_SECONDS=30
+OPENAI_MAX_OUTPUT_TOKENS=1200
+```
+
+OpenAI 연동 시 사업장·설비·부품·작업 설명과 검색된 사고사례 일부가 외부 API로
+전송됩니다. 실제 고객정보나 개인정보를 입력하기 전 조직의 데이터 처리 기준을
+확인하세요. 화면에서 선택한 매뉴얼은 파일명 대신 개수만 전달되며, 파일 내용은
+업로드·전처리 전에는 전송되지 않습니다.
+
+키를 변경한 뒤에는 `verify-db.ps1`이 아니라 `setup-dev.ps1` 또는 아래 Compose 명령으로 backend를 다시 빌드해야 적용됩니다.
+
+```powershell
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml up -d --build backend frontend
 ```
 
 설정이 끝나면 로컬에서 실행 중인 `npm run dev`와 `uvicorn`을 먼저 `Ctrl+C`로 종료합니다. 로컬 프로세스가 3000·8000 포트를 사용 중이면 Docker의 `frontend`·`backend` 컨테이너가 `Created` 상태에 머물며 브라우저에는 `Failed to fetch`가 표시됩니다.
