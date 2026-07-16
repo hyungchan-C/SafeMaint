@@ -62,7 +62,7 @@ async def chat(payload: ChatRequest) -> ChatResponse:
     warning = None
     if not sources:
         warning = (
-            "현재 유사도 기준을 충족한 사고사례가 없어 공통 안전수칙만 표시했습니다. "
+            "현재 검색 범위와 유사도 기준을 충족한 근거 문서가 없어 공통 안전수칙만 표시했습니다. "
             "제조사 매뉴얼과 현장 조건을 별도로 확인하세요."
         )
     if payload.context.registered_manuals:

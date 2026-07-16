@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from threading import Lock
+from uuid import UUID
 
 import numpy as np
 import psycopg
@@ -24,6 +25,49 @@ def psycopg_database_url(value: str) -> str:
     if value.startswith("postgresql+psycopg://"):
         return "postgresql://" + value.removeprefix("postgresql+psycopg://")
     return value
+
+
+def normalize_source_types(
+    source_types: Sequence[str] | None,
+) -> tuple[str, ...] | None:
+    if source_types is None:
+        return None
+    normalized: list[str] = []
+    for source_type in source_types:
+        value = source_type.strip()
+        if not value:
+            raise ValueError("source_types must not contain blank values")
+        if value not in normalized:
+            normalized.append(value)
+    if not normalized:
+        raise ValueError("source_types must not be empty; use None for all sources")
+    return tuple(normalized)
+
+
+def normalize_document_ids(
+    document_ids: Sequence[UUID] | None,
+) -> tuple[UUID, ...] | None:
+    if document_ids is None:
+        return None
+    normalized = tuple(dict.fromkeys(document_ids))
+    if not normalized:
+        raise ValueError("document_ids must not be empty; use None for all documents")
+    return normalized
+
+
+def scope_sql(
+    source_types: tuple[str, ...] | None,
+    document_ids: tuple[UUID, ...] | None,
+) -> tuple[str, list[object]]:
+    clauses: list[str] = []
+    parameters: list[object] = []
+    if source_types is not None:
+        clauses.append("AND d.source_type = ANY(%s)")
+        parameters.append(list(source_types))
+    if document_ids is not None:
+        clauses.append("AND d.id = ANY(%s)")
+        parameters.append(list(document_ids))
+    return "\n".join(clauses), parameters
 
 
 class BgeM3Embedder:
@@ -79,13 +123,25 @@ class PgvectorRetriever:
         )
         return " ".join(value.strip() for value in values if value and value.strip())
 
-    def ready_chunk_count(self) -> int:
-        query = """
+    def ready_chunk_count(
+        self,
+        source_types: Sequence[str] | None = None,
+        document_ids: Sequence[UUID] | None = None,
+    ) -> int:
+        resolved_source_types = normalize_source_types(
+            self.settings.source_types if source_types is None else source_types
+        )
+        resolved_document_ids = normalize_document_ids(document_ids)
+        scope_clause, scope_parameters = scope_sql(
+            resolved_source_types,
+            resolved_document_ids,
+        )
+        query = f"""
             SELECT COUNT(*)
             FROM document_chunks dc
             JOIN documents d ON d.id = dc.document_id
-            WHERE d.source_type = 'incident'
-              AND d.access_level <> 'private'
+            WHERE d.access_level <> 'private'
+              {scope_clause}
               AND dc.embedding_status = 'ready'
               AND dc.embedding IS NOT NULL
               AND dc.embedding_model = %s
@@ -95,29 +151,46 @@ class PgvectorRetriever:
             connect_timeout=5,
         ) as connection:
             with connection.cursor() as cursor:
-                cursor.execute(query, (self.settings.model_name,))
+                cursor.execute(
+                    query,
+                    (*scope_parameters, self.settings.model_name),
+                )
                 return int(cursor.fetchone()[0])
 
-    def search(self, request: ChatRequest) -> list[ChatSource]:
+    def search(
+        self,
+        request: ChatRequest,
+        source_types: Sequence[str] | None = None,
+        document_ids: Sequence[UUID] | None = None,
+    ) -> list[ChatSource]:
+        resolved_source_types = normalize_source_types(
+            self.settings.source_types if source_types is None else source_types
+        )
+        resolved_document_ids = normalize_document_ids(document_ids)
+        scope_clause, scope_parameters = scope_sql(
+            resolved_source_types,
+            resolved_document_ids,
+        )
         vector = self.embedder.encode(self.build_search_query(request))
-        query = """
+        query = f"""
             WITH best_per_document AS (
                 SELECT DISTINCT ON (d.id)
                     d.id::text AS document_id,
                     dc.id::text AS chunk_id,
                     d.title,
-                    CONCAT(
-                        'incident:',
-                        COALESCE(d.metadata->>'dataset_type', 'unknown')
-                    ) AS source_type,
+                    CASE
+                        WHEN d.metadata->>'dataset_type' IS NOT NULL
+                            THEN CONCAT(d.source_type, ':', d.metadata->>'dataset_type')
+                        ELSE d.source_type
+                    END AS source_type,
                     LEFT(dc.content, 420) AS excerpt,
                     COALESCE(dc.page_number, dc.page_start) AS page,
                     d.source_url AS url,
                     dc.embedding <=> %s AS cosine_distance
                 FROM document_chunks dc
                 JOIN documents d ON d.id = dc.document_id
-                WHERE d.source_type = 'incident'
-                  AND d.access_level <> 'private'
+                WHERE d.access_level <> 'private'
+                  {scope_clause}
                   AND dc.embedding_status = 'ready'
                   AND dc.embedding IS NOT NULL
                   AND dc.embedding_model = %s
@@ -141,6 +214,7 @@ class PgvectorRetriever:
         distance_limit = 1.0 - self.settings.min_similarity
         parameters = (
             vector,
+            *scope_parameters,
             self.settings.model_name,
             int(vector.shape[0]),
             vector,

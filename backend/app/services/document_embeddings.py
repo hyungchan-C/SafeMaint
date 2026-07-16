@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Document, DocumentChunk
 from app.services.document_ingestion import (
-    assert_isolated_test_database,
     normalize_chunk_content,
 )
 
@@ -75,6 +74,8 @@ class EmbeddingRunResult:
     model: str
     device: str
     requested_limit: int
+    source_types: tuple[str, ...] | None = None
+    document_ids: tuple[str, ...] | None = None
     processed: int = 0
     newly_ready: int = 0
     newly_failed: int = 0
@@ -92,6 +93,9 @@ class SearchHit:
     chunk_id: UUID
     external_id: str
     title: str
+    source_type: str
+    publisher: str | None
+    page_number: int | None
     dataset_type: str | None
     chunk_index: int
     cosine_distance: float
@@ -108,6 +112,46 @@ class SearchHit:
 
 def normalize_text_for_embedding(value: str) -> str:
     return normalize_chunk_content(value)
+
+
+def normalize_source_types(
+    source_types: Sequence[str] | None,
+) -> tuple[str, ...] | None:
+    if source_types is None:
+        return None
+    normalized: list[str] = []
+    for source_type in source_types:
+        value = source_type.strip()
+        if not value:
+            raise ValueError("source_types must not contain blank values")
+        if value not in normalized:
+            normalized.append(value)
+    if not normalized:
+        raise ValueError("source_types must not be empty; use None for all sources")
+    return tuple(normalized)
+
+
+def normalize_document_ids(
+    document_ids: Sequence[UUID] | None,
+) -> tuple[UUID, ...] | None:
+    if document_ids is None:
+        return None
+    normalized = tuple(dict.fromkeys(document_ids))
+    if not normalized:
+        raise ValueError("document_ids must not be empty; use None for all documents")
+    return normalized
+
+
+def _document_scope_filters(
+    source_types: tuple[str, ...] | None,
+    document_ids: tuple[UUID, ...] | None,
+) -> tuple[object, ...]:
+    filters: list[object] = []
+    if source_types is not None:
+        filters.append(Document.source_type.in_(source_types))
+    if document_ids is not None:
+        filters.append(Document.id.in_(document_ids))
+    return tuple(filters)
 
 
 def _validate_vectors(
@@ -162,30 +206,39 @@ def _clear_embedding_error(chunk: DocumentChunk) -> None:
     chunk.metadata_json = metadata
 
 
-def _ready_dimensions(session: Session, model_name: str) -> set[int]:
+def _ready_dimensions(
+    session: Session,
+    model_name: str,
+    source_types: tuple[str, ...] | None = None,
+    document_ids: tuple[UUID, ...] | None = None,
+) -> set[int]:
     return {
         int(value)
         for value in session.scalars(
             select(distinct(DocumentChunk.embedding_dimension))
             .join(Document)
             .where(
-                Document.source_type == "incident",
                 DocumentChunk.embedding_status == "ready",
                 DocumentChunk.embedding_model == model_name,
                 DocumentChunk.embedding_dimension.is_not(None),
+                *_document_scope_filters(source_types, document_ids),
             )
         )
         if value is not None
     }
 
 
-def _status_counts(session: Session) -> dict[str, int]:
+def _status_counts(
+    session: Session,
+    source_types: tuple[str, ...] | None = None,
+    document_ids: tuple[UUID, ...] | None = None,
+) -> dict[str, int]:
     return {
         status: int(count)
         for status, count in session.execute(
             select(DocumentChunk.embedding_status, func.count(DocumentChunk.id))
             .join(Document)
-            .where(Document.source_type == "incident")
+            .where(*_document_scope_filters(source_types, document_ids))
             .group_by(DocumentChunk.embedding_status)
         )
     }
@@ -194,24 +247,35 @@ def _status_counts(session: Session) -> dict[str, int]:
 def embed_pending_chunks(
     session_factory: Callable[[], Session],
     embedder: TextEmbedder,
+    *,
     limit: int = 500,
     batch_size: int = 16,
+    source_types: Sequence[str] | None = None,
+    document_ids: Sequence[UUID] | None = None,
 ) -> EmbeddingRunResult:
     if not 1 <= limit <= 500:
-        raise ValueError("limit must be between 1 and 500 for this experiment")
+        raise ValueError("limit must be between 1 and 500")
     if batch_size <= 0:
         raise ValueError("batch_size must be greater than zero")
+
+    normalized_source_types = normalize_source_types(source_types)
+    normalized_document_ids = normalize_document_ids(document_ids)
 
     result = EmbeddingRunResult(
         model=embedder.model_name,
         device=embedder.device,
         requested_limit=limit,
+        source_types=normalized_source_types,
+        document_ids=(
+            tuple(str(document_id) for document_id in normalized_document_ids)
+            if normalized_document_ids is not None
+            else None
+        ),
     )
     with session_factory() as session:
         bind = session.get_bind()
         if bind is None:
             raise EmbeddingError("Database session is not bound to an engine")
-        assert_isolated_test_database(str(bind.url))
         existing_dimensions = _ready_dimensions(session, embedder.model_name)
     if len(existing_dimensions) > 1:
         raise EmbeddingError(
@@ -228,8 +292,11 @@ def embed_pending_chunks(
                     select(DocumentChunk.id, DocumentChunk.content)
                     .join(Document)
                     .where(
-                        Document.source_type == "incident",
                         DocumentChunk.embedding_status == "pending",
+                        *_document_scope_filters(
+                            normalized_source_types,
+                            normalized_document_ids,
+                        ),
                     )
                     .order_by(DocumentChunk.created_at, DocumentChunk.id)
                     .limit(current_batch_size)
@@ -305,7 +372,11 @@ def embed_pending_chunks(
         result.processed += len(pending_rows)
 
     with session_factory() as session:
-        result.status_counts = _status_counts(session)
+        result.status_counts = _status_counts(
+            session,
+            normalized_source_types,
+            normalized_document_ids,
+        )
         final_dimensions = _ready_dimensions(session, embedder.model_name)
     if len(final_dimensions) > 1:
         raise EmbeddingError(
@@ -322,6 +393,8 @@ def search_similar_chunks(
     query: str,
     top_k: int = 5,
     min_similarity: float = 0.25,
+    source_types: Sequence[str] | None = None,
+    document_ids: Sequence[UUID] | None = None,
 ) -> tuple[int, list[SearchHit]]:
     if top_k <= 0:
         raise ValueError("top_k must be greater than zero")
@@ -331,16 +404,28 @@ def search_similar_chunks(
     if not normalized_query:
         raise ValueError("query must not be empty")
 
+    normalized_source_types = normalize_source_types(source_types)
+    normalized_document_ids = normalize_document_ids(document_ids)
+
     with session_factory() as session:
-        dimensions = _ready_dimensions(session, embedder.model_name)
-    if len(dimensions) != 1:
+        dimensions = _ready_dimensions(
+            session,
+            embedder.model_name,
+            normalized_source_types,
+            normalized_document_ids,
+        )
+    if len(dimensions) > 1:
         raise EmbeddingError(
-            f"Expected exactly one ready vector dimension for {embedder.model_name}, "
+            f"Expected at most one ready vector dimension for {embedder.model_name}, "
             f"found {sorted(dimensions)}"
         )
-    dimension = next(iter(dimensions))
+    expected_dimension = next(iter(dimensions), None)
     query_vectors = embedder.encode([normalized_query], batch_size=1)
-    _validate_vectors(query_vectors, expected_count=1, expected_dimension=dimension)
+    dimension = _validate_vectors(
+        query_vectors,
+        expected_count=1,
+        expected_dimension=expected_dimension,
+    )
     query_vector = query_vectors[0]
 
     distance = DocumentChunk.embedding.cosine_distance(query_vector).label(
@@ -351,12 +436,15 @@ def search_similar_chunks(
             select(Document, DocumentChunk, distance)
             .join(DocumentChunk, DocumentChunk.document_id == Document.id)
             .where(
-                Document.source_type == "incident",
                 DocumentChunk.embedding_status == "ready",
                 DocumentChunk.embedding.is_not(None),
                 DocumentChunk.embedding_model == embedder.model_name,
                 DocumentChunk.embedding_dimension == dimension,
                 distance <= 1.0 - min_similarity,
+                *_document_scope_filters(
+                    normalized_source_types,
+                    normalized_document_ids,
+                ),
             )
             .order_by(distance)
             .limit(top_k)
@@ -372,6 +460,9 @@ def search_similar_chunks(
                 chunk_id=chunk.id,
                 external_id=document.external_id,
                 title=document.title,
+                source_type=document.source_type,
+                publisher=document.publisher,
+                page_number=chunk.page_number or chunk.page_start,
                 dataset_type=metadata.get("dataset_type"),
                 chunk_index=chunk.chunk_index,
                 cosine_distance=distance_value,
