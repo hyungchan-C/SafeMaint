@@ -77,6 +77,7 @@ Git에 포함되지 않습니다.
 
 ```powershell
 docker compose `
+  --env-file .env `
   -f docker-compose.yml `
   -f docker-compose.dev.yml `
   -f docker-compose.rag.yml `

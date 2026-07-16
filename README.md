@@ -58,6 +58,7 @@ RAG Compose 구성을 함께 실행합니다.
 
 ```powershell
 docker compose `
+  --env-file .env `
   -f docker-compose.yml `
   -f docker-compose.dev.yml `
   -f docker-compose.rag.yml `

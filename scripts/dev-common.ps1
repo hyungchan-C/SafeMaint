@@ -32,7 +32,7 @@ function Read-SafeMaintEnvFile {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw (
             ".env 파일을 찾을 수 없습니다: {0}`n" -f $Path
-        ) + "저장소 루트에서 Copy-Item .env.example .env 실행 후 비밀번호를 변경하세요."
+        ) + "저장소 루트에 .env 파일을 만든 뒤 로컬 비밀번호와 필수 환경변수를 입력하세요."
     }
 
     $values = @{}
