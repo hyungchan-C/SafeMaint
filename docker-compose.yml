@@ -8,6 +8,8 @@ x-backend-service: &backend-service
     APP_ENV: ${APP_ENV:-production}
     CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting SafeMaint}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
     TTS_VOICE: ${TTS_VOICE:-F1}
     TTS_LANGUAGE: ${TTS_LANGUAGE:-ko}
     TTS_STEPS: ${TTS_STEPS:-8}

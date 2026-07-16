@@ -101,6 +101,19 @@ POSTGRES_PORT=5432
 DATABASE_URL=postgresql+psycopg://safemaint:change-this-local-password@db:5432/safemaint
 ```
 
+메인 화면의 AI 안전 질의 기능을 사용하려면 OpenAI API 키도 입력합니다. `.env`는 Git에서 제외되므로 실제 키를 `.env.example`이나 소스 코드에 넣지 마세요.
+
+```dotenv
+OPENAI_API_KEY=sk-여기에_본인의_API_키
+OPENAI_MODEL=gpt-4o-mini
+```
+
+키를 변경한 뒤에는 `verify-db.ps1`이 아니라 `setup-dev.ps1` 또는 아래 Compose 명령으로 backend를 다시 빌드해야 적용됩니다.
+
+```powershell
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml up -d --build backend frontend
+```
+
 설정이 끝나면 로컬에서 실행 중인 `npm run dev`와 `uvicorn`을 먼저 `Ctrl+C`로 종료합니다. 로컬 프로세스가 3000·8000 포트를 사용 중이면 Docker의 `frontend`·`backend` 컨테이너가 `Created` 상태에 머물며 브라우저에는 `Failed to fetch`가 표시됩니다.
 
 이후 다음 명령 하나로 DB, migration, seed, backend, frontend를 모두 Docker에서 실행합니다.

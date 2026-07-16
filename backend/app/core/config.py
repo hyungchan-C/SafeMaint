@@ -21,6 +21,8 @@ class Settings:
     )
     db_pool_size: int = int(getenv("DB_POOL_SIZE", "5"))
     db_max_overflow: int = int(getenv("DB_MAX_OVERFLOW", "10"))
+    openai_api_key: str = getenv("OPENAI_API_KEY", "")
+    openai_model: str = getenv("OPENAI_MODEL", "gpt-4o-mini")
     tts_voice: str = getenv("TTS_VOICE", "F1")
     tts_language: str = getenv("TTS_LANGUAGE", "ko")
     tts_steps: int = int(getenv("TTS_STEPS", "8"))
