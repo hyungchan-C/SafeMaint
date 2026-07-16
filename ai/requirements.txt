@@ -12,3 +12,11 @@
 
 docling==2.113.0
 PyMuPDF==1.28.0
+
+# ai/embeddings/ 전용 의존성: 임베딩 생성(BGE-M3) + DB 적재
+# SQLAlchemy/psycopg/pgvector는 backend/의 모델(app.db.models.document)과
+# 세션(app.db.session)을 그대로 재사용하기 위해 필요합니다.
+sentence-transformers>=3.0,<4.0
+SQLAlchemy>=2.0,<3.0
+psycopg[binary]>=3.3,<4.0
+pgvector>=0.4,<1.0

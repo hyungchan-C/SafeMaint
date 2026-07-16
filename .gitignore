@@ -30,6 +30,9 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 
+# Local dev-only Docker overrides (e.g. exposing db port for manual testing)
+docker-compose.override.yml
+
 # Local data and model artifacts
 /ai/data/raw/
 /ai/data/processed/

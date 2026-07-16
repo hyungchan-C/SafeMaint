@@ -45,3 +45,35 @@ result["chunks"]    # 청크 레코드 N건
 ```powershell
 .\ai\.venv\Scripts\python.exe -m pytest ai\tests -q
 ```
+
+## DB 적재 (`ai/embeddings/`)
+
+`ai/embeddings/ingest_pdf.py`의 `ingest_pdf()`는 `process_pdf()` 결과를 그대로
+`documents`/`document_chunks`에 저장합니다. **여기서는 임베딩을 만들지 않습니다** —
+청크는 `embedding_status="pending"` 상태로만 적재되고, 실제 벡터 생성은
+`backend/app/services/document_embeddings.py`의 `embed_pending_chunks()`가
+별도 배치로 처리합니다(적재와 임베딩을 분리한 구조, 팀원의 임베딩 구현체를
+그대로 재사용).
+
+DB 스키마·세션은 backend의 SQLAlchemy 모델(`app.db.models.document`)을 그대로
+가져다 쓰므로(`db_loader.py`), `ai/requirements.txt`에 `SQLAlchemy`/`psycopg`/
+`pgvector`가 추가돼 있고, `DATABASE_URL` 환경변수(backend와 동일한 규칙)로
+접속할 Postgres가 필요합니다.
+
+```python
+from ai.embeddings.ingest_pdf import ingest_pdf
+
+result = ingest_pdf(
+    pdf_path="ai/data/raw/manual.pdf",
+    product_type="포토센서",
+    model_name="PQ Series",
+    manufacturer="오토닉스",
+)
+result["document_id"]  # 적재된 documents.id (UUID)
+result["chunk_count"]  # 적재된 청크 수
+```
+
+> ⚠️ 현재 `embed_pending_chunks()`는 `Document.source_type == "incident"`로
+> 필터링돼 있어, PDF 매뉴얼(`source_type="manual"`)로 적재된 청크는 이 함수가
+> 아직 집어가지 않습니다. 실제로 임베딩이 채워지려면 이 필터를 일반화하는
+> 작업이 팀원 쪽에 필요합니다.
