@@ -8,6 +8,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-safemaint}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before starting SafeMaint}@db:5432/${RAG_DATABASE_NAME:-safemaint_rag_test}
       RAG_MODEL: ${RAG_MODEL:-BAAI/bge-m3}
+      RAG_SOURCE_TYPES: ${RAG_SOURCE_TYPES:-}
       RAG_MODEL_CACHE_DIR: /models
       RAG_DEVICE: ${RAG_DEVICE:-cpu}
       RAG_TOP_K: ${RAG_TOP_K:-5}
