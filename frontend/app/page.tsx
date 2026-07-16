@@ -37,6 +37,7 @@ const initialForm = {
 const levelLabel = { low: "낮음", medium: "보통", high: "높음" } as const;
 
 const STORAGE_KEYS = {
+  users: "safemaint.users",
   session: "safemaint.session",
   history: "safemaint.history",
   settings: "safemaint.settings",
@@ -132,10 +133,9 @@ function LoginScreen({ onLogin }: { onLogin: (user: LocalUser) => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ employee_number: loginId, password }),
       });
-      const payload = await response.json() as { id?: string; employee_number?: string; name?: string; detail?: string | Array<{ msg: string }> };
+      const payload = await response.json() as { id?: string; employee_number?: string; name?: string; detail?: string };
       if (!response.ok || !payload.id || !payload.employee_number || !payload.name) {
-        const detail = Array.isArray(payload.detail) ? payload.detail[0]?.msg : payload.detail;
-        throw new Error(detail || "로그인에 실패했습니다.");
+        throw new Error(payload.detail || "로그인에 실패했습니다.");
       }
       onLogin({ id: payload.id, username: payload.employee_number, displayName: payload.name });
     } catch (requestError) {
@@ -154,17 +154,84 @@ function LoginScreen({ onLogin }: { onLogin: (user: LocalUser) => void }) {
         <form onSubmit={submit} className="auth-form">
           <label>
             사원번호(ID)
-            <input value={loginId} onChange={(event) => setLoginId(event.target.value)} maxLength={30} autoComplete="username" required />
+            <input value={loginId} onChange={(event) => setLoginId(event.target.value)} required />
           </label>
           <label>
             비밀번호
-            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} maxLength={128} autoComplete="current-password" required />
+            <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required />
           </label>
           {error && <p className="error-message">{error}</p>}
           <button className="primary-button" disabled={isLoading} type="submit">{isLoading ? "로그인 중..." : "로그인"}</button>
         </form>
         <a className="secondary-button auth-link" href="/signup">회원가입</a>
         <p className="prototype-note">계정은 SafeMaint 데이터베이스에 안전하게 저장됩니다.</p>
+      </section>
+    </main>
+  );
+}
+
+function SignupScreen({ onComplete, onBack }: { onComplete: () => void; onBack: () => void }) {
+  const [name, setName] = useState("");
+  const [signupId, setSignupId] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [agreed, setAgreed] = useState(false);
+  const [message, setMessage] = useState("");
+  const [isError, setIsError] = useState(false);
+
+  const [isLoading, setIsLoading] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (signupId.length < 4 || password.length < 8) {
+      setMessage("아이디는 4자 이상, 비밀번호는 8자 이상 입력해 주세요.");
+      setIsError(true);
+      return;
+    }
+    if (password !== confirm) {
+      setMessage("비밀번호가 일치하지 않습니다.");
+      setIsError(true);
+      return;
+    }
+    if (!agreed) {
+      setMessage("이용 안내에 동의해 주세요.");
+      setIsError(true);
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: signupId, display_name: name, password }),
+      });
+      const payload = await response.json() as { detail?: string };
+      if (!response.ok) throw new Error(payload.detail || "회원가입에 실패했습니다.");
+      setMessage("회원가입이 완료되었습니다. 로그인 화면으로 이동합니다.");
+      setIsError(false);
+      window.setTimeout(onComplete, 700);
+    } catch (requestError) {
+      setMessage(requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.");
+      setIsError(true);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-card wide">
+        <h1>회원가입</h1>
+        <form onSubmit={submit} className="auth-form">
+          <label>이름<input value={name} onChange={(event) => setName(event.target.value)} required /></label>
+          <label>아이디<input value={signupId} onChange={(event) => setSignupId(event.target.value)} required /></label>
+          <label>비밀번호<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
+          <label>비밀번호 확인<input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} required /></label>
+          <label className="checkbox-line"><input type="checkbox" checked={agreed} onChange={(event) => setAgreed(event.target.checked)} />서비스 이용 및 개인정보 처리 안내에 동의합니다.</label>
+          {message && <p className={isError ? "error-message" : "success-message"}>{message}</p>}
+          <button className="primary-button" disabled={isLoading} type="submit">{isLoading ? "가입 중..." : "가입하기"}</button>
+        </form>
+        <button className="secondary-button" onClick={onBack}>로그인 화면으로</button>
       </section>
     </main>
   );
@@ -206,12 +273,17 @@ function WorkspaceScreen({
 }) {
   const [volume, setVolume] = useState(70);
   const [fontSize, setFontSize] = useState<FontSize>("medium");
-  const [manualName, setManualName] = useState("");
+  const [manuals, setManuals] = useState<string[]>([]);
+  const [sitePhotoName, setSitePhotoName] = useState("");
+  const [locationStatus, setLocationStatus] = useState("위치 미확인");
+  const [activeTab, setActiveTab] = useState<"summary" | "accidents" | "evidence" | "tbm">("summary");
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<{ role: "user" | "ai"; text: string }[]>([]);
   const [form, setForm] = useState(initialForm);
   const [result, setResult] = useState<AssessmentResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [activeAudio, setActiveAudio] = useState<HTMLAudioElement | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -225,6 +297,8 @@ function WorkspaceScreen({
   }, [volume, fontSize]);
 
   const fontClass = useMemo(() => `font-${fontSize}`, [fontSize]);
+  const highestRisk = result?.hazards.some((hazard) => hazard.risk_level === "high") ? "high" : result?.hazards.some((hazard) => hazard.risk_level === "medium") ? "medium" : result ? "low" : "pending";
+  const accidentTypes = result ? Array.from(new Set(result.hazards.map((hazard) => hazard.accident_type))) : [];
 
   function saveHistory(questionText: string, summary: string, riskLabel: string) {
     const current = readStorage<HistoryItem[]>(STORAGE_KEYS.history, []);
@@ -260,8 +334,8 @@ function WorkspaceScreen({
   function sendChat(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!question.trim()) return;
-    const answer = manualName
-      ? `등록된 매뉴얼(${manualName})과 공통 안전자료를 검색할 예정입니다. 현재 프로토타입에서는 전원 차단, LOTO, 잔류에너지 제거 여부를 먼저 확인하세요.`
+    const answer = manuals.length
+      ? `등록된 매뉴얼 ${manuals.length}개와 공통 안전자료를 검색할 예정입니다. 현재 프로토타입에서는 전원 차단, LOTO, 잔류에너지 제거 여부를 먼저 확인하세요.`
       : "설비·부품 매뉴얼을 등록하면 해당 문서 근거와 공통 안전자료를 함께 검색합니다. 현재 정보만으로는 작업 승인 여부를 확정할 수 없습니다.";
     setMessages((current) => [...current, { role: "user", text: question.trim() }, { role: "ai", text: answer }]);
     saveHistory(question.trim(), answer, "검토 필요");
@@ -270,6 +344,71 @@ function WorkspaceScreen({
 
   function updateField(field: keyof typeof initialForm, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function addManuals(files: FileList | null) {
+    if (!files) return;
+    setManuals((current) => Array.from(new Set([...current, ...Array.from(files, (file) => file.name)])));
+  }
+
+  function requestLocation() {
+    if (!navigator.geolocation) {
+      setLocationStatus("위치 기능 미지원");
+      return;
+    }
+    setLocationStatus("위치 확인 중...");
+    navigator.geolocation.getCurrentPosition(
+      (position) => setLocationStatus(`위치 확인됨 · ${position.coords.latitude.toFixed(4)}, ${position.coords.longitude.toFixed(4)}`),
+      () => setLocationStatus("위치 권한이 필요합니다"),
+      { enableHighAccuracy: false, timeout: 7000 },
+    );
+  }
+
+  async function speakGuidance() {
+    if (activeAudio) {
+      activeAudio.pause();
+      setActiveAudio(null);
+      setIsSpeaking(false);
+      return;
+    }
+
+    const latestAnswer = [...messages].reverse().find((message) => message.role === "ai")?.text;
+    const text = latestAnswer ?? (result
+      ? `현재 분석된 위험요인은 ${result.hazards.length}건입니다. ${result.hazards.map((hazard) => `${hazard.name}. ${hazard.safety_actions.join(". ")}`).join(". ")}`
+      : `현재 작업은 ${form.equipment_name}의 ${form.task_type}입니다. 위험성평가를 실행한 뒤 음성 안전 안내를 들을 수 있습니다.`);
+
+    setIsSpeaking(true);
+    setError("");
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/speech/synthesize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, speed: 0.92 }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { detail?: string } | null;
+        throw new Error(payload?.detail || "음성 안내를 생성하지 못했습니다.");
+      }
+      const audioUrl = URL.createObjectURL(await response.blob());
+      const audio = new Audio(audioUrl);
+      audio.volume = volume / 100;
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl);
+        setActiveAudio(null);
+        setIsSpeaking(false);
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(audioUrl);
+        setActiveAudio(null);
+        setIsSpeaking(false);
+        setError("생성된 음성을 재생하지 못했습니다.");
+      };
+      setActiveAudio(audio);
+      await audio.play();
+    } catch (speechError) {
+      setIsSpeaking(false);
+      setError(speechError instanceof Error ? speechError.message : "음성 안내 중 오류가 발생했습니다.");
+    }
   }
 
   return (
@@ -281,39 +420,66 @@ function WorkspaceScreen({
             <h2>메뉴</h2>
             <label>🔊 음량 <strong>{volume}</strong><input type="range" min="0" max="100" value={volume} onChange={(event) => setVolume(Number(event.target.value))} /></label>
             <label>글자 크기<select value={fontSize} onChange={(event) => setFontSize(event.target.value as FontSize)}><option value="small">작게</option><option value="medium">보통</option><option value="large">크게</option></select></label>
-            <button onClick={onHistory}>📋 결과 기록 확인</button>
             <button onClick={() => setMessages([])}>🧹 대화 초기화</button>
-            <button className="logout-button" onClick={onLogout}>↺ 게스트 세션 초기화</button>
+            <button onClick={() => setManuals([])}>📚 매뉴얼 목록 초기화</button>
+            <button className="logout-button" onClick={onLogout}>🚪 로그아웃</button>
           </aside>
         </details>
         <div><strong>SafeMaint AI</strong><span>작업 전 위험성평가 · 사고예방 · 근거 기반 안전 안내</span></div>
         <div className="user-label"><strong>{displayName}</strong> 님</div>
       </header>
 
-      <section className="visual-stage">
-        <div className="avatar-placeholder">🧑‍🏭</div>
-        <h1>AI 안전관리 화면</h1>
-        <p>아바타 · 검색 결과 · 현장 이미지 · 안내 영상이 표시되는 영역입니다.</p>
-        {result && <span className="result-badge">최신 분석 결과: 위험요인 {result.hazards.length}건</span>}
+      <section className="quick-toolbar" aria-label="현장 빠른 기능">
+        <button type="button" onClick={requestLocation}>📍 현재 위치</button>
+        <label className="toolbar-upload">📷 현장 사진<input type="file" accept="image/*" onChange={(event) => setSitePhotoName(event.target.files?.[0]?.name ?? "")} /></label>
+        <button type="button" onClick={() => window.alert("음성 입력은 STT 연결 예정입니다.")}>🎤 음성 입력</button>
+        <button type="button" onClick={speakGuidance}>{isSpeaking ? "⏹ 음성 중지" : "🔊 음성 안내"}</button>
+        <button type="button" onClick={onHistory}>🗂 결과 기록</button>
+        <span>{locationStatus}</span>
       </section>
 
-      <section className="manual-row">
-        <label className="file-card">📄 작업 설비 매뉴얼 등록<input type="file" accept="application/pdf" onChange={(event) => setManualName(event.target.files?.[0]?.name ?? "")} /></label>
-        <div><strong>{manualName || "등록된 매뉴얼 없음"}</strong><span>실제 업로드 API는 백엔드 문서 수집 기능과 연결 예정입니다.</span></div>
+      <section className="field-overview-grid">
+        <article className={`risk-overview-card risk-${highestRisk}`}>
+          <span className="eyebrow">현재 작업 판단</span>
+          <div className="risk-symbol">{highestRisk === "high" ? "🔴" : highestRisk === "medium" ? "🟡" : highestRisk === "low" ? "🟢" : "⚪"}</div>
+          <h1>{highestRisk === "high" ? "작업 중지 필요" : highestRisk === "medium" ? "관리자 확인 필요" : highestRisk === "low" ? "기본조치 확인" : "분석 전"}</h1>
+          <p>{result ? `위험요인 ${result.hazards.length}건이 분석되었습니다.` : "아래 작업정보와 자료를 입력한 뒤 분석을 시작하세요."}</p>
+          <div className="accident-chip-list">{accidentTypes.length ? accidentTypes.map((type) => <span key={type}>⚠ {type}</span>) : <span>사고 유형 대기</span>}</div>
+          <small>AI는 작업을 승인하지 않으며 최종 판단은 안전관리자가 수행합니다.</small>
+        </article>
+        <article className="panel ppe-panel">
+          <div className="panel-heading compact-heading"><h2>필수 보호구</h2><span className="panel-tag">현장 확인</span></div>
+          <div className="ppe-grid"><span>🪖<b>안전모</b></span><span>🧤<b>보호장갑</b></span><span>🥽<b>보안경</b></span><span>👢<b>안전화</b></span></div>
+          <p className="muted-copy">작업과 화학물질 특성에 따라 추가 보호구가 필요할 수 있습니다.</p>
+        </article>
       </section>
 
-      <section className="chat-stage">
+      <section className="manual-row upgraded-manual-row">
+        <label className="file-card">📄 작업 설비 매뉴얼 추가<input type="file" accept="application/pdf" multiple onChange={(event) => addManuals(event.target.files)} /></label>
+        <div><strong>{manuals.length ? `${manuals.length}개 매뉴얼 등록됨` : "등록된 매뉴얼 없음"}</strong><span>{sitePhotoName ? `현장 사진: ${sitePhotoName}` : "현장 사진 없음"} · 실제 업로드 API 연결 예정</span></div>
+        <div className="document-chip-list">{manuals.map((name) => <span key={name}>📄 {name}<button type="button" aria-label={`${name} 삭제`} onClick={() => setManuals((current) => current.filter((item) => item !== name))}>×</button></span>)}</div>
+      </section>
+
+      <section className="chat-stage upgraded-chat">
+        <div className="chat-heading"><div><strong>SafeMaint AI 상담</strong><span>분석 결과와 등록 문서를 바탕으로 후속 질문을 입력하세요.</span></div><button type="button" onClick={() => setMessages([])}>대화 지우기</button></div>
         <div className="chat-history">
           {messages.length === 0 ? <div className="chat-empty">💬 작업 내용이나 부품 관련 질문을 입력하세요.</div> : messages.map((message, index) => <div className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}><strong>{message.role === "user" ? "사용자" : "SafeMaint AI"}</strong>{message.text}</div>)}
         </div>
         <form className="chat-input-row" onSubmit={sendChat}>
-          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="예: 컨베이어 내부 센서를 교체하려고 합니다. 작업 전 확인사항을 알려주세요." />
+          <button type="button" className="icon-action" title="음성 입력" onClick={() => window.alert("음성 입력 기능은 STT 연결 예정입니다.")}>🎤</button>
+          <label className="icon-action file-icon" title="사진 첨부">📷<input type="file" accept="image/*" onChange={(event) => setSitePhotoName(event.target.files?.[0]?.name ?? "")} /></label>
+          <label className="icon-action file-icon" title="문서 첨부">📎<input type="file" accept="application/pdf" multiple onChange={(event) => addManuals(event.target.files)} /></label>
+          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="예: 전원을 차단하지 않고 센서만 빠르게 교체해도 될까요?" />
           <button type="submit">전송</button>
         </form>
       </section>
 
       <details className="assessment-drawer">
         <summary>규칙 기반 위험성평가 미리보기 열기</summary>
+        <section className="search-progress">
+          <div className="panel-heading compact-heading"><div><span className="section-number">진행</span><h2>분석 과정</h2></div><span className={isLoading ? "status-pill active" : "status-pill"}>{isLoading ? "진행 중" : result ? "완료" : "대기"}</span></div>
+          <div className="progress-steps">{["작업정보 분석", "사고사례 검색", "법령·KOSHA 검색", "매뉴얼 검색", "재정렬", "결과 생성"].map((step, index) => <div className={result ? "done" : isLoading && index < 3 ? "active" : ""} key={step}><span>{result ? "✓" : index + 1}</span><strong>{step}</strong></div>)}</div>
+        </section>
         <div className="workspace-grid embedded">
           <section className="panel">
             <div className="panel-heading"><div><span className="section-number">01</span><h2>작업정보 입력</h2></div><span className="panel-tag">필수</span></div>
@@ -334,7 +500,13 @@ function WorkspaceScreen({
           </section>
           <section className="panel result-panel" aria-live="polite">
             <div className="panel-heading"><div><span className="section-number">02</span><h2>분석 결과</h2></div><span className="panel-tag muted">초안</span></div>
-            {!result ? <div className="empty-state"><div className="empty-icon">!</div><h3>아직 분석 결과가 없습니다.</h3><p>왼쪽 작업정보를 확인하고 초안 만들기를 실행해 주세요.</p></div> : <AssessmentResult result={result} />}
+            <div className="result-tabs">
+              <button type="button" className={activeTab === "summary" ? "active" : ""} onClick={() => setActiveTab("summary")}>위험요인</button>
+              <button type="button" className={activeTab === "accidents" ? "active" : ""} onClick={() => setActiveTab("accidents")}>유사 사고</button>
+              <button type="button" className={activeTab === "evidence" ? "active" : ""} onClick={() => setActiveTab("evidence")}>근거 문서</button>
+              <button type="button" className={activeTab === "tbm" ? "active" : ""} onClick={() => setActiveTab("tbm")}>TBM 체크</button>
+            </div>
+            {!result ? <div className="empty-state"><div className="empty-icon">!</div><h3>아직 분석 결과가 없습니다.</h3><p>왼쪽 작업정보를 확인하고 초안 만들기를 실행해 주세요.</p></div> : activeTab === "summary" ? <AssessmentResult result={result} mode="hazards" /> : activeTab === "accidents" ? <SimilarAccidentPanel result={result} /> : activeTab === "evidence" ? <EvidencePanel result={result} manuals={manuals} /> : <AssessmentResult result={result} mode="tbm" />}
           </section>
         </div>
       </details>
@@ -344,9 +516,11 @@ function WorkspaceScreen({
   );
 }
 
-function AssessmentResult({ result }: { result: AssessmentResponse }) {
+function AssessmentResult({ result, mode = "hazards" }: { result: AssessmentResponse; mode?: "hazards" | "tbm" }) {
   const mustStop = result.hazards.some((hazard) => hazard.risk_level === "high");
   const decision = mustStop ? "작업 중지 및 안전관리자 확인 필요" : result.evidence_status === "connected" ? "안전관리자 검토 가능" : "근거 부족으로 판단 불가";
+
+  if (mode === "tbm") return <div className="result-content"><div className="notice">작업 전 팀 단위로 각 항목을 직접 확인하세요.</div><div className="checklist large-checklist"><h3>작업 전 TBM 체크리스트</h3>{result.tbm_checklist.map((item) => <label key={item}><input type="checkbox" /><span>{item}</span></label>)}</div><section className="manager-review"><strong>안전관리자 확인사항</strong><label><input type="checkbox" /> 작업조건과 에너지 차단 여부를 현장에서 재확인했습니다.</label><label><input type="checkbox" /> 근거 문서와 필수 안전조치를 검토했습니다.</label></section></div>;
 
   return <div className="result-content">
     <section className={`work-decision ${mustStop ? "stop" : result.evidence_status === "connected" ? "review" : "unknown"}`}>
@@ -355,17 +529,16 @@ function AssessmentResult({ result }: { result: AssessmentResponse }) {
     </section>
     <div className="notice">{result.disclaimer}</div>
     <div className="hazard-list">{result.hazards.map((hazard) => <article className={`hazard-card ${hazard.risk_level}`} key={hazard.name}><div className="hazard-title"><div><span>{hazard.accident_type}</span><h3>{hazard.name}</h3></div><strong>{levelLabel[hazard.risk_level]} · {hazard.score}점</strong></div><ul>{hazard.safety_actions.map((action) => <li key={action}>{action}</li>)}</ul></article>)}</div>
-    <div className="checklist"><h3>작업 전 TBM 체크리스트</h3>{result.tbm_checklist.map((item) => <label key={item}><input type="checkbox" /><span>{item}</span></label>)}</div>
-    <section className="evidence-section">
-      <div className="evidence-state"><strong>근거 문서 및 출처</strong><span>{result.evidence_status === "connected" ? `${result.evidence.length}건 연결됨` : "검색 근거가 연결되지 않았습니다"}</span></div>
-      {result.evidence.length > 0 ? <div className="evidence-list">{result.evidence.map((item) => <article className="evidence-card" key={item.document_id}>
-        <div><span>{item.source_type}</span><strong>{item.title}</strong><small>{item.page ? `${item.page}페이지` : "페이지 정보 없음"}</small></div>
-        <p>{item.excerpt}</p>
-        {item.url && <a href={item.url} target="_blank" rel="noreferrer">원문 확인</a>}
-      </article>)}</div> : <p className="evidence-warning">근거가 없으므로 작업 안전성을 판단할 수 없습니다. 문서를 등록하거나 안전관리자에게 확인해 주세요.</p>}
-    </section>
-    <section className="manager-review"><strong>안전관리자 확인사항</strong><label><input type="checkbox" /> 작업조건과 에너지 차단 여부를 현장에서 재확인했습니다.</label><label><input type="checkbox" /> 근거 문서와 필수 안전조치를 검토했습니다.</label></section>
   </div>;
+}
+
+function EvidencePanel({ result, manuals }: { result: AssessmentResponse; manuals: string[] }) {
+  return <section className="evidence-section"><div className="evidence-state"><strong>근거 문서 및 출처</strong><span>{result.evidence_status === "connected" ? `${result.evidence.length}건 연결됨` : "검색 근거가 연결되지 않았습니다"}</span></div>{result.evidence.length > 0 ? <div className="evidence-list">{result.evidence.map((item) => <article className="evidence-card" key={item.document_id}><div><span>{item.source_type}</span><strong>{item.title}</strong><small>{item.page ? `${item.page}페이지` : "페이지 정보 없음"}</small></div><p>{item.excerpt}</p>{item.url && <a href={item.url} target="_blank" rel="noreferrer">원문 확인</a>}</article>)}</div> : <><p className="evidence-warning">근거가 없으므로 작업 안전성을 판단할 수 없습니다. 문서 수집 API와 RAG 연결 후 출처가 표시됩니다.</p>{manuals.length > 0 && <div className="pending-document-list"><strong>처리 대기 문서</strong>{manuals.map((name) => <span key={name}>📄 {name}</span>)}</div>}</>}</section>;
+}
+
+function SimilarAccidentPanel({ result }: { result: AssessmentResponse }) {
+  const types = Array.from(new Set(result.hazards.map((hazard) => hazard.accident_type)));
+  return <div className="similar-accident-list">{types.map((type) => <article className="accident-card" key={type}><div><span>관련 사고유형</span><strong>{type} 사고</strong></div><p>현재 규칙 엔진이 감지한 사고유형입니다. 실제 유사 사고 원문과 유사도는 사고사례 검색 API 연결 후 표시됩니다.</p><ul><li>전원 차단 및 LOTO 확인</li><li>위험구역 통제와 관리자 확인</li></ul></article>)}</div>;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

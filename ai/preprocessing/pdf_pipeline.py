@@ -6,7 +6,7 @@
 
 텍스트/구조 추출은 docling의 레이아웃 모델을 사용합니다. 폰트 크기 같은
 문서별 매직넘버 튜닝 없이도 제조사가 다른 PDF에 일반적으로 적용하기 위함입니다.
-GPU(CUDA)가 있으면 자동으로 사용합니다.
+GPU가 있으면 자동으로 사용하고, 없으면 CPU를 사용합니다(DOCLING_ACCELERATOR_DEVICE="auto").
 
 출력은 docs/preprocessing-contract.md 규격을 따르는 {"document": {...}, "chunks": [...]}
 입니다. document는 문서 레코드 1건, chunks는 청크 레코드 N건입니다.
@@ -24,28 +24,22 @@ GPU(CUDA)가 있으면 자동으로 사용합니다.
     result["chunks"]    # 청크 레코드 N건
 """
 
-import fitz  # PyMuPDF (스캔본 여부 판단용)
 import hashlib
-import re
 import json
+import re
 from pathlib import Path
-
-from docling.datamodel.pipeline_options import (
-    PdfPipelineOptions,
-    AcceleratorOptions,
-    AcceleratorDevice,
-)
-from docling.datamodel.base_models import InputFormat
-from docling.document_converter import DocumentConverter, PdfFormatOption
-from docling_core.types.doc import TableItem
+from typing import Any
 
 _HEADER_LABELS = {"section_header", "title"}
 _SKIP_LABELS = {"picture", "page_header", "page_footer"}
+DOCLING_ACCELERATOR_DEVICE = "auto"
 
 
 # ---------- 1. 텍스트 추출 (docling 레이아웃 모델) ----------
 def _needs_ocr(pdf_path: str, empty_page_ratio: float = 0.5) -> bool:
     """텍스트 없는 페이지 비율로 스캔본 여부를 빠르게 판단."""
+    import fitz  # PyMuPDF
+
     doc = fitz.open(pdf_path)
     empty_page_count = sum(1 for page in doc if len(page.get_text().strip()) < 10)
     total_pages = len(doc)
@@ -53,18 +47,27 @@ def _needs_ocr(pdf_path: str, empty_page_ratio: float = 0.5) -> bool:
     return total_pages > 0 and (empty_page_count / total_pages) > empty_page_ratio
 
 
-def _build_converter(do_ocr: bool) -> DocumentConverter:
+def _build_converter(do_ocr: bool) -> Any:
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import (
+        AcceleratorDevice,
+        AcceleratorOptions,
+        PdfPipelineOptions,
+    )
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = do_ocr
     pipeline_options.accelerator_options = AcceleratorOptions(
-        num_threads=8, device=AcceleratorDevice.CUDA
+        num_threads=8,
+        device=AcceleratorDevice(DOCLING_ACCELERATOR_DEVICE),
     )
     return DocumentConverter(
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
     )
 
 
-def _table_item_to_block(item: TableItem) -> dict | None:
+def _table_item_to_block(item: Any) -> dict | None:
     """
     표를 {header, rows} 블록으로 변환. 마크다운 텍스트 대신 docling의 grid 구조(병합 셀이
     이미 각 칸에 채워져 있음)를 직접 읽어서, "모델명"이 두 하위 컬럼을 묶는 경우처럼
@@ -119,6 +122,8 @@ def extract_sections_with_docling(pdf_path: str) -> list[dict]:
     header/rows를 분리해서 보관한다 (문장 중간이 아니라 표 중간에서 잘리는 것을 막기 위함).
     section_path는 제목 레벨을 스택으로 추적해 상위 제목까지 포함한 경로로 남긴다.
     """
+    from docling_core.types.doc import TableItem
+
     do_ocr = _needs_ocr(pdf_path)
     if do_ocr:
         print(f"[정보] {pdf_path}: 텍스트 없는 페이지 비율이 높아 OCR을 사용합니다 (느려질 수 있음).")
@@ -223,6 +228,8 @@ def extract_sections_with_pymupdf(pdf_path: str, header_min_size: float = 8.8) -
     docling만큼 정확하지도, 표를 구조적으로 인식하지도 못하지만, 문서 전체를 못 쓰게 되는
     상황(예: docling-parse가 특정 폰트에서 UnicodeDecodeError로 죽는 경우)은 막아준다.
     """
+    import fitz  # PyMuPDF
+
     doc = fitz.open(pdf_path)
     raw_lines = []
     for pno, page in enumerate(doc):
@@ -361,8 +368,29 @@ def _split_sentence_units(text: str) -> list[str]:
     return units
 
 
+def _validate_chunk_options(chunk_size: int, overlap: int) -> None:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than zero")
+    if overlap < 0 or overlap >= chunk_size:
+        raise ValueError("overlap must be between zero and chunk_size - 1")
+
+
+def _hard_split(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """긴 단일 문장·표 행도 임베딩 제한을 넘지 않도록 최종 안전 분할한다."""
+    if len(text) <= chunk_size:
+        return [text] if text else []
+
+    step = chunk_size - overlap
+    return [
+        part
+        for start in range(0, len(text), step)
+        if (part := text[start : start + chunk_size].strip())
+    ]
+
+
 def chunk_text(text: str, chunk_size: int = 600, overlap: int = 100) -> list[str]:
-    """섹션 내부 텍스트를 문장 단위로 chunk_size에 맞춰 묶는다 (문장 중간에서 잘리지 않도록)."""
+    """문장 경계를 우선하되 모든 청크가 chunk_size 이내가 되도록 묶는다."""
+    _validate_chunk_options(chunk_size, overlap)
     text = text.strip()
     if not text:
         return []
@@ -396,11 +424,16 @@ def chunk_text(text: str, chunk_size: int = 600, overlap: int = 100) -> list[str
         current_len += len(unit)
 
     flush()
-    return [c for c in chunks if c]
+    return [
+        bounded_chunk
+        for chunk in chunks
+        for bounded_chunk in _hard_split(chunk, chunk_size, overlap)
+    ]
 
 
 def chunk_table(block: dict, chunk_size: int = 600) -> list[str]:
     """표를 행(row) 단위로 묶어서 청킹. 각 청크 맨 앞에 헤더 행을 반복해 어떤 컬럼인지 알 수 있게 한다."""
+    _validate_chunk_options(chunk_size, 0)
     header = block["header"]
     chunks = []
     group: list[str] = []
@@ -416,7 +449,11 @@ def chunk_table(block: dict, chunk_size: int = 600) -> list[str]:
 
     if group:
         chunks.append("\n".join([header, *group]))
-    return chunks
+    return [
+        bounded_chunk
+        for chunk in chunks
+        for bounded_chunk in _hard_split(chunk, chunk_size, 0)
+    ]
 
 
 def chunk_section(blocks: list[dict], chunk_size: int = 600, overlap: int = 100) -> list[str]:
@@ -449,7 +486,7 @@ def process_pdf(
     product_type: str,
     model_name: str,
     manufacturer: str = "오토닉스",
-    exclude_sections: list[str] = None,
+    exclude_sections: list[str] | None = None,
     chunk_size: int = 600,
     overlap: int = 100,
     source_type: str = "manual",
