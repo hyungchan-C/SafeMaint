@@ -4,6 +4,7 @@ param(
     [string]$TestDatabase = "safemaint_rag_test",
     [string]$DataDirectory = "전처리된데이터",
     [string]$Model = "BAAI/bge-m3",
+    [string]$SourceType = "incident",
     [int]$LimitPerSource = 100,
     [int]$EmbeddingLimit = 500,
     [int]$EmbeddingBatchSize = 16,
@@ -44,6 +45,9 @@ try {
     }
     if ($EmbeddingLimit -lt 1 -or $EmbeddingLimit -gt 500) {
         throw "이번 실험의 EmbeddingLimit은 1~500만 허용됩니다."
+    }
+    if ($SourceType -notmatch '^[A-Za-z0-9_-]+$') {
+        throw "SourceType은 영문, 숫자, 하이픈, 밑줄만 사용할 수 있습니다."
     }
 
     $repoRoot = Get-SafeMaintRepoRoot
@@ -127,6 +131,7 @@ try {
         if (-not $SkipEmbedding) {
             Write-Host "[6/8] BGE-M3 임베딩"
             & $embeddingPython -m app.commands.embed_document_chunks `
+                --source-type $SourceType `
                 --model $Model --limit $EmbeddingLimit `
                 --batch-size $EmbeddingBatchSize --device auto `
                 --cache-dir ai\.model-cache
@@ -139,6 +144,7 @@ try {
         if (-not $SkipSearch) {
             Write-Host "[7/8] pgvector 코사인 검색"
             & $embeddingPython -m app.commands.search_document_chunks `
+                --source-type $SourceType `
                 --model $Model --top-k 5 --min-similarity $MinSimilarity `
                 --device auto --cache-dir ai\.model-cache
             Assert-NativeSuccess "pgvector 검색에 실패했습니다."
@@ -162,7 +168,7 @@ FROM (
         COUNT(DISTINCT c.embedding_dimension) AS dimension_count
     FROM document_chunks c
     JOIN documents d ON d.id = c.document_id
-    WHERE d.source_type = 'incident'
+    WHERE d.source_type = '$SourceType'
       AND c.embedding_status = 'ready'
 ) summary
 WHERE summary.ready_count = 0

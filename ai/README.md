@@ -66,8 +66,38 @@ Git에 포함되지 않습니다.
 .\scripts\run-rag-experiment.ps1
 ```
 
-스크립트와 Python 명령은 DB 이름이 `_test`로 끝나지 않으면 실제 적재를 거부합니다.
-전체 9,223개 문서와 12,296개 청크는 이 실험에서 적재하지 않습니다.
+사고 데이터 적재 스크립트는 DB 이름이 `_test`로 끝나지 않으면 실제 적재를
+거부합니다. 범용 임베딩·검색 명령은 운영 매뉴얼도 처리할 수 있으므로 아래와 같이
+처리 범위를 반드시 명시해야 합니다. 전체 9,223개 문서와 12,296개 청크는 이
+실험에서 적재하지 않습니다.
+
+```powershell
+# 사고 데이터만 임베딩
+python -m app.commands.embed_document_chunks `
+  --source-type incident --limit 500
+
+# 매뉴얼만 임베딩
+python -m app.commands.embed_document_chunks `
+  --source-type manual --limit 500
+
+# 특정 업로드 문서만 임베딩
+python -m app.commands.embed_document_chunks `
+  --document-id "문서 UUID"
+
+# 명시적으로 모든 pending 청크 처리
+python -m app.commands.embed_document_chunks `
+  --all-pending --limit 500
+
+# 사고와 매뉴얼을 함께 검색
+python -m app.commands.search_document_chunks `
+  --source-type incident --source-type manual `
+  --query "컨베이어 베어링 교체" --top-k 5
+```
+
+`--source-type`과 `--document-id`를 함께 지정하면 두 조건의 교집합만 처리합니다.
+범위 옵션 없이 실행하거나 전체 옵션을 필터와 함께 사용하면 CLI가 실행을
+거부합니다. 새 PDF 업로드 흐름에서는 manual 전체가 아니라 생성된 document ID만
+전달해야 합니다.
 
 ### 프런트 채팅과 BGE-M3 검색 연결
 
@@ -103,4 +133,5 @@ Invoke-RestMethod `
 
 응답의 `retrieval_mode`이 `bge-m3`이면 벡터 검색이 연결된 상태이고,
 `safety-fallback`이면 RAG 서비스 또는 격리 DB를 확인해야 합니다. 검색 결과는
-사고사례 기반 참고자료이며 작업 승인이나 제조사 정비 매뉴얼을 대체하지 않습니다.
+설정한 source type의 참고자료이며 작업 승인이나 현장 안전관리자의 판단을
+대체하지 않습니다.
