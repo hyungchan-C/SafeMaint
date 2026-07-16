@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssessmentResponse } from "@/types/assessment";
 import { getApiBaseUrl } from "@/lib/api";
@@ -282,8 +282,10 @@ function WorkspaceScreen({
   const [form, setForm] = useState(initialForm);
   const [result, setResult] = useState<AssessmentResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isChatLoading, setIsChatLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [activeAudio, setActiveAudio] = useState<HTMLAudioElement | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -295,6 +297,16 @@ function WorkspaceScreen({
   useEffect(() => {
     if (typeof window !== "undefined") writeStorage(STORAGE_KEYS.settings, { volume, fontSize });
   }, [volume, fontSize]);
+
+  useEffect(() => () => {
+    const source = audioSourceRef.current;
+    if (source) {
+      source.onended = null;
+      try { source.stop(); } catch { /* already stopped */ }
+      source.disconnect();
+    }
+    void audioContextRef.current?.close();
+  }, []);
 
   const fontClass = useMemo(() => `font-${fontSize}`, [fontSize]);
   const highestRisk = result?.hazards.some((hazard) => hazard.risk_level === "high") ? "high" : result?.hazards.some((hazard) => hazard.risk_level === "medium") ? "medium" : result ? "low" : "pending";
@@ -331,15 +343,42 @@ function WorkspaceScreen({
     }
   }
 
-  function sendChat(event: FormEvent<HTMLFormElement>) {
+  async function sendChat(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!question.trim()) return;
-    const answer = manuals.length
-      ? `등록된 매뉴얼 ${manuals.length}개와 공통 안전자료를 검색할 예정입니다. 현재 프로토타입에서는 전원 차단, LOTO, 잔류에너지 제거 여부를 먼저 확인하세요.`
-      : "설비·부품 매뉴얼을 등록하면 해당 문서 근거와 공통 안전자료를 함께 검색합니다. 현재 정보만으로는 작업 승인 여부를 확정할 수 없습니다.";
-    setMessages((current) => [...current, { role: "user", text: question.trim() }, { role: "ai", text: answer }]);
-    saveHistory(question.trim(), answer, "검토 필요");
+    const submittedQuestion = question.trim();
+    setMessages((current) => [...current, { role: "user", text: submittedQuestion }]);
     setQuestion("");
+    setIsChatLoading(true);
+    setError("");
+    try {
+      const context = [
+        `사업장: ${form.site_name}`,
+        `설비: ${form.equipment_name}`,
+        `부품: ${form.component_name || "미입력"}`,
+        `작업 종류: ${form.task_type}`,
+        `에너지원: ${form.energy_source}`,
+        `작업 설명: ${form.description}`,
+        `등록 매뉴얼: ${manuals.length ? manuals.join(", ") : "없음"}`,
+      ].join("\n");
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/ai/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: submittedQuestion, context }),
+      });
+      const payload = await response.json().catch(() => null) as { answer?: string; detail?: string } | null;
+      if (!response.ok || !payload?.answer) {
+        throw new Error(payload?.detail || "AI 답변을 생성하지 못했습니다.");
+      }
+      setMessages((current) => [...current, { role: "ai", text: payload.answer! }]);
+      saveHistory(submittedQuestion, payload.answer, "검토 필요");
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : "AI 요청 중 오류가 발생했습니다.";
+      setMessages((current) => [...current, { role: "ai", text: `오류: ${message}` }]);
+      setError(message);
+    } finally {
+      setIsChatLoading(false);
+    }
   }
 
   function updateField(field: keyof typeof initialForm, value: string) {
@@ -365,9 +404,12 @@ function WorkspaceScreen({
   }
 
   async function speakGuidance() {
-    if (activeAudio) {
-      activeAudio.pause();
-      setActiveAudio(null);
+    if (audioSourceRef.current) {
+      const source = audioSourceRef.current;
+      source.onended = null;
+      try { source.stop(); } catch { /* already stopped */ }
+      source.disconnect();
+      audioSourceRef.current = null;
       setIsSpeaking(false);
       return;
     }
@@ -380,6 +422,11 @@ function WorkspaceScreen({
     setIsSpeaking(true);
     setError("");
     try {
+      // Unlock audio playback while the button click is still an active user gesture.
+      const audioContext = audioContextRef.current ?? new AudioContext();
+      audioContextRef.current = audioContext;
+      await audioContext.resume();
+
       const response = await fetch(`${getApiBaseUrl()}/api/v1/speech/synthesize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -389,23 +436,23 @@ function WorkspaceScreen({
         const payload = await response.json().catch(() => null) as { detail?: string } | null;
         throw new Error(payload?.detail || "음성 안내를 생성하지 못했습니다.");
       }
-      const audioUrl = URL.createObjectURL(await response.blob());
-      const audio = new Audio(audioUrl);
-      audio.volume = volume / 100;
-      audio.onended = () => {
-        URL.revokeObjectURL(audioUrl);
-        setActiveAudio(null);
+      const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
+      const source = audioContext.createBufferSource();
+      const gain = audioContext.createGain();
+      gain.gain.value = volume / 100;
+      source.buffer = audioBuffer;
+      source.connect(gain);
+      gain.connect(audioContext.destination);
+      source.onended = () => {
+        source.disconnect();
+        gain.disconnect();
+        if (audioSourceRef.current === source) audioSourceRef.current = null;
         setIsSpeaking(false);
       };
-      audio.onerror = () => {
-        URL.revokeObjectURL(audioUrl);
-        setActiveAudio(null);
-        setIsSpeaking(false);
-        setError("생성된 음성을 재생하지 못했습니다.");
-      };
-      setActiveAudio(audio);
-      await audio.play();
+      audioSourceRef.current = source;
+      source.start(0);
     } catch (speechError) {
+      audioSourceRef.current = null;
       setIsSpeaking(false);
       setError(speechError instanceof Error ? speechError.message : "음성 안내 중 오류가 발생했습니다.");
     }
@@ -470,7 +517,7 @@ function WorkspaceScreen({
           <label className="icon-action file-icon" title="사진 첨부">📷<input type="file" accept="image/*" onChange={(event) => setSitePhotoName(event.target.files?.[0]?.name ?? "")} /></label>
           <label className="icon-action file-icon" title="문서 첨부">📎<input type="file" accept="application/pdf" multiple onChange={(event) => addManuals(event.target.files)} /></label>
           <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="예: 전원을 차단하지 않고 센서만 빠르게 교체해도 될까요?" />
-          <button type="submit">전송</button>
+          <button type="submit" disabled={isChatLoading}>{isChatLoading ? "답변 생성 중..." : "전송"}</button>
         </form>
       </section>
 
