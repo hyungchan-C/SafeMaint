@@ -9,7 +9,7 @@ from app.services.chat import ChatService, get_chat_service
 
 
 def test_chat_service_returns_task_specific_fallback() -> None:
-    service = ChatService(service_url=None)
+    service = ChatService(service_url=None, openai_enabled=False)
     response = asyncio.run(
         service.answer(
             ChatRequest.model_validate(
@@ -58,11 +58,74 @@ def test_chat_service_accepts_grounded_rag_response() -> None:
     service = ChatService(
         service_url="http://rag.test",
         transport=httpx.MockTransport(handler),
+        openai_enabled=False,
     )
     response = asyncio.run(service.answer(ChatRequest(question="컨베이어 청소법")))
 
     assert response.retrieval_mode == "bge-m3"
     assert response.sources[0].similarity == 0.71
+
+
+def test_chat_service_sends_retrieved_sources_to_openai() -> None:
+    class FakeAIService:
+        def answer(self, question: str, context: str | None = None) -> str:
+            assert question == "컨베이어 청소법"
+            assert context is not None
+            assert "컨베이어 정비 중 끼임 사고" in context
+            assert "설비가 기동되어 사고" in context
+            return "검색 근거를 바탕으로 전원을 차단하고 LOTO를 적용하세요."
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answer": "검색 서비스 기본 답변",
+                "sources": [
+                    {
+                        "document_id": "doc-1",
+                        "chunk_id": "chunk-1",
+                        "title": "컨베이어 정비 중 끼임 사고",
+                        "source_type": "incident:domestic",
+                        "excerpt": "정비 중 설비가 기동되어 사고가 발생함",
+                        "page": None,
+                        "url": None,
+                        "similarity": 0.71,
+                    }
+                ],
+                "retrieval_mode": "bge-m3",
+                "warning": None,
+            },
+        )
+
+    service = ChatService(
+        service_url="http://rag.test",
+        transport=httpx.MockTransport(handler),
+        ai_service=FakeAIService(),  # type: ignore[arg-type]
+        openai_enabled=True,
+    )
+    response = asyncio.run(service.answer(ChatRequest(question="컨베이어 청소법")))
+
+    assert response.generation_mode == "openai"
+    assert response.model == "gpt-4o-mini"
+    assert response.sources[0].title == "컨베이어 정비 중 끼임 사고"
+    assert response.answer.startswith("검색 근거를 바탕으로")
+
+
+def test_chat_service_keeps_grounded_fallback_when_openai_fails() -> None:
+    class FailingAIService:
+        def answer(self, question: str, context: str | None = None) -> str:
+            raise RuntimeError("temporary failure")
+
+    service = ChatService(
+        service_url=None,
+        ai_service=FailingAIService(),  # type: ignore[arg-type]
+        openai_enabled=True,
+    )
+    response = asyncio.run(service.answer(ChatRequest(question="베어링 교체 방법")))
+
+    assert response.generation_mode == "template"
+    assert response.retrieval_mode == "safety-fallback"
+    assert "OpenAI 답변 생성에 실패" in (response.warning or "")
 
 
 def test_chat_api_uses_injected_service() -> None:

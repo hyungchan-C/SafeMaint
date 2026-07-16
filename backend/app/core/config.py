@@ -25,6 +25,12 @@ class Settings:
     rag_request_timeout_seconds: float = float(
         getenv("RAG_REQUEST_TIMEOUT_SECONDS", "180")
     )
+    openai_api_key: str = getenv("OPENAI_API_KEY", "")
+    openai_model: str = getenv("OPENAI_MODEL", "gpt-4o-mini")
+    openai_timeout_seconds: float = float(getenv("OPENAI_TIMEOUT_SECONDS", "30"))
+    openai_max_output_tokens: int = int(
+        getenv("OPENAI_MAX_OUTPUT_TOKENS", "1200")
+    )
     tts_voice: str = getenv("TTS_VOICE", "F1")
     tts_language: str = getenv("TTS_LANGUAGE", "ko")
     tts_steps: int = int(getenv("TTS_STEPS", "8"))

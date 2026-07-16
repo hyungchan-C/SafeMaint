@@ -73,6 +73,8 @@ class PgvectorRetriever:
             request.context.model_number,
             request.context.component_name,
             request.context.task_type,
+            request.context.energy_source,
+            request.context.task_description,
             request.question,
         )
         return " ".join(value.strip() for value in values if value and value.strip())

@@ -10,6 +10,8 @@ class ChatContext(BaseModel):
     model_number: str | None = Field(default=None, max_length=100)
     component_name: str | None = Field(default=None, max_length=100)
     task_type: str | None = Field(default=None, max_length=100)
+    energy_source: str | None = Field(default=None, max_length=100)
+    task_description: str | None = Field(default=None, max_length=2000)
     registered_manuals: list[str] = Field(default_factory=list, max_length=20)
 
 
@@ -41,4 +43,6 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[ChatSource] = Field(default_factory=list)
     retrieval_mode: Literal["bge-m3", "safety-fallback"]
+    generation_mode: Literal["openai", "template"] = "template"
+    model: str | None = None
     warning: str | None = None

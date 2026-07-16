@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssessmentResponse } from "@/types/assessment";
 import type { ChatMessage, ChatResponse } from "@/types/chat";
@@ -285,7 +285,8 @@ function WorkspaceScreen({
   const [isLoading, setIsLoading] = useState(false);
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [activeAudio, setActiveAudio] = useState<HTMLAudioElement | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -297,6 +298,16 @@ function WorkspaceScreen({
   useEffect(() => {
     if (typeof window !== "undefined") writeStorage(STORAGE_KEYS.settings, { volume, fontSize });
   }, [volume, fontSize]);
+
+  useEffect(() => () => {
+    const source = audioSourceRef.current;
+    if (source) {
+      source.onended = null;
+      try { source.stop(); } catch { /* already stopped */ }
+      source.disconnect();
+    }
+    void audioContextRef.current?.close();
+  }, []);
 
   const fontClass = useMemo(() => `font-${fontSize}`, [fontSize]);
   const highestRisk = result?.hazards.some((hazard) => hazard.risk_level === "high") ? "high" : result?.hazards.some((hazard) => hazard.risk_level === "medium") ? "medium" : result ? "low" : "pending";
@@ -340,6 +351,7 @@ function WorkspaceScreen({
 
     setQuestion("");
     setIsChatLoading(true);
+    setError("");
     setMessages((current) => [...current, { role: "user", text: submittedQuestion }]);
 
     try {
@@ -355,6 +367,8 @@ function WorkspaceScreen({
             model_number: form.model_number || null,
             component_name: form.component_name || null,
             task_type: form.task_type,
+            energy_source: form.energy_source || null,
+            task_description: form.description || null,
             registered_manuals: manuals,
           },
         }),
@@ -370,6 +384,8 @@ function WorkspaceScreen({
           text: payload.answer,
           sources: payload.sources,
           retrievalMode: payload.retrieval_mode,
+          generationMode: payload.generation_mode,
+          model: payload.model,
           warning: payload.warning,
         },
       ]);
@@ -381,6 +397,7 @@ function WorkspaceScreen({
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.";
       setMessages((current) => [...current, { role: "ai", text: message, warning: "검색 결과를 생성하지 못했습니다." }]);
+      setError(message);
     } finally {
       setIsChatLoading(false);
     }
@@ -409,9 +426,12 @@ function WorkspaceScreen({
   }
 
   async function speakGuidance() {
-    if (activeAudio) {
-      activeAudio.pause();
-      setActiveAudio(null);
+    if (audioSourceRef.current) {
+      const source = audioSourceRef.current;
+      source.onended = null;
+      try { source.stop(); } catch { /* already stopped */ }
+      source.disconnect();
+      audioSourceRef.current = null;
       setIsSpeaking(false);
       return;
     }
@@ -424,6 +444,11 @@ function WorkspaceScreen({
     setIsSpeaking(true);
     setError("");
     try {
+      // Unlock audio playback while the button click is still an active user gesture.
+      const audioContext = audioContextRef.current ?? new AudioContext();
+      audioContextRef.current = audioContext;
+      await audioContext.resume();
+
       const response = await fetch(`${getApiBaseUrl()}/api/v1/speech/synthesize`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -433,23 +458,23 @@ function WorkspaceScreen({
         const payload = await response.json().catch(() => null) as { detail?: string } | null;
         throw new Error(payload?.detail || "음성 안내를 생성하지 못했습니다.");
       }
-      const audioUrl = URL.createObjectURL(await response.blob());
-      const audio = new Audio(audioUrl);
-      audio.volume = volume / 100;
-      audio.onended = () => {
-        URL.revokeObjectURL(audioUrl);
-        setActiveAudio(null);
+      const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
+      const source = audioContext.createBufferSource();
+      const gain = audioContext.createGain();
+      gain.gain.value = volume / 100;
+      source.buffer = audioBuffer;
+      source.connect(gain);
+      gain.connect(audioContext.destination);
+      source.onended = () => {
+        source.disconnect();
+        gain.disconnect();
+        if (audioSourceRef.current === source) audioSourceRef.current = null;
         setIsSpeaking(false);
       };
-      audio.onerror = () => {
-        URL.revokeObjectURL(audioUrl);
-        setActiveAudio(null);
-        setIsSpeaking(false);
-        setError("생성된 음성을 재생하지 못했습니다.");
-      };
-      setActiveAudio(audio);
-      await audio.play();
+      audioSourceRef.current = source;
+      source.start(0);
     } catch (speechError) {
+      audioSourceRef.current = null;
       setIsSpeaking(false);
       setError(speechError instanceof Error ? speechError.message : "음성 안내 중 오류가 발생했습니다.");
     }
@@ -514,6 +539,7 @@ function WorkspaceScreen({
               <strong>{message.role === "user" ? "사용자" : "SafeMaint AI"}</strong>
               {message.role === "ai" && message.retrievalMode && (
                 <span className={`retrieval-badge ${message.retrievalMode}`}>
+                  {message.generationMode === "openai" && `${message.model ?? "OpenAI"} + `}
                   {message.retrievalMode === "bge-m3" ? "BGE-M3 근거 검색" : "공통 안전수칙"}
                 </span>
               )}
@@ -537,14 +563,14 @@ function WorkspaceScreen({
               )}
             </div>
           ))}
-          {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>BGE-M3 안전자료를 검색하고 있습니다…</div>}
+          {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>안전자료를 검색하고 AI 답변을 생성하고 있습니다…</div>}
         </div>
         <form className="chat-input-row" onSubmit={sendChat}>
           <button type="button" className="icon-action" title="음성 입력" onClick={() => window.alert("음성 입력 기능은 STT 연결 예정입니다.")}>🎤</button>
           <label className="icon-action file-icon" title="사진 첨부">📷<input type="file" accept="image/*" onChange={(event) => setSitePhotoName(event.target.files?.[0]?.name ?? "")} /></label>
           <label className="icon-action file-icon" title="문서 첨부">📎<input type="file" accept="application/pdf" multiple onChange={(event) => addManuals(event.target.files)} /></label>
           <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="예: 전원을 차단하지 않고 센서만 빠르게 교체해도 될까요?" disabled={isChatLoading} />
-          <button type="submit" disabled={isChatLoading || !question.trim()}>{isChatLoading ? "검색 중" : "전송"}</button>
+          <button type="submit" disabled={isChatLoading || !question.trim()}>{isChatLoading ? "답변 생성 중..." : "전송"}</button>
         </form>
       </section>
 
