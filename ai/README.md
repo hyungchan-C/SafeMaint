@@ -43,3 +43,28 @@ chunks = process_pdf(
 ```powershell
 .\ai\.venv\Scripts\python.exe -m pytest ai\tests -q
 ```
+
+## BGE-M3 임베딩 실험
+
+PDF 전처리 환경과 분리된 선택 가상환경을 사용합니다. 메인 백엔드 requirements에는
+Torch와 Sentence Transformers를 추가하지 않습니다.
+
+```powershell
+python -m venv ai\.venv-embedding
+.\ai\.venv-embedding\Scripts\python.exe -m pip install `
+  -r ai\requirements-embedding.txt
+```
+
+NVIDIA GPU를 사용할 때는 `ai/requirements-embedding.txt` 하단의 공식 PyTorch
+CUDA wheel 설치 예시를 추가로 실행합니다. 모델은 `ai/.model-cache/`에 저장되며
+Git에 포함되지 않습니다.
+
+격리 DB 생성, dry-run, domestic/fatal 각 100개 적재, 멱등성 확인, 최대 500개
+임베딩 및 5개 질의 검색은 다음 스크립트로 재실행할 수 있습니다.
+
+```powershell
+.\scripts\run-rag-experiment.ps1
+```
+
+스크립트와 Python 명령은 DB 이름이 `_test`로 끝나지 않으면 실제 적재를 거부합니다.
+전체 9,223개 문서와 12,296개 청크는 이 실험에서 적재하지 않습니다.

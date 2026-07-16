@@ -33,6 +33,8 @@ Thumbs.db
 # Local data and model artifacts
 /ai/data/raw/
 /ai/data/processed/
+/ai/.model-cache/
+/ai/.venv-embedding/
 /전처리된데이터/
 /models/
 /uploads/
