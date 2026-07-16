@@ -1,0 +1,21 @@
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/models \
+    SENTENCE_TRANSFORMERS_HOME=/models
+
+WORKDIR /app
+
+COPY ai/requirements-rag.txt ./requirements-rag.txt
+RUN python -m pip install --no-cache-dir \
+      "torch==2.13.0+cpu" \
+      --index-url https://download.pytorch.org/whl/cpu \
+    && python -m pip install --no-cache-dir -r requirements-rag.txt
+
+COPY ai/rag_service ./rag_service
+COPY backend/app/services/safety_guidance.py ./safety_guidance.py
+
+EXPOSE 8010
+
+CMD ["python", "-m", "uvicorn", "rag_service.main:app", "--host", "0.0.0.0", "--port", "8010"]

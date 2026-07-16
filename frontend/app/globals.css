@@ -613,9 +613,23 @@ a {
 .chat-bubble { border-radius: 14px; display: grid; gap: 6px; margin: 9px 0; max-width: 76%; padding: 12px 14px; }
 .chat-bubble.user { background: #e9f1ff; margin-left: auto; }
 .chat-bubble.ai { background: #eaf6ef; }
+.chat-answer-text { margin: 0; white-space: pre-wrap; }
+.retrieval-badge { border-radius: 999px; font-size: 11px; font-weight: 800; justify-self: start; padding: 3px 8px; }
+.retrieval-badge.bge-m3 { background: #d8ecff; color: #144d79; }
+.retrieval-badge.safety-fallback { background: #fff1c8; color: #775500; }
+.chat-warning { background: #fff8e6; border-left: 3px solid #d49b00; color: #6a4b00; font-size: 12px; margin: 4px 0 0; padding: 8px 10px; }
+.chat-source-list { border-top: 1px solid #bfd9ca; display: grid; gap: 8px; margin-top: 7px; padding-top: 10px; }
+.chat-source-card { background: #fff; border: 1px solid #c9dcd1; border-radius: 9px; display: grid; gap: 6px; padding: 10px; }
+.chat-source-card > div { display: flex; gap: 8px; justify-content: space-between; }
+.chat-source-card span { color: var(--muted); font-size: 11px; }
+.chat-source-card p { color: #324d42; font-size: 12px; margin: 0; }
+.chat-source-card a { color: #155d8c; font-size: 12px; font-weight: 700; }
+.chat-loading { animation: chat-pulse 1.2s ease-in-out infinite; }
+@keyframes chat-pulse { 50% { opacity: .55; } }
 .chat-input-row { border-top: 2px solid #132b3b; display: grid; gap: 10px; grid-template-columns: 1fr 90px; padding: 12px; }
 .chat-input-row input { border: 1px solid #c4d1d8; border-radius: 9px; padding: 13px; }
 .chat-input-row button { background: var(--navy); border: 0; border-radius: 9px; color: white; cursor: pointer; font-weight: 800; }
+.chat-input-row button:disabled, .chat-input-row input:disabled { cursor: not-allowed; opacity: .6; }
 .assessment-drawer { background: white; border: 2px solid #132b3b; border-top: 0; padding: 0 18px 18px; }
 .assessment-drawer summary { color: var(--navy); cursor: pointer; font-weight: 800; padding: 16px 0; }
 .workspace-grid.embedded { grid-template-columns: minmax(380px, .85fr) minmax(440px, 1.15fr); }

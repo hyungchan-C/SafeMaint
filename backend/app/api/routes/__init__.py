@@ -1,10 +1,11 @@
 from fastapi import APIRouter
 
-from app.api.routes import ai, assessments, auth, dashboard, speech
+from app.api.routes import ai, assessments, auth, chat, dashboard, speech
 
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
+api_router.include_router(chat.router)
 api_router.include_router(assessments.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(speech.router)

@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssessmentResponse } from "@/types/assessment";
+import type { ChatMessage, ChatResponse } from "@/types/chat";
 import { getApiBaseUrl } from "@/lib/api";
 
 type PageMode = "login" | "workspace" | "history";
@@ -278,7 +279,7 @@ function WorkspaceScreen({
   const [locationStatus, setLocationStatus] = useState("위치 미확인");
   const [activeTab, setActiveTab] = useState<"summary" | "accidents" | "evidence" | "tbm">("summary");
   const [question, setQuestion] = useState("");
-  const [messages, setMessages] = useState<{ role: "user" | "ai"; text: string }[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [form, setForm] = useState(initialForm);
   const [result, setResult] = useState<AssessmentResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -345,36 +346,57 @@ function WorkspaceScreen({
 
   async function sendChat(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!question.trim()) return;
     const submittedQuestion = question.trim();
-    setMessages((current) => [...current, { role: "user", text: submittedQuestion }]);
+    if (!submittedQuestion || isChatLoading) return;
+
     setQuestion("");
     setIsChatLoading(true);
     setError("");
+    setMessages((current) => [...current, { role: "user", text: submittedQuestion }]);
+
     try {
-      const context = [
-        `사업장: ${form.site_name}`,
-        `설비: ${form.equipment_name}`,
-        `부품: ${form.component_name || "미입력"}`,
-        `작업 종류: ${form.task_type}`,
-        `에너지원: ${form.energy_source}`,
-        `작업 설명: ${form.description}`,
-        `등록 매뉴얼: ${manuals.length ? manuals.join(", ") : "없음"}`,
-      ].join("\n");
-      const response = await fetch(`${getApiBaseUrl()}/api/v1/ai/chat`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: submittedQuestion, context }),
+        body: JSON.stringify({
+          question: submittedQuestion,
+          context: {
+            site_name: form.site_name,
+            equipment_name: form.equipment_name,
+            manufacturer: form.manufacturer || null,
+            model_number: form.model_number || null,
+            component_name: form.component_name || null,
+            task_type: form.task_type,
+            energy_source: form.energy_source || null,
+            task_description: form.description || null,
+            registered_manuals: manuals,
+          },
+        }),
       });
-      const payload = await response.json().catch(() => null) as { answer?: string; detail?: string } | null;
-      if (!response.ok || !payload?.answer) {
-        throw new Error(payload?.detail || "AI 답변을 생성하지 못했습니다.");
+      const payload = (await response.json()) as ChatResponse & { detail?: string };
+      if (!response.ok || !payload.answer) {
+        throw new Error(payload.detail || "안전자료 검색에 실패했습니다.");
       }
-      setMessages((current) => [...current, { role: "ai", text: payload.answer! }]);
-      saveHistory(submittedQuestion, payload.answer, "검토 필요");
+      setMessages((current) => [
+        ...current,
+        {
+          role: "ai",
+          text: payload.answer,
+          sources: payload.sources,
+          retrievalMode: payload.retrieval_mode,
+          generationMode: payload.generation_mode,
+          model: payload.model,
+          warning: payload.warning,
+        },
+      ]);
+      saveHistory(
+        submittedQuestion,
+        `${payload.answer.slice(0, 180)}${payload.answer.length > 180 ? "…" : ""}`,
+        "검토 필요",
+      );
     } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : "AI 요청 중 오류가 발생했습니다.";
-      setMessages((current) => [...current, { role: "ai", text: `오류: ${message}` }]);
+      const message = requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.";
+      setMessages((current) => [...current, { role: "ai", text: message, warning: "검색 결과를 생성하지 못했습니다." }]);
       setError(message);
     } finally {
       setIsChatLoading(false);
@@ -510,14 +532,45 @@ function WorkspaceScreen({
       <section className="chat-stage upgraded-chat">
         <div className="chat-heading"><div><strong>SafeMaint AI 상담</strong><span>분석 결과와 등록 문서를 바탕으로 후속 질문을 입력하세요.</span></div><button type="button" onClick={() => setMessages([])}>대화 지우기</button></div>
         <div className="chat-history">
-          {messages.length === 0 ? <div className="chat-empty">💬 작업 내용이나 부품 관련 질문을 입력하세요.</div> : messages.map((message, index) => <div className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}><strong>{message.role === "user" ? "사용자" : "SafeMaint AI"}</strong>{message.text}</div>)}
+          {messages.length === 0 ? (
+            <div className="chat-empty">💬 작업 내용이나 부품 관련 질문을 입력하세요.</div>
+          ) : messages.map((message, index) => (
+            <div className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}>
+              <strong>{message.role === "user" ? "사용자" : "SafeMaint AI"}</strong>
+              {message.role === "ai" && message.retrievalMode && (
+                <span className={`retrieval-badge ${message.retrievalMode}`}>
+                  {message.generationMode === "openai" && `${message.model ?? "OpenAI"} + `}
+                  {message.retrievalMode === "bge-m3" ? "BGE-M3 근거 검색" : "공통 안전수칙"}
+                </span>
+              )}
+              <p className="chat-answer-text">{message.text}</p>
+              {message.warning && <p className="chat-warning">⚠ {message.warning}</p>}
+              {message.sources && message.sources.length > 0 && (
+                <div className="chat-source-list">
+                  <strong>검색 근거 {message.sources.length}건</strong>
+                  {message.sources.map((source) => (
+                    <article key={source.chunk_id} className="chat-source-card">
+                      <div>
+                        <span>{source.source_type}</span>
+                        <span>유사도 {(source.similarity * 100).toFixed(1)}%</span>
+                      </div>
+                      <strong>{source.title}</strong>
+                      <p>{source.excerpt}</p>
+                      {source.url && <a href={source.url} target="_blank" rel="noreferrer">원문 확인</a>}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+          {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>안전자료를 검색하고 AI 답변을 생성하고 있습니다…</div>}
         </div>
         <form className="chat-input-row" onSubmit={sendChat}>
           <button type="button" className="icon-action" title="음성 입력" onClick={() => window.alert("음성 입력 기능은 STT 연결 예정입니다.")}>🎤</button>
           <label className="icon-action file-icon" title="사진 첨부">📷<input type="file" accept="image/*" onChange={(event) => setSitePhotoName(event.target.files?.[0]?.name ?? "")} /></label>
           <label className="icon-action file-icon" title="문서 첨부">📎<input type="file" accept="application/pdf" multiple onChange={(event) => addManuals(event.target.files)} /></label>
-          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="예: 전원을 차단하지 않고 센서만 빠르게 교체해도 될까요?" />
-          <button type="submit" disabled={isChatLoading}>{isChatLoading ? "답변 생성 중..." : "전송"}</button>
+          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="예: 전원을 차단하지 않고 센서만 빠르게 교체해도 될까요?" disabled={isChatLoading} />
+          <button type="submit" disabled={isChatLoading || !question.trim()}>{isChatLoading ? "답변 생성 중..." : "전송"}</button>
         </form>
       </section>
 
