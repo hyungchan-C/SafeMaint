@@ -39,14 +39,21 @@ class Settings:
     )
     openai_api_key: str = getenv("OPENAI_API_KEY", "")
     openai_model: str = getenv("OPENAI_MODEL", "gpt-4o-mini")
+    llm_base_url: str | None = getenv("LLM_BASE_URL") or None
+    llm_analyzer_model: str = getenv(
+        "LLM_ANALYZER_MODEL", getenv("OPENAI_MODEL", "gpt-4o-mini")
+    )
+    llm_answer_model: str = getenv(
+        "LLM_ANSWER_MODEL", getenv("OPENAI_MODEL", "gpt-4o-mini")
+    )
     openai_timeout_seconds: float = float(getenv("OPENAI_TIMEOUT_SECONDS", "30"))
     openai_max_output_tokens: int = int(
         getenv("OPENAI_MAX_OUTPUT_TOKENS", "1200")
     )
-    allow_external_llm: bool = _bool_env("ALLOW_EXTERNAL_LLM", False)
-    allow_private_documents_to_external_llm: bool = _bool_env(
-        "ALLOW_PRIVATE_DOCUMENTS_TO_EXTERNAL_LLM", False
+    llm_analyzer_max_output_tokens: int = int(
+        getenv("LLM_ANALYZER_MAX_OUTPUT_TOKENS", "500")
     )
+    allow_external_llm: bool = _bool_env("ALLOW_EXTERNAL_LLM", False)
     document_storage_dir: str = getenv("DOCUMENT_STORAGE_DIR", "/data/documents")
     document_max_upload_bytes: int = int(
         getenv("DOCUMENT_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))

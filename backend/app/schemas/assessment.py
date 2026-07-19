@@ -45,11 +45,22 @@ class HazardItem(BaseModel):
 
 class EvidenceItem(BaseModel):
     document_id: str
+    chunk_id: str
     title: str
     page: int | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    section: str | None = None
     source_type: str
+    document_scope: Literal["public", "company"] | None = None
+    original_filename: str | None = None
+    document_version: int | None = None
     excerpt: str
     url: str | None = None
+    retrieval_rank: int = Field(ge=1)
+    retrieval_score: float | None = None
+    reranker_score: float | None = None
+    used_in_answer: bool = False
 
 
 class AssessmentResponse(BaseModel):

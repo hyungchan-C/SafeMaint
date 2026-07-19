@@ -1,9 +1,10 @@
 import asyncio
+import json
 import httpx
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
-from app.schemas.chat import ChatRequest, ChatResponse
+from app.schemas.chat import ChatRequest, ChatResponse, QueryAnalysis
 from app.services.chat import ChatService, get_chat_service
 
 
@@ -110,21 +111,21 @@ def test_chat_service_sends_retrieved_sources_to_openai() -> None:
     assert response.answer.startswith("검색 근거를 바탕으로")
 
 
-def test_chat_service_keeps_grounded_fallback_when_openai_fails() -> None:
-    class FailingAIService:
+def test_chat_service_does_not_call_openai_without_retrieved_evidence() -> None:
+    class MustNotBeCalledAIService:
         def answer(self, question: str, context: str | None = None) -> str:
-            raise RuntimeError("temporary failure")
+            raise AssertionError("LLM must not run without retrieved evidence")
 
     service = ChatService(
         service_url=None,
-        ai_service=FailingAIService(),  # type: ignore[arg-type]
+        ai_service=MustNotBeCalledAIService(),  # type: ignore[arg-type]
         openai_enabled=True,
     )
     response = asyncio.run(service.answer(ChatRequest(question="베어링 교체 방법")))
 
     assert response.generation_mode == "template"
     assert response.retrieval_mode == "safety-fallback"
-    assert "OpenAI 답변 생성에 실패" in (response.warning or "")
+    assert "근거 문서가 없으므로" in (response.warning or "")
 
 
 def test_chat_api_uses_injected_service() -> None:
@@ -168,3 +169,91 @@ def test_chat_api_rejects_too_short_question() -> None:
     response = asyncio.run(request_chat())
 
     assert response.status_code == 422
+
+
+def test_analyzer_failure_sends_deterministic_fallback_to_retrieval() -> None:
+    class FailingAnalyzer:
+        def analyze(self, question: str, context: str) -> QueryAnalysis:
+            raise RuntimeError("invalid JSON")
+
+        def answer(self, question: str, context: str | None = None) -> str:
+            raise AssertionError("No evidence means no answer generation")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["analysis"]["component"] == ["bearing"]
+        assert "bearing" in body["analysis"]["search_keywords"]
+        return httpx.Response(
+            200,
+            json={
+                "answer": "No matching evidence was found.",
+                "sources": [],
+                "retrieval_mode": "hybrid",
+                "warning": "no evidence",
+            },
+        )
+
+    service = ChatService(
+        service_url="http://rag.test",
+        transport=httpx.MockTransport(handler),
+        ai_service=FailingAnalyzer(),  # type: ignore[arg-type]
+        openai_enabled=True,
+    )
+    response = asyncio.run(
+        service.answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "conveyor bearing replacement",
+                    "context": {
+                        "equipment_name": "conveyor",
+                        "component_name": "bearing",
+                    },
+                }
+            )
+        )
+    )
+
+    assert response.retrieval_mode == "hybrid"
+    assert "분석 모델" in (response.warning or "")
+
+
+def test_company_evidence_is_never_sent_to_external_model() -> None:
+    class MustNotGenerateFromCompanyEvidence:
+        def analyze(self, question: str, context: str) -> QueryAnalysis:
+            return QueryAnalysis(search_keywords=["bearing"])
+
+        def answer(self, question: str, context: str | None = None) -> str:
+            raise AssertionError("Company evidence must not leave the server")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answer": "Local grounded template answer",
+                "sources": [
+                    {
+                        "document_id": "doc-company",
+                        "chunk_id": "chunk-company",
+                        "title": "Company manual",
+                        "source_type": "equipment_manual",
+                        "document_scope": "company",
+                        "excerpt": "Private maintenance instructions",
+                        "similarity": 0.8,
+                    }
+                ],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            ai_service=MustNotGenerateFromCompanyEvidence(),  # type: ignore[arg-type]
+            openai_enabled=True,
+        ).answer(ChatRequest(question="bearing replacement"))
+    )
+
+    assert response.generation_mode == "template"
+    assert response.answer == "Local grounded template answer"
+    assert "회사 문서" in (response.warning or "")

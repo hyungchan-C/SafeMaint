@@ -46,3 +46,96 @@ def test_search_text_combines_context_without_access_scope_content() -> None:
 
     assert normalize_text(query) == "컨베이어 CV-203 베어링 교체 절차"
     assert request.access_scope.site_ids[0] not in query
+
+
+def test_default_access_scope_is_strict_public_only() -> None:
+    request = InternalChatRequest(question="conveyor bearing replacement")
+    retriever = PgvectorRetriever(Settings(), embedder=object())  # type: ignore[arg-type]
+
+    sql = retriever._candidate_query("")
+
+    assert request.access_scope.allow_company is False
+    assert "dt.scope = 'public'" in sql
+    assert "d.access_level = 'public'" in sql
+    assert "AND dt.scope = 'company'" in sql
+
+
+def test_old_uuid_manual_values_are_backward_compatible() -> None:
+    document_id = uuid4()
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "manual search",
+            "context": {
+                "registered_manuals": [str(document_id), "old-file-name.pdf"],
+            },
+        }
+    )
+
+    assert request.context.effective_document_ids() == (document_id,)
+
+
+def test_topic_mismatch_is_removed_before_answering() -> None:
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "light curtain replacement",
+            "context": {"component_name": "light curtain"},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(min_similarity=0.1), embedder=object()  # type: ignore[arg-type]
+    )
+    unrelated = {
+        "document_id": "doc-1",
+        "chunk_id": "chunk-1",
+        "title": "Conveyor belt entanglement",
+        "source_type": "public_incident",
+        "document_scope": "public",
+        "original_filename": "conveyor.pdf",
+        "document_version": 1,
+        "section": "belt cleaning",
+        "content": "Lock out the conveyor before belt cleaning.",
+        "content_hash": "a" * 64,
+        "page": 1,
+        "page_start": 1,
+        "page_end": 1,
+        "publisher": "public source",
+        "url": None,
+        "similarity": 0.95,
+        "postgres_keyword_score": 0.0,
+    }
+
+    assert retriever._rerank(request, [unrelated]) == []
+
+
+def test_multiple_relevant_chunks_per_document_are_allowed_and_bounded() -> None:
+    request = InternalChatRequest(question="conveyor bearing replacement")
+    retriever = PgvectorRetriever(
+        Settings(top_k=5, max_chunks_per_document=2, min_similarity=0.1),
+        embedder=object(),  # type: ignore[arg-type]
+    )
+
+    def row(index: int) -> dict:
+        return {
+            "document_id": "doc-1",
+            "chunk_id": f"chunk-{index}",
+            "title": "Conveyor bearing manual",
+            "source_type": "public_guide",
+            "document_scope": "public",
+            "original_filename": "manual.pdf",
+            "document_version": 1,
+            "section": f"bearing {index}",
+            "content": f"Conveyor bearing replacement step {index}",
+            "content_hash": str(index) * 64,
+            "page": index,
+            "page_start": index,
+            "page_end": index,
+            "publisher": "public source",
+            "url": None,
+            "similarity": 0.8 - index / 100,
+            "postgres_keyword_score": 0.1,
+        }
+
+    results = retriever._rerank(request, [row(1), row(2), row(3)])
+
+    assert len(results) == 2
+    assert all(result.reranker_score > 0 for result in results)
