@@ -80,6 +80,7 @@ def test_fake_embedding_is_idempotent_and_pgvector_searches() -> None:
                 external_id=external_id,
                 title="임베딩 통합 테스트",
                 source_type="incident",
+                document_type_code="public_incident",
                 access_level="restricted",
                 metadata_json={
                     "dataset_type": "domestic",
@@ -103,6 +104,7 @@ def test_fake_embedding_is_idempotent_and_pgvector_searches() -> None:
                 external_id=manual_external_id,
                 title="컨베이어 제조사 매뉴얼",
                 source_type="manual",
+                document_type_code="equipment_manual",
                 access_level="restricted",
                 metadata_json={"content_quality": "full"},
             )

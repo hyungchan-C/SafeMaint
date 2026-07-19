@@ -9,6 +9,8 @@ from app.db.models import (
     AssessmentHazard,
     AuditEvent,
     ChecklistItem,
+    Document,
+    DocumentChunk,
 )
 from app.schemas.assessment import AssessmentRequest, AssessmentResponse
 
@@ -53,6 +55,22 @@ class AssessmentRepository:
             ChecklistItem(sequence=index, content=content)
             for index, content in enumerate(response.tbm_checklist, start=1)
         ]
+        evidence_links: list[AssessmentEvidence] = []
+        for evidence in response.evidence:
+            try:
+                chunk_id = UUID(evidence.chunk_id)
+            except ValueError:
+                continue
+            evidence_links.append(
+                AssessmentEvidence(
+                    chunk_id=chunk_id,
+                    retrieval_rank=evidence.retrieval_rank,
+                    retrieval_score=evidence.retrieval_score,
+                    reranker_score=evidence.reranker_score,
+                    used_in_answer=evidence.used_in_answer,
+                )
+            )
+        assessment.evidence_links = evidence_links
 
         self.session.add(assessment)
         self.session.add(
@@ -64,6 +82,7 @@ class AssessmentRepository:
                     "status": response.status.value,
                     "engine_version": assessment.engine_version,
                     "rule_version": assessment.rule_version,
+                    "evidence_count": len(evidence_links),
                 },
             )
         )
@@ -89,7 +108,12 @@ class AssessmentRepository:
                 selectinload(Assessment.checklist_items),
                 selectinload(Assessment.evidence_links).selectinload(
                     AssessmentEvidence.chunk
+                ).selectinload(DocumentChunk.document).selectinload(
+                    Document.document_type
                 ),
+                selectinload(Assessment.evidence_links).selectinload(
+                    AssessmentEvidence.chunk
+                ).selectinload(DocumentChunk.document_version),
             )
         )
         return self.session.scalar(statement)

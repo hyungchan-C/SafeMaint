@@ -71,7 +71,7 @@ try {
     if ($alembicVersion.Count -ne 1) {
         throw "Alembic 현재 버전을 확인할 수 없습니다."
     }
-    if ($alembicVersion[0] -ne "0002_users_roles_sites") {
+    if ($alembicVersion[0] -ne "0006_worker_resilience") {
         throw "Alembic이 최신 버전이 아닙니다: $($alembicVersion[0])"
     }
 
@@ -80,6 +80,8 @@ try {
         "alembic_version",
         "reference_codes",
         "roles",
+        "permissions",
+        "role_permissions",
         "sites",
         "user_roles",
         "user_sites",
@@ -91,6 +93,10 @@ try {
         "checklist_items",
         "documents",
         "document_chunks",
+        "document_types",
+        "document_versions",
+        "document_processing_jobs",
+        "public_rag_packages",
         "assessment_evidence",
         "audit_events"
     )
@@ -98,7 +104,7 @@ try {
 SELECT tablename
 FROM pg_tables
 WHERE schemaname = 'public'
-  AND tablename IN ('alembic_version', 'reference_codes', 'roles', 'sites', 'user_roles', 'user_sites', 'users', 'equipment', 'components', 'assessments', 'assessment_hazards', 'checklist_items', 'documents', 'document_chunks', 'assessment_evidence', 'audit_events')
+  AND tablename IN ('alembic_version', 'reference_codes', 'roles', 'permissions', 'role_permissions', 'sites', 'user_roles', 'user_sites', 'users', 'equipment', 'components', 'assessments', 'assessment_hazards', 'checklist_items', 'documents', 'document_chunks', 'document_types', 'document_versions', 'document_processing_jobs', 'public_rag_packages', 'assessment_evidence', 'audit_events')
 ORDER BY tablename;
 "@
     $actualTables = @(Invoke-SafeMaintDbQuery -Sql $tableSql)
@@ -114,8 +120,8 @@ ORDER BY tablename;
     if (-not [int]::TryParse($seedCountText, [ref]$seedCount) -or $seedCount -le 0) {
         throw "reference_codes seed 데이터가 없습니다."
     }
-    $roleSeedRows = @(Invoke-SafeMaintDbQuery -Sql "SELECT COUNT(*) || '|' || string_agg(code, ',' ORDER BY code) FROM roles WHERE is_active AND code IN ('admin', 'safety_manager', 'worker');")
-    if ($roleSeedRows.Count -ne 1 -or $roleSeedRows[0] -ne "3|admin,safety_manager,worker") {
+    $roleSeedRows = @(Invoke-SafeMaintDbQuery -Sql "SELECT COUNT(*) || '|' || string_agg(code, ',' ORDER BY code) FROM roles WHERE is_active AND code IN ('admin', 'document_manager', 'safety_manager', 'worker');")
+    if ($roleSeedRows.Count -ne 1 -or $roleSeedRows[0] -ne "4|admin,document_manager,safety_manager,worker") {
         throw "roles seed 데이터가 올바르지 않습니다: $($roleSeedRows -join ', ')"
     }
 
@@ -134,7 +140,7 @@ ORDER BY tablename;
     Write-Host "- Alembic: $($alembicVersion[0])"
     Write-Host "- 주요 테이블: $($actualTables.Count)/$($expectedTables.Count)"
     Write-Host "- reference_codes: $seedCount rows"
-    Write-Host "- roles: admin, safety_manager, worker"
+    Write-Host "- roles: admin, document_manager, safety_manager, worker"
     Write-Host "- Backend readiness: HTTP $($response.StatusCode)"
     exit 0
 }

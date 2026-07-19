@@ -33,8 +33,15 @@ try {
             throw "docker compose config 검증에 실패했습니다."
         }
 
-        Write-Host "[4/7] 개발용 DB, migration, seed, backend, frontend 실행"
-        & docker @composeArguments up -d --build
+        Write-Host "[4/7] 개발용 DB, migration, seed, backend, RAG, worker, frontend 실행"
+        # migrate/seed/backend and rag/worker share images. Building via
+        # `up --build` asks BuildKit to build the same image concurrently on
+        # Docker Desktop, which can fail with a duplicated gRPC session.
+        & docker @composeArguments build backend rag frontend
+        if ($LASTEXITCODE -ne 0) {
+            throw "docker compose build 실행에 실패했습니다."
+        }
+        & docker @composeArguments up -d --no-build
         if ($LASTEXITCODE -ne 0) {
             throw "docker compose up 실행에 실패했습니다."
         }
@@ -46,8 +53,10 @@ try {
         $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "migrate" -Expected "completed" -TimeoutSeconds $TimeoutSeconds
         $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "seed" -Expected "completed" -TimeoutSeconds $TimeoutSeconds
 
-        Write-Host "[7/7] backend와 frontend 상태 확인"
+        Write-Host "[7/7] backend, RAG, worker와 frontend 상태 확인"
         $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "backend" -Expected "healthy" -TimeoutSeconds $TimeoutSeconds
+        $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "rag" -Expected "healthy" -TimeoutSeconds $TimeoutSeconds
+        $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "worker" -Expected "running" -TimeoutSeconds $TimeoutSeconds
         $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "frontend" -Expected "running" -TimeoutSeconds $TimeoutSeconds
         $null = Wait-SafeMaintHttp -Url "http://127.0.0.1:$backendPort/health/ready" -TimeoutSeconds $TimeoutSeconds
         $null = Wait-SafeMaintHttp -Url "http://127.0.0.1:$frontendPort" -TimeoutSeconds $TimeoutSeconds
@@ -59,6 +68,7 @@ try {
     Write-Host "`nSafeMaint 개발 환경이 정상적으로 실행되었습니다." -ForegroundColor Green
     Write-Host "- Frontend: http://127.0.0.1:$frontendPort"
     Write-Host "- Backend readiness: http://127.0.0.1:$backendPort/health/ready"
+    Write-Host "- Local RAG and document worker: running"
     Write-Host "- DBeaver: 127.0.0.1:$postgresPort / DB=$($envValues['POSTGRES_DB']) / User=$($envValues['POSTGRES_USER'])"
     Write-Host "- 상세 검증: .\scripts\verify-db.ps1"
     exit 0

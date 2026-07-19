@@ -600,7 +600,6 @@ a {
 .visual-stage { align-items: center; background: linear-gradient(145deg, #fff, #f0f5f7); border: 2px solid #132b3b; border-top: 0; display: flex; flex-direction: column; justify-content: center; min-height: 330px; padding: 30px; text-align: center; }
 .visual-stage h1 { color: var(--navy); margin: 5px 0; }
 .visual-stage p { color: var(--muted); }
-.avatar-placeholder { font-size: 64px; }
 .result-badge { background: var(--teal-soft); border-radius: 999px; color: var(--teal); font-size: 12px; font-weight: 800; padding: 8px 12px; }
 .manual-row { align-items: center; background: white; border: 2px solid #132b3b; border-top: 0; display: grid; gap: 16px; grid-template-columns: minmax(220px, 340px) 1fr; padding: 14px 18px; }
 .file-card { background: var(--navy); border-radius: 9px; color: white; cursor: pointer; font-weight: 800; padding: 12px 16px; text-align: center; }

@@ -140,19 +140,24 @@ DATABASE_URL=postgresql+psycopg://safemaint:change-this-local-password@db:5432/s
 ```dotenv
 OPENAI_API_KEY=sk-여기에_본인의_API_키
 OPENAI_MODEL=gpt-4o-mini
+LLM_BASE_URL=
+LLM_ANALYZER_MODEL=gpt-4o-mini
+LLM_ANSWER_MODEL=gpt-4o-mini
 OPENAI_TIMEOUT_SECONDS=30
 OPENAI_MAX_OUTPUT_TOKENS=1200
+ALLOW_EXTERNAL_LLM=true
 ```
 
-OpenAI 연동 시 사업장·설비·부품·작업 설명과 검색된 근거 문서 일부가 외부 API로
-전송됩니다. 실제 고객정보나 개인정보를 입력하기 전 조직의 데이터 처리 기준을
-확인하세요. 화면에서 선택한 매뉴얼은 파일명 대신 개수만 전달되며, 파일 내용은
-업로드·전처리 전에는 전송되지 않습니다.
+외부 LLM은 기본적으로 꺼져 있습니다. 명시적으로 켜면 질문과 검색 근거 일부가 외부
+API로 전송될 수 있으므로 공개 자료 실험에만 사용하세요. 회사 문서 근거는 설정값과
+관계없이 외부 모델로 전송되지 않습니다. 실제 고객정보나 개인정보를 입력하기 전
+조직의 데이터 처리 기준을 확인해야 합니다.
 
-키를 변경한 뒤에는 `verify-db.ps1`이 아니라 `setup-dev.ps1` 또는 아래 Compose 명령으로 backend를 다시 빌드해야 적용됩니다.
+설정을 변경한 뒤에는 `verify-db.ps1`이 아니라 `setup-dev.ps1` 또는 아래 Compose 명령으로 backend를 다시 빌드해야 적용됩니다.
 
 ```powershell
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml up -d --build backend frontend
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml build backend
+docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml up -d --no-build backend
 ```
 
 설정이 끝나면 로컬에서 실행 중인 `npm run dev`와 `uvicorn`을 먼저 `Ctrl+C`로 종료합니다. 로컬 프로세스가 3000·8000 포트를 사용 중이면 Docker의 `frontend`·`backend` 컨테이너가 `Created` 상태에 머물며 브라우저에는 `Failed to fetch`가 표시됩니다.
@@ -177,13 +182,19 @@ docker compose `
   --env-file .env `
   -f docker-compose.yml `
   -f docker-compose.dev.yml `
-  up -d --build
+  build backend rag frontend
+
+docker compose `
+  --env-file .env `
+  -f docker-compose.yml `
+  -f docker-compose.dev.yml `
+  up -d --no-build
 ```
 
 실행 순서는 Compose가 다음과 같이 보장합니다.
 
 ```text
-db healthy → migrate 종료 코드 0 → seed 종료 코드 0 → backend healthy → frontend
+db healthy → migrate 종료 코드 0 → seed 종료 코드 0 → backend/RAG/worker → frontend
 ```
 
 - 대시보드: <http://localhost:3000>
@@ -222,6 +233,14 @@ POSTGRES_PORT=5433
 ```
 
 이 경우 DBeaver도 5433 포트로 연결합니다. `DATABASE_URL`의 `db:5432`는 컨테이너 내부 주소이므로 변경하지 않습니다.
+
+Windows가 3000 포트를 사용 중이거나 예약한 경우에는 `.env`의 호스트 포트만 바꿉니다.
+
+```dotenv
+FRONTEND_PORT=3030
+```
+
+이 경우 대시보드 주소는 `http://localhost:3030`입니다. 컨테이너 내부 포트는 계속 3000이므로 다른 설정은 변경하지 않습니다.
 
 ### DBeaver 연결
 
@@ -446,15 +465,162 @@ DB 통합 테스트는 실수로 운영 DB를 수정하지 않도록 DB 이름�
 - seed는 여러 번 실행해도 중복되지 않는 멱등 구조를 유지합니다.
 - 운영 DB dump, 실제 고객 데이터와 사업장 문서는 Git에 커밋하지 않습니다.
 
-## 프론트엔드 초기 구상 화면
+## 고객사별 온프레미스 배포·보안 구조
 
-현재 프론트엔드에는 다음 화면 흐름이 통합되어 있습니다.
+SafeMaint는 고객사별로 완전히 분리해 설치하는 single-tenant 온프레미스 시스템입니다. 각 고객사는 동일한 이미지와 스키마를 사용하지만 PostgreSQL, 원본 PDF, 임베딩, 계정, 감사기록은 각 고객사 서버의 Docker volume에만 저장됩니다. 중앙 관리 환경에는 고객사 문서·질문·응답·임베딩을 수집하거나 전송하는 코드 경로가 없습니다.
 
-- PostgreSQL 기반 회원가입·로그인과 브라우저 화면 세션
-- 메뉴: 음량, 글자 크기, 결과 기록, 대화 초기화, 로그아웃
-- 아바타·검색 결과·영상 표시 영역
-- 사용자 보유 PDF 매뉴얼 선택 영역
-- 채팅 UI와 결과 기록 저장
-- 기존 FastAPI `/api/v1/assessments/preview` 연동 위험성평가 미리보기
+실행 서비스는 `frontend`, `backend`, `rag`, `worker`, `db`입니다. `migrate`와 `seed`는 성공 후 종료되는 일회성 서비스입니다. 운영 Compose에서는 DB와 RAG 포트를 호스트에 공개하지 않으며 개발 오버레이를 사용할 때만 각각 `127.0.0.1`에 공개합니다.
 
-계정은 FastAPI와 PostgreSQL에 저장됩니다. 현재 브라우저 `localStorage`에는 화면 세션·설정·결과 기록만 저장되며, 서버가 발급하는 JWT와 보호 API는 후속 단계에서 구현합니다.
+영구 데이터:
+
+- `safemaint_postgres_data`: PostgreSQL + pgvector
+- `safemaint_documents`: 고객사 원본 PDF
+- `safemaint_packages`: 검증을 통과한 공용 RAG 패키지
+- `safemaint_model_cache`: 로컬 임베딩·TTS 모델 캐시
+
+백업 시에는 DB와 `safemaint_documents`를 같은 복구 시점으로 함께 보호해야 합니다. 스크립트는 `docker compose down -v`나 `docker volume rm`을 실행하지 않습니다.
+
+### 권한 데이터 기반과 팀원 담당 연계
+
+DB에는 사용자 → 역할 → 권한을 표현하는 `permissions`, `role_permissions`, `user_roles`, `user_sites` 구조와 seed가 준비되어 있습니다. 다만 로그인 토큰 발급, 현재 사용자 dependency, PDF 업로드 API 연결은 팀원이 담당하기로 정했기 때문에 이 변경에서는 구현하거나 공개하지 않습니다. 기존 로그인 응답만으로 보호 API를 만들거나 프런트가 보낸 역할 문자열을 신뢰해서는 안 됩니다.
+
+| 역할 | 주요 문서 권한 |
+|---|---|
+| `worker` | 승인된 접근 가능 문서 조회·검색 |
+| `safety_manager` | 조회, 업로드, 메타데이터 수정, 교체 버전 업로드 |
+| `document_manager` | 위 권한 + 승인, 삭제, 복구, 감사 조회 |
+| `admin` | 모든 권한, 역할 관리, 공용 패키지 가져오기·롤백 |
+
+권한 코드는 `document.read`, `document.upload`, `document.update`, `document.replace`, `document.approve`, `document.delete`, `document.restore`, `role.manage`, `audit.read`, `public_package.import`입니다. 팀원 인증 작업이 합쳐질 때 백엔드가 DB 권한과 `site_id`를 조회해 `RetrievalAccessScope`를 구성해야 합니다. 현재 채팅 경로는 인증 범위를 임의로 추측하지 않고 public-only 검색 범위를 사용합니다.
+
+### 고객사 PDF 처리 흐름
+
+이 변경은 문서 유형·버전·처리 작업·승인 상태를 저장할 DB 기반과 로컬 worker를 제공합니다. PDF 업로드 라우트와 인증 연결은 팀원 담당 범위이므로 `/api/v1/documents` API와 프런트 업로드 호출은 등록하지 않았습니다. 화면의 PDF 선택은 현재 파일명 미리보기일 뿐 서버 업로드가 아닙니다.
+
+```text
+pending → processing → review_required → active
+                    └→ failed 또는 ocr_required
+```
+
+worker가 고객사 서버 안에서 PyMuPDF로 텍스트를 추출하고 BGE-M3 임베딩을 생성합니다. 텍스트가 없는 스캔 PDF는 내용을 꾸며내지 않고 `ocr_required`로 표시합니다. 검색 SQL은 승인된 현재 버전만 대상으로 하고 실패 버전과 삭제 문서를 제외하도록 준비되어 있습니다. 실제 업로드·검토·승인 전환 API는 팀원 인증 작업과 함께 연결해야 합니다.
+
+문서 유형은 `public_incident`, `public_law`, `public_guide`, `public_media`, `company_policy`, `equipment_manual`, `component_manual`입니다. 향후 고객사 업로드 API는 회사 문서 유형만 허용하고 공용 유형은 서명된 패키지로만 설치해야 합니다.
+
+### 서명된 공용 RAG 패키지
+
+패키지는 안전한 ZIP 안에 canonical JSON인 `manifest.json`, `documents.jsonl`, `chunks.jsonl`, `signature.ed25519`만 포함합니다. pickle은 사용하지 않습니다. manifest에는 패키지·스키마 버전, 모델, 차원, 출처 유형, 문서/청크 수, 파일별 SHA-256, 이전 버전 정보가 들어갑니다.
+
+중앙 생성 환경에서 Ed25519 키를 별도 비밀 저장소에 보관하고 다음 CLI를 사용합니다.
+
+```powershell
+docker compose run --rm backend python -m app.commands.public_rag_package create `
+  --version "2026.07.16" `
+  --private-key "/run/secrets/public-package-private.pem" `
+  --output "/data/packages/safemaint-public-2026.07.16.zip"
+```
+
+고객사에서는 공개키만 배포하고 검증 후 가져옵니다.
+
+```powershell
+docker compose run --rm backend python -m app.commands.public_rag_package verify `
+  "/data/packages/safemaint-public-2026.07.16.zip" `
+  --public-key "/run/secrets/public-package-public.pem"
+
+docker compose run --rm backend python -m app.commands.public_rag_package import `
+  "/data/packages/safemaint-public-2026.07.16.zip" `
+  --public-key "/run/secrets/public-package-public.pem"
+
+docker compose run --rm backend python -m app.commands.public_rag_package status
+docker compose run --rm backend python -m app.commands.public_rag_package rollback --version "이전버전"
+```
+
+서명, 체크섬, 파일 목록, 공용 유형, 스키마, 모델, 차원, 청크 참조를 모두 먼저 검증합니다. 가져오기는 PostgreSQL advisory lock과 단일 트랜잭션을 사용하며 완료 전에 기존 활성 패키지를 비활성화하지 않습니다. 회사 문서 유형은 생성·검증 단계에서 패키지에 포함될 수 없습니다.
+
+### 외부 전송 차단
+
+기본값은 다음과 같으며 `.env.example`에도 동일하게 선언되어 있습니다.
+
+```dotenv
+ALLOW_EXTERNAL_LLM=false
+```
+
+이 값이 `false`이면 외부 모델 호출 자체가 발생하지 않고 로컬 RAG와 안전 템플릿만 사용합니다. 외부 모델을 명시적으로 켜더라도 회사 범위 근거가 하나라도 포함되면 코드 수준에서 외부 전송을 차단합니다. 예전 직접 OpenAI 채팅 경로는 공개 API 라우터에서 제거했습니다. TTS 기능은 유지됩니다.
+
+### 최초 설치와 업데이트
+
+개발 PC 최초 실행:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+.\scripts\setup-dev.ps1
+.\scripts\verify-db.ps1
+```
+
+업데이트 시 기존 volume을 삭제하지 말고 다음 명령을 사용합니다.
+
+```powershell
+git pull
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+.\scripts\verify-db.ps1
+```
+
+운영 설치에서는 `docker-compose.dev.yml`을 사용하지 않고 정확한 HTTPS origin, 강한 DB 암호, 패키지 공개키를 설정합니다. 팀원 인증 구현이 합쳐지면 토큰 저장·만료·폐기와 HTTPS 전용 쿠키 또는 Authorization 헤더 정책을 함께 확정해야 합니다. 방화벽과 reverse proxy에서는 frontend/backend만 필요한 범위로 노출합니다.
+
+### 현재 구현 범위와 남은 항목
+
+구현됨: DB 기반 RBAC 데이터 구조와 seed, 문서 유형·버전·처리 상태 기반, 로컬 텍스트 추출·임베딩 worker, 승인된 현재 버전 검색 조건, 출처의 문서 유형·파일명·페이지·버전·유사도, 서명 패키지 생성·검증·가져오기·롤백 CLI, 감사 데이터 구조, 외부 LLM 기본 차단, TTS 유지.
+
+팀원 담당으로 제외됨: 로그인 토큰 발급, 현재 사용자 dependency, PDF 업로드 API(F01), 해당 API의 프런트 연결과 인증 기반 문서 관리 API. 이 항목이 합쳐지기 전에는 회사 문서 업로드·승인 화면이 완성된 것으로 간주하지 않습니다.
+
+별도 운영 작업 필요: 고객사 HTTPS 인증서/reverse proxy, Ed25519 키 수명주기와 오프라인 전달 절차, 실제 백업·PITR 자동화, 스캔 PDF용 검증된 로컬 OCR 엔진, 악성 PDF 안티바이러스/CDR, 로그 보존·모니터링 정책. 이 항목들은 동작하는 것처럼 화면에 표시하지 않습니다.
+
+## 하이브리드 RAG와 임시 GPT-4o-mini 설정
+
+현재 질의 흐름은 `상황 분석 → 키워드·BGE-M3 후보 검색 → 주제 불일치 제거 → rerank → 근거 답변` 순서입니다. 상황 분석기와 답변 생성기는 같은 OpenAI 호환 provider 인터페이스를 사용합니다. 팀의 Qwen3 서버가 준비되기 전에는 다음처럼 GPT-4o-mini를 사용합니다.
+
+```dotenv
+OPENAI_API_KEY=각자_발급한_키
+ALLOW_EXTERNAL_LLM=true
+LLM_BASE_URL=
+LLM_ANALYZER_MODEL=gpt-4o-mini
+LLM_ANSWER_MODEL=gpt-4o-mini
+LLM_ANALYZER_MAX_OUTPUT_TOKENS=500
+OPENAI_MAX_OUTPUT_TOKENS=1200
+```
+
+Qwen3가 OpenAI 호환 API로 준비되면 애플리케이션 코드를 수정하지 않고 `LLM_BASE_URL`, `LLM_ANALYZER_MODEL`, `LLM_ANSWER_MODEL`만 변경합니다. 모델 분석 JSON이 잘못되거나 시간 초과가 발생하면 입력값 기반 검색어로 대체합니다. 검색 근거가 없으면 모델이 답을 추측하지 않고 “근거 없음” 응답을 반환합니다. 회사 범위 문서가 결과에 포함된 경우에는 외부 모델 답변 생성을 항상 차단합니다.
+
+인증 dependency가 아직 연결되지 않은 요청의 검색 범위는 항상 공개 문서뿐입니다. 화면에서 선택한 매뉴얼은 파일명이 아니라 아래 UUID 필드로 전달해야 합니다.
+
+```json
+{
+  "context": {
+    "selected_document_ids": ["document-uuid"],
+    "selected_document_version_ids": ["document-version-uuid"]
+  }
+}
+```
+
+기존 `registered_manuals` 값이 UUID이면 단계적으로 호환되지만, 파일명 문자열은 검색 권한이나 범위로 사용하지 않습니다. 인증 담당자의 현재 사용자·사업장 권한 연결이 합쳐질 때만 `allow_company` 범위를 서버가 생성해야 하며 클라이언트가 임의로 회사 문서 권한을 부여해서는 안 됩니다.
+
+문서 worker는 팀의 `ai/preprocessing/pdf_pipeline.py`를 공통 처리 경로로 사용합니다. 텍스트 PDF는 페이지·섹션·제조사·제품군·모델 메타데이터와 결정적 청크 ID/해시를 저장합니다. 이미지 전용 PDF는 OCR이 준비되지 않은 경우 `ocr_required`, 내용이 없는 PDF는 `failed`로 구분합니다. 중단된 `processing` 작업은 제한 횟수 내 재시도하고 최종 실패 사유와 감사 이벤트를 남깁니다.
+
+```dotenv
+DOCUMENT_WORKER_MAX_ATTEMPTS=3
+DOCUMENT_WORKER_RETRY_DELAY_SECONDS=10
+DOCUMENT_WORKER_STALE_AFTER_SECONDS=300
+RAG_CANDIDATE_K=30
+RAG_MAX_CHUNKS_PER_DOCUMENT=2
+RAG_MIN_KEYWORD_SCORE=0.08
+```
+
+개발 검증은 운영 이미지와 분리된 Docker test stage에서 실행할 수 있습니다. DB 통합 테스트는 이름이 `_test`로 끝나는 별도 DB에서만 실행해야 합니다.
+
+```powershell
+docker build --target test -t safemaint-backend:test-suite .\backend
+docker run --rm safemaint-backend:test-suite
+
+docker build --target test -t safemaint-rag:test-suite -f .\ai\Dockerfile.rag .
+docker run --rm safemaint-rag:test-suite
+```

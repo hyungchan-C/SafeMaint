@@ -10,8 +10,22 @@ x-backend-service: &backend-service
     DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting SafeMaint}
     OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    LLM_BASE_URL: ${LLM_BASE_URL:-}
+    LLM_ANALYZER_MODEL: ${LLM_ANALYZER_MODEL:-gpt-4o-mini}
+    LLM_ANSWER_MODEL: ${LLM_ANSWER_MODEL:-gpt-4o-mini}
+    LLM_ANALYZER_MAX_OUTPUT_TOKENS: ${LLM_ANALYZER_MAX_OUTPUT_TOKENS:-500}
     OPENAI_TIMEOUT_SECONDS: ${OPENAI_TIMEOUT_SECONDS:-30}
     OPENAI_MAX_OUTPUT_TOKENS: ${OPENAI_MAX_OUTPUT_TOKENS:-1200}
+    ALLOW_EXTERNAL_LLM: ${ALLOW_EXTERNAL_LLM:-false}
+    DOCUMENT_STORAGE_DIR: /data/documents
+    DOCUMENT_MAX_UPLOAD_BYTES: ${DOCUMENT_MAX_UPLOAD_BYTES:-26214400}
+    PACKAGE_STORAGE_DIR: /data/packages
+    PUBLIC_PACKAGE_PUBLIC_KEY: ${PUBLIC_PACKAGE_PUBLIC_KEY:-}
+    PUBLIC_PACKAGE_PRIVATE_KEY: ${PUBLIC_PACKAGE_PRIVATE_KEY:-}
+    PUBLIC_PACKAGE_MAX_BYTES: ${PUBLIC_PACKAGE_MAX_BYTES:-1073741824}
+    RAG_MODEL: ${RAG_MODEL:-BAAI/bge-m3}
+    RAG_EMBEDDING_DIMENSION: ${RAG_EMBEDDING_DIMENSION:-1024}
+    RAG_SERVICE_URL: http://rag:8010
     TTS_VOICE: ${TTS_VOICE:-F1}
     TTS_LANGUAGE: ${TTS_LANGUAGE:-ko}
     TTS_STEPS: ${TTS_STEPS:-8}
@@ -19,6 +33,8 @@ x-backend-service: &backend-service
     XDG_CACHE_HOME: /root/.cache
   volumes:
     - safemaint_model_cache:/root/.cache
+    - safemaint_documents:/data/documents
+    - safemaint_packages:/data/packages
 
 services:
   db:
@@ -75,6 +91,64 @@ services:
       retries: 10
       start_period: 10s
 
+  rag:
+    image: safemaint-rag:0.3.0
+    build:
+      context: .
+      dockerfile: ai/Dockerfile.rag
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting SafeMaint}
+      RAG_MODEL: ${RAG_MODEL:-BAAI/bge-m3}
+      RAG_MODEL_CACHE_DIR: /models
+      RAG_DEVICE: ${RAG_DEVICE:-cpu}
+      RAG_TOP_K: ${RAG_TOP_K:-5}
+      RAG_CANDIDATE_K: ${RAG_CANDIDATE_K:-30}
+      RAG_MAX_CHUNKS_PER_DOCUMENT: ${RAG_MAX_CHUNKS_PER_DOCUMENT:-2}
+      RAG_MIN_SIMILARITY: ${RAG_MIN_SIMILARITY:-0.25}
+      RAG_MIN_KEYWORD_SCORE: ${RAG_MIN_KEYWORD_SCORE:-0.08}
+      RAG_SOURCE_TYPES: ${RAG_SOURCE_TYPES:-}
+    volumes:
+      - safemaint_model_cache:/models
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8010/health/live', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  worker:
+    image: safemaint-rag:0.3.0
+    build:
+      context: .
+      dockerfile: ai/Dockerfile.rag
+    command: ["python", "-m", "rag_service.worker"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting SafeMaint}
+      RAG_MODEL: ${RAG_MODEL:-BAAI/bge-m3}
+      RAG_MODEL_CACHE_DIR: /models
+      RAG_DEVICE: ${RAG_DEVICE:-cpu}
+      DOCUMENT_WORKER_POLL_SECONDS: ${DOCUMENT_WORKER_POLL_SECONDS:-2}
+      DOCUMENT_WORKER_CHUNK_CHARACTERS: ${DOCUMENT_WORKER_CHUNK_CHARACTERS:-1200}
+      DOCUMENT_WORKER_CHUNK_OVERLAP: ${DOCUMENT_WORKER_CHUNK_OVERLAP:-150}
+      DOCUMENT_WORKER_MAX_ATTEMPTS: ${DOCUMENT_WORKER_MAX_ATTEMPTS:-3}
+      DOCUMENT_WORKER_RETRY_DELAY_SECONDS: ${DOCUMENT_WORKER_RETRY_DELAY_SECONDS:-10}
+      DOCUMENT_WORKER_STALE_AFTER_SECONDS: ${DOCUMENT_WORKER_STALE_AFTER_SECONDS:-300}
+    volumes:
+      - safemaint_model_cache:/models
+      - safemaint_documents:/data/documents
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
   frontend:
     image: safemaint-frontend:0.2.0
     build:
@@ -95,3 +169,7 @@ volumes:
     name: ${POSTGRES_VOLUME_NAME:-safemaint_postgres_data}
   safemaint_model_cache:
     name: ${MODEL_CACHE_VOLUME_NAME:-safemaint_model_cache}
+  safemaint_documents:
+    name: ${DOCUMENT_VOLUME_NAME:-safemaint_documents}
+  safemaint_packages:
+    name: ${PACKAGE_VOLUME_NAME:-safemaint_packages}

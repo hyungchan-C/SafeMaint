@@ -46,7 +46,7 @@ def test_assessment_preview_returns_rule_based_draft() -> None:
     assert body["tbm_checklist"]
 
 
-def test_ai_chat_returns_model_answer() -> None:
+def test_legacy_direct_ai_route_is_not_exposed() -> None:
     with patch("app.api.routes.ai.AIService.answer", return_value="전원을 차단하고 LOTO를 적용하세요."):
         response = asyncio.run(
             request(
@@ -56,8 +56,4 @@ def test_ai_chat_returns_model_answer() -> None:
             )
         )
 
-    assert response.status_code == 200
-    assert response.json() == {
-        "answer": "전원을 차단하고 LOTO를 적용하세요.",
-        "model": "gpt-4o-mini",
-    }
+    assert response.status_code == 404
