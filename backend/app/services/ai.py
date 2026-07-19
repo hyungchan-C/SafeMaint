@@ -18,6 +18,8 @@ class AIConfigurationError(RuntimeError):
 
 class AIService:
     def answer(self, question: str, context: str | None = None) -> str:
+        if not settings.allow_external_llm:
+            raise AIConfigurationError("External LLM use is disabled by policy.")
         if not settings.openai_api_key:
             raise AIConfigurationError("OPENAI_API_KEY가 설정되지 않았습니다.")
 

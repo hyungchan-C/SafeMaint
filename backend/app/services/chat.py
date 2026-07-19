@@ -6,7 +6,7 @@ import httpx
 from openai import OpenAIError
 
 from app.core.config import settings
-from app.schemas.chat import ChatRequest, ChatResponse
+from app.schemas.chat import ChatRequest, ChatResponse, RetrievalAccessScope
 from app.services.ai import AIConfigurationError, AIService
 from app.services.safety_guidance import format_safety_answer
 
@@ -34,15 +34,35 @@ class ChatService:
         self.transport = transport
         self.ai_service = ai_service or AIService()
         self.openai_enabled = (
-            bool(settings.openai_api_key)
+            settings.allow_external_llm and bool(settings.openai_api_key)
             if openai_enabled is None
             else openai_enabled
         )
 
-    async def answer(self, request: ChatRequest) -> ChatResponse:
-        retrieval_response = await self._retrieve(request)
+    async def answer(
+        self,
+        request: ChatRequest,
+        access_scope: RetrievalAccessScope | None = None,
+    ) -> ChatResponse:
+        retrieval_response = await self._retrieve(request, access_scope)
         if not self.openai_enabled:
             return retrieval_response
+        contains_company_data = any(
+            source.document_scope == "company"
+            for source in retrieval_response.sources
+        )
+        if (
+            contains_company_data
+            and not settings.allow_private_documents_to_external_llm
+        ):
+            return retrieval_response.model_copy(
+                update={
+                    "warning": self._append_warning(
+                        retrieval_response.warning,
+                        "Company document content was not sent to an external LLM.",
+                    )
+                }
+            )
 
         try:
             answer = await asyncio.to_thread(
@@ -68,7 +88,11 @@ class ChatService:
             }
         )
 
-    async def _retrieve(self, request: ChatRequest) -> ChatResponse:
+    async def _retrieve(
+        self,
+        request: ChatRequest,
+        access_scope: RetrievalAccessScope | None = None,
+    ) -> ChatResponse:
         if not self.service_url:
             return self._fallback(request)
 
@@ -77,9 +101,13 @@ class ChatService:
                 timeout=self.timeout_seconds,
                 transport=self.transport,
             ) as client:
+                request_body = request.model_dump(mode="json")
+                request_body["access_scope"] = (
+                    access_scope or RetrievalAccessScope()
+                ).model_dump(mode="json")
                 response = await client.post(
                     f"{self.service_url}/v1/chat",
-                    json=request.model_dump(mode="json"),
+                    json=request_body,
                 )
                 response.raise_for_status()
                 return ChatResponse.model_validate(response.json())

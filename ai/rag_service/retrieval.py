@@ -10,7 +10,7 @@ from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 
 from rag_service.config import Settings
-from rag_service.schemas import ChatRequest, ChatSource
+from rag_service.schemas import ChatRequest, ChatSource, InternalChatRequest
 
 
 class RetrievalError(RuntimeError):
@@ -104,6 +104,20 @@ class BgeM3Embedder:
             )[0]
         return np.asarray(vector, dtype=np.float32)
 
+    def encode_many(self, texts: Sequence[str], batch_size: int = 16) -> np.ndarray:
+        normalized = [normalize_text(text) for text in texts]
+        if not normalized or any(not text for text in normalized):
+            raise RetrievalError("Embedding input must contain non-empty text.")
+        with self._encode_lock:
+            vectors = self._get_model().encode(
+                normalized,
+                batch_size=batch_size,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            )
+        return np.asarray(vectors, dtype=np.float32)
+
 
 class PgvectorRetriever:
     def __init__(self, settings: Settings, embedder: BgeM3Embedder | None = None) -> None:
@@ -140,7 +154,9 @@ class PgvectorRetriever:
             SELECT COUNT(*)
             FROM document_chunks dc
             JOIN documents d ON d.id = dc.document_id
-            WHERE d.access_level <> 'private'
+            WHERE d.lifecycle_status = 'active'
+              AND (dc.document_version_id IS NULL OR dc.document_version_id = d.current_version_id)
+              AND d.access_level <> 'private'
               {scope_clause}
               AND dc.embedding_status = 'ready'
               AND dc.embedding IS NOT NULL
@@ -159,7 +175,7 @@ class PgvectorRetriever:
 
     def search(
         self,
-        request: ChatRequest,
+        request: InternalChatRequest,
         source_types: Sequence[str] | None = None,
         document_ids: Sequence[UUID] | None = None,
     ) -> list[ChatSource]:
@@ -178,18 +194,29 @@ class PgvectorRetriever:
                     d.id::text AS document_id,
                     dc.id::text AS chunk_id,
                     d.title,
-                    CASE
-                        WHEN d.metadata->>'dataset_type' IS NOT NULL
-                            THEN CONCAT(d.source_type, ':', d.metadata->>'dataset_type')
-                        ELSE d.source_type
-                    END AS source_type,
+                    d.document_type_code AS source_type,
+                    dt.scope AS document_scope,
+                    dv.original_filename,
+                    dv.version_number AS document_version,
+                    COALESCE(dc.metadata->>'section', dc.section_path->>0) AS section,
                     LEFT(dc.content, 420) AS excerpt,
                     COALESCE(dc.page_number, dc.page_start) AS page,
                     d.source_url AS url,
                     dc.embedding <=> %s AS cosine_distance
                 FROM document_chunks dc
                 JOIN documents d ON d.id = dc.document_id
-                WHERE d.access_level <> 'private'
+                JOIN document_types dt ON dt.code = d.document_type_code
+                LEFT JOIN document_versions dv ON dv.id = dc.document_version_id
+                WHERE d.lifecycle_status = 'active'
+                  AND (dc.document_version_id IS NULL OR dc.document_version_id = d.current_version_id)
+                  AND (%s OR d.access_level <> 'private')
+                  AND (
+                      dt.scope = 'public'
+                      OR (
+                          dt.scope = 'company'
+                          AND (%s OR d.site_id IS NULL OR d.site_id::text = ANY(%s))
+                      )
+                  )
                   {scope_clause}
                   AND dc.embedding_status = 'ready'
                   AND dc.embedding IS NOT NULL
@@ -203,6 +230,10 @@ class PgvectorRetriever:
                 chunk_id,
                 title,
                 source_type,
+                document_scope,
+                original_filename,
+                document_version,
+                section,
                 excerpt,
                 page,
                 url,
@@ -214,6 +245,9 @@ class PgvectorRetriever:
         distance_limit = 1.0 - self.settings.min_similarity
         parameters = (
             vector,
+            request.access_scope.allow_private,
+            request.access_scope.all_sites,
+            request.access_scope.site_ids,
             *scope_parameters,
             self.settings.model_name,
             int(vector.shape[0]),
@@ -237,6 +271,10 @@ class PgvectorRetriever:
                 chunk_id=row["chunk_id"],
                 title=row["title"],
                 source_type=row["source_type"],
+                document_scope=row["document_scope"],
+                original_filename=row["original_filename"],
+                document_version=row["document_version"],
+                section=row["section"],
                 excerpt=row["excerpt"],
                 page=row["page"],
                 url=row["url"],

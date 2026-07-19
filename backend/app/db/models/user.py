@@ -142,6 +142,49 @@ class Role(UuidPrimaryKeyMixin, TimestampMixin, Base):
     user_assignments: Mapped[list["UserRole"]] = relationship(
         back_populates="role", passive_deletes=True
     )
+    permission_assignments: Mapped[list["RolePermission"]] = relationship(
+        back_populates="role",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class Permission(UuidPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "permissions"
+    __table_args__ = (
+        UniqueConstraint("code", name="uq_permissions_code"),
+        CheckConstraint("code = lower(btrim(code))", name="code_normalized"),
+    )
+
+    code: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+
+    role_assignments: Mapped[list["RolePermission"]] = relationship(
+        back_populates="permission", passive_deletes=True
+    )
+
+
+class RolePermission(Base):
+    __tablename__ = "role_permissions"
+
+    role_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("roles.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    permission_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("permissions.id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+
+    role: Mapped[Role] = relationship(back_populates="permission_assignments")
+    permission: Mapped[Permission] = relationship(back_populates="role_assignments")
 
 
 class UserRole(Base):

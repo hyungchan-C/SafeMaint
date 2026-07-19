@@ -1,2 +1,2 @@
--r requirements.txt
+-r requirements-rag.txt
 pytest>=8.4,<9.0

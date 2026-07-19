@@ -1,5 +1,4 @@
 import asyncio
-
 import httpx
 from httpx import ASGITransport, AsyncClient
 
@@ -130,7 +129,7 @@ def test_chat_service_keeps_grounded_fallback_when_openai_fails() -> None:
 
 def test_chat_api_uses_injected_service() -> None:
     class FakeChatService:
-        async def answer(self, request: ChatRequest) -> ChatResponse:
+        async def answer(self, request: ChatRequest, access_scope=None) -> ChatResponse:
             assert request.question == "컨베이어 청소법"
             return ChatResponse(
                 answer="전원을 차단하고 LOTO를 적용하세요.",

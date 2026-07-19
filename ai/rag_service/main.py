@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, status
 
 from rag_service.config import settings
 from rag_service.retrieval import PgvectorRetriever
-from rag_service.schemas import ChatRequest, ChatResponse
+from rag_service.schemas import ChatRequest, ChatResponse, InternalChatRequest
 from safety_guidance import format_safety_answer
 
 
@@ -40,7 +40,7 @@ def ready() -> dict[str, object]:
 
 
 @app.post("/v1/chat", response_model=ChatResponse)
-async def chat(payload: ChatRequest) -> ChatResponse:
+async def chat(payload: InternalChatRequest) -> ChatResponse:
     try:
         sources = await asyncio.to_thread(retriever.search, payload)
     except Exception as exc:

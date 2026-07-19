@@ -25,6 +25,13 @@ class Settings:
     top_k: int = int(getenv("RAG_TOP_K", "5"))
     min_similarity: float = float(getenv("RAG_MIN_SIMILARITY", "0.25"))
     source_types: tuple[str, ...] | None = _optional_csv_env("RAG_SOURCE_TYPES")
+    worker_poll_seconds: float = float(getenv("DOCUMENT_WORKER_POLL_SECONDS", "2"))
+    worker_chunk_characters: int = int(
+        getenv("DOCUMENT_WORKER_CHUNK_CHARACTERS", "1200")
+    )
+    worker_chunk_overlap: int = int(
+        getenv("DOCUMENT_WORKER_CHUNK_OVERLAP", "150")
+    )
 
 
 settings = Settings()

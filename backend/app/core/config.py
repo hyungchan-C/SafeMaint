@@ -7,6 +7,18 @@ def _csv_env(name: str, default: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw_value.split(",") if item.strip())
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw_value = getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     app_name: str = "SafeMaint AI"
@@ -31,6 +43,22 @@ class Settings:
     openai_max_output_tokens: int = int(
         getenv("OPENAI_MAX_OUTPUT_TOKENS", "1200")
     )
+    allow_external_llm: bool = _bool_env("ALLOW_EXTERNAL_LLM", False)
+    allow_private_documents_to_external_llm: bool = _bool_env(
+        "ALLOW_PRIVATE_DOCUMENTS_TO_EXTERNAL_LLM", False
+    )
+    document_storage_dir: str = getenv("DOCUMENT_STORAGE_DIR", "/data/documents")
+    document_max_upload_bytes: int = int(
+        getenv("DOCUMENT_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))
+    )
+    package_storage_dir: str = getenv("PACKAGE_STORAGE_DIR", "/data/packages")
+    public_package_max_bytes: int = int(
+        getenv("PUBLIC_PACKAGE_MAX_BYTES", str(1024 * 1024 * 1024))
+    )
+    public_package_public_key: str = getenv("PUBLIC_PACKAGE_PUBLIC_KEY", "")
+    public_package_private_key: str = getenv("PUBLIC_PACKAGE_PRIVATE_KEY", "")
+    rag_model: str = getenv("RAG_MODEL", "BAAI/bge-m3")
+    rag_embedding_dimension: int = int(getenv("RAG_EMBEDDING_DIMENSION", "1024"))
     tts_voice: str = getenv("TTS_VOICE", "F1")
     tts_language: str = getenv("TTS_LANGUAGE", "ko")
     tts_steps: int = int(getenv("TTS_STEPS", "8"))

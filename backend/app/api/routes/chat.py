@@ -14,4 +14,6 @@ async def create_chat_answer(
     payload: ChatRequest,
     service: Annotated[ChatService, Depends(get_chat_service)],
 ) -> ChatResponse:
+    # The teammate-owned authentication dependency will supply a scoped
+    # RetrievalAccessScope here. Until then the service defaults to public-only.
     return await service.answer(payload)

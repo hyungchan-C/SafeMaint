@@ -1,9 +1,11 @@
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import api_router
 from app.api.routes.health import router as health_router
 from app.core.config import settings
+from uuid import uuid4
 
 
 app = FastAPI(
@@ -29,6 +31,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def attach_request_id(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid4())
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["x-request-id"] = request_id
+    return response
 
 app.include_router(health_router)
 app.include_router(api_router, prefix=settings.api_prefix)

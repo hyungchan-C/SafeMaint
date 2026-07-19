@@ -28,11 +28,21 @@ class ChatRequest(BaseModel):
         return normalized
 
 
+class RetrievalAccessScope(BaseModel):
+    site_ids: list[str] = Field(default_factory=list)
+    all_sites: bool = False
+    allow_private: bool = False
+
+
 class ChatSource(BaseModel):
     document_id: str
     chunk_id: str
     title: str
     source_type: str
+    document_scope: Literal["public", "company"] | None = None
+    original_filename: str | None = None
+    document_version: int | None = None
+    section: str | None = None
     excerpt: str
     page: int | None = None
     url: str | None = None
