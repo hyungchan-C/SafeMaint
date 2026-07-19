@@ -81,6 +81,21 @@ def test_upload_rejects_invalid_access_level() -> None:
     assert response.status_code == 422
 
 
+def test_upload_rejects_public_access_level() -> None:
+    response = asyncio.run(
+        _upload(
+            _pdf_file(),
+            {
+                "product_type": "포토센서",
+                "model_name": "BTS",
+                "access_level": "public",
+            },
+        )
+    )
+
+    assert response.status_code == 422
+
+
 def test_upload_rejects_empty_file() -> None:
     response = asyncio.run(
         _upload(

@@ -4,7 +4,12 @@ import httpx
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
-from app.schemas.chat import ChatRequest, ChatResponse, QueryAnalysis
+from app.schemas.chat import (
+    ChatRequest,
+    ChatResponse,
+    QueryAnalysis,
+    RetrievalAccessScope,
+)
 from app.services.chat import ChatService, get_chat_service
 
 
@@ -220,7 +225,7 @@ def test_analyzer_failure_sends_deterministic_fallback_to_retrieval() -> None:
 def test_company_evidence_is_never_sent_to_external_model() -> None:
     class MustNotGenerateFromCompanyEvidence:
         def analyze(self, question: str, context: str) -> QueryAnalysis:
-            return QueryAnalysis(search_keywords=["bearing"])
+            raise AssertionError("Company queries must not be externally analyzed")
 
         def answer(self, question: str, context: str | None = None) -> str:
             raise AssertionError("Company evidence must not leave the server")
@@ -251,7 +256,10 @@ def test_company_evidence_is_never_sent_to_external_model() -> None:
             transport=httpx.MockTransport(handler),
             ai_service=MustNotGenerateFromCompanyEvidence(),  # type: ignore[arg-type]
             openai_enabled=True,
-        ).answer(ChatRequest(question="bearing replacement"))
+        ).answer(
+            ChatRequest(question="bearing replacement"),
+            RetrievalAccessScope(allow_company=True, all_sites=True),
+        )
     )
 
     assert response.generation_mode == "template"

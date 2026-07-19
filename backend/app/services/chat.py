@@ -26,10 +26,10 @@ ANALYZER_FALLBACK_WARNING = (
     "상황 분석 모델을 사용할 수 없어 입력값 기반 검색어로 안전하게 대체했습니다."
 )
 LLM_FALLBACK_WARNING = (
-    "GPT-4o-mini 답변 생성에 실패해 검색 서비스의 근거 기반 기본 안내를 표시합니다."
+    "외부 LLM 답변 생성에 실패해 검색 서비스의 근거 기반 기본 안내를 표시합니다."
 )
 COMPANY_LLM_WARNING = (
-    "회사 문서 내용은 외부 GPT-4o-mini로 전송하지 않았습니다."
+    "회사 문서 내용은 외부 LLM으로 전송하지 않았습니다."
 )
 
 
@@ -58,7 +58,10 @@ class ChatService:
         request: ChatRequest,
         access_scope: RetrievalAccessScope | None = None,
     ) -> ChatResponse:
-        analyzed_request, analyzer_fell_back = await self._analyze(request)
+        analyzed_request, analyzer_fell_back = await self._analyze(
+            request,
+            allow_external=not bool(access_scope and access_scope.allow_company),
+        )
         retrieval_response = await self._retrieve(analyzed_request, access_scope)
         if analyzer_fell_back and self.openai_enabled:
             retrieval_response = retrieval_response.model_copy(
@@ -109,11 +112,20 @@ class ChatService:
             }
         )
 
-    async def _analyze(self, request: ChatRequest) -> tuple[ChatRequest, bool]:
+    async def _analyze(
+        self,
+        request: ChatRequest,
+        *,
+        allow_external: bool = True,
+    ) -> tuple[ChatRequest, bool]:
         if request.analysis is not None:
             return request, False
         fallback = self._fallback_analysis(request)
-        if not self.openai_enabled or not hasattr(self.ai_service, "analyze"):
+        if (
+            not allow_external
+            or not self.openai_enabled
+            or not hasattr(self.ai_service, "analyze")
+        ):
             return request.model_copy(update={"analysis": fallback}), False
         try:
             analysis = await asyncio.to_thread(

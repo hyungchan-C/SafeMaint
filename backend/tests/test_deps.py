@@ -4,7 +4,12 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from app.api.deps import get_current_user, require_permission
+from app.api.deps import (
+    get_current_user,
+    get_optional_current_user,
+    get_retrieval_access_scope,
+    require_permission,
+)
 from app.db.models import User
 
 
@@ -48,6 +53,10 @@ def test_get_current_user_rejects_inactive_user() -> None:
     assert excinfo.value.status_code == 401
 
 
+def test_optional_current_user_allows_anonymous_request() -> None:
+    assert get_optional_current_user(token=None, db=object()) is None
+
+
 def test_require_permission_returns_user_when_role_grants_permission() -> None:
     user = _make_user()
     db = type("PermissionDb", (), {"scalar": lambda self, _statement: uuid4()})()
@@ -65,3 +74,55 @@ def test_require_permission_rejects_missing_permission() -> None:
         dependency(current_user=user, db=db)
 
     assert excinfo.value.status_code == 403
+
+
+class _ScalarRows:
+    def __init__(self, rows: list[object]) -> None:
+        self.rows = rows
+
+    def all(self) -> list[object]:
+        return self.rows
+
+
+class _ScopeDb:
+    def __init__(self, scalar_value: object, scalar_rows: list[list[object]]) -> None:
+        self.scalar_value = scalar_value
+        self.scalar_rows = list(scalar_rows)
+
+    def scalar(self, _statement):
+        return self.scalar_value
+
+    def scalars(self, _statement) -> _ScalarRows:
+        return _ScalarRows(self.scalar_rows.pop(0))
+
+
+def test_retrieval_scope_is_public_only_for_anonymous_request() -> None:
+    scope = get_retrieval_access_scope(current_user=None, db=object())
+
+    assert scope.allow_company is False
+    assert scope.all_sites is False
+    assert scope.site_ids == []
+
+
+def test_retrieval_scope_uses_active_site_assignments_for_worker() -> None:
+    user = _make_user()
+    site_id = uuid4()
+    db = _ScopeDb(uuid4(), [["worker"], [site_id]])
+
+    scope = get_retrieval_access_scope(current_user=user, db=db)  # type: ignore[arg-type]
+
+    assert scope.allow_company is True
+    assert scope.all_sites is False
+    assert scope.allow_private is False
+    assert scope.site_ids == [str(site_id)]
+
+
+def test_document_manager_retrieval_scope_covers_all_company_sites() -> None:
+    user = _make_user()
+    db = _ScopeDb(uuid4(), [["document_manager"]])
+
+    scope = get_retrieval_access_scope(current_user=user, db=db)  # type: ignore[arg-type]
+
+    assert scope.allow_company is True
+    assert scope.all_sites is True
+    assert scope.site_ids == []

@@ -8,3 +8,11 @@ class UploadDocumentResponse(BaseModel):
     document_version_id: UUID
     version_number: int
     status: str
+
+
+class ApproveDocumentResponse(BaseModel):
+    document_id: UUID
+    document_version_id: UUID
+    version_number: int
+    status: str
+    is_active: bool

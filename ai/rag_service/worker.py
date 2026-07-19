@@ -244,7 +244,9 @@ def _process(job: ClaimedJob):
         product_type=_metadata_value(
             job.metadata, "product_type", "제품군"
         ) or job.document_type,
-        model_name=_metadata_value(job.metadata, "model_name", "모델명"),
+        model_name=_metadata_value(
+            job.metadata, "model_name", "model_number", "모델명"
+        ),
         chunk_size=settings.worker_chunk_characters,
         overlap=settings.worker_chunk_overlap,
     )

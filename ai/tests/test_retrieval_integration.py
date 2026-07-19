@@ -80,11 +80,13 @@ def test_public_only_and_selected_company_scope_are_enforced() -> None:
             "context": {"selected_document_ids": [str(company_document_id)]},
         }
     )
-    public_only = retriever.search(selected_but_unauthenticated)
+    assert retriever.search(selected_but_unauthenticated) == []
 
-    assert str(public_document_id) in {source.document_id for source in public_only}
-    assert str(company_document_id) not in {
-        source.document_id for source in public_only
+    public_only = retriever.search(
+        InternalChatRequest(question="conveyor bearing replacement")
+    )
+    assert {source.document_id for source in public_only} == {
+        str(public_document_id)
     }
 
     authorized = InternalChatRequest.model_validate(
@@ -98,17 +100,137 @@ def test_public_only_and_selected_company_scope_are_enforced() -> None:
             },
         }
     )
-    combined = retriever.search(authorized)
-    combined_ids = {source.document_id for source in combined}
+    selected_company = retriever.search(authorized)
 
-    assert str(public_document_id) in combined_ids
-    assert str(company_document_id) in combined_ids
-    assert {source.document_scope for source in combined} == {"public", "company"}
+    assert {source.document_id for source in selected_company} == {
+        str(company_document_id)
+    }
+    assert {source.document_scope for source in selected_company} == {"company"}
 
     with psycopg.connect(database_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "DELETE FROM documents WHERE id = ANY(%s::uuid[])",
                 ([public_document_id, company_document_id],),
+            )
+        connection.commit()
+
+
+def test_company_scope_cannot_cross_assigned_site_boundary() -> None:
+    settings = Settings(top_k=10, candidate_k=20, min_similarity=0.1)
+    assert settings.database_url.rsplit("/", 1)[-1].endswith("_test")
+    first_site_id = uuid4()
+    second_site_id = uuid4()
+    first_document_id = uuid4()
+    second_document_id = uuid4()
+    database_url = psycopg_database_url(settings.database_url)
+
+    with psycopg.connect(database_url) as connection:
+        register_vector(connection)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO sites (id, code, name)
+                VALUES (%s, %s, 'First retrieval site'),
+                       (%s, %s, 'Second retrieval site')
+                """,
+                (
+                    first_site_id,
+                    f"RAG-A-{first_site_id}",
+                    second_site_id,
+                    f"RAG-B-{second_site_id}",
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO documents
+                    (id, external_id, title, source_type, document_type_code,
+                     lifecycle_status, site_id, access_level, metadata)
+                VALUES
+                    (%s, %s, 'First site valve manual', 'manual',
+                     'equipment_manual', 'active', %s, 'restricted', '{}'::jsonb),
+                    (%s, %s, 'Second site valve manual', 'manual',
+                     'equipment_manual', 'active', %s, 'restricted', '{}'::jsonb)
+                """,
+                (
+                    first_document_id,
+                    f"site-scope-a:{first_document_id}",
+                    first_site_id,
+                    second_document_id,
+                    f"site-scope-b:{second_document_id}",
+                    second_site_id,
+                ),
+            )
+            for document_id, content_hash in (
+                (first_document_id, "c" * 64),
+                (second_document_id, "d" * 64),
+            ):
+                cursor.execute(
+                    """
+                    INSERT INTO document_chunks
+                        (document_id, chunk_index, content, content_hash,
+                         embedding, embedding_model, embedding_dimension,
+                         embedding_status, section_path, metadata)
+                    VALUES
+                        (%s, 0, 'Site scoped valve calibration procedure.',
+                         %s, %s, %s, 3, 'ready', '[]'::jsonb, '{}'::jsonb)
+                    """,
+                    (
+                        document_id,
+                        content_hash,
+                        [1.0, 0.0, 0.0],
+                        settings.model_name,
+                    ),
+                )
+        connection.commit()
+
+    retriever = PgvectorRetriever(settings, embedder=FakeEmbedder())
+    assigned_site_request = InternalChatRequest.model_validate(
+        {
+            "question": "site scoped valve calibration",
+            "access_scope": {
+                "allow_company": True,
+                "site_ids": [str(first_site_id)],
+            },
+        }
+    )
+    assigned_results = retriever.search(assigned_site_request)
+    assert {source.document_id for source in assigned_results} == {
+        str(first_document_id)
+    }
+
+    forged_selection = InternalChatRequest.model_validate(
+        {
+            "question": "site scoped valve calibration",
+            "context": {"selected_document_ids": [str(second_document_id)]},
+            "access_scope": {
+                "allow_company": True,
+                "site_ids": [str(first_site_id)],
+            },
+        }
+    )
+    assert retriever.search(forged_selection) == []
+
+    global_manager = forged_selection.model_copy(
+        update={
+            "access_scope": forged_selection.access_scope.model_copy(
+                update={"all_sites": True}
+            )
+        }
+    )
+    global_results = retriever.search(global_manager)
+    assert {source.document_id for source in global_results} == {
+        str(second_document_id)
+    }
+
+    with psycopg.connect(database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM documents WHERE id = ANY(%s::uuid[])",
+                ([first_document_id, second_document_id],),
+            )
+            cursor.execute(
+                "DELETE FROM sites WHERE id = ANY(%s::uuid[])",
+                ([first_site_id, second_site_id],),
             )
         connection.commit()
