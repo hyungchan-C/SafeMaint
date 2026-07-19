@@ -140,16 +140,18 @@ DATABASE_URL=postgresql+psycopg://safemaint:change-this-local-password@db:5432/s
 ```dotenv
 OPENAI_API_KEY=sk-여기에_본인의_API_키
 OPENAI_MODEL=gpt-4o-mini
+LLM_BASE_URL=
+LLM_ANALYZER_MODEL=gpt-4o-mini
+LLM_ANSWER_MODEL=gpt-4o-mini
 OPENAI_TIMEOUT_SECONDS=30
 OPENAI_MAX_OUTPUT_TOKENS=1200
 ALLOW_EXTERNAL_LLM=true
-ALLOW_PRIVATE_DOCUMENTS_TO_EXTERNAL_LLM=false
 ```
 
 외부 LLM은 기본적으로 꺼져 있습니다. 명시적으로 켜면 질문과 검색 근거 일부가 외부
-API로 전송될 수 있으므로 공개 자료 실험에만 사용하고, 회사 문서는
-`ALLOW_PRIVATE_DOCUMENTS_TO_EXTERNAL_LLM=false`로 계속 차단하세요. 실제 고객정보나
-개인정보를 입력하기 전 조직의 데이터 처리 기준을 확인해야 합니다.
+API로 전송될 수 있으므로 공개 자료 실험에만 사용하세요. 회사 문서 근거는 설정값과
+관계없이 외부 모델로 전송되지 않습니다. 실제 고객정보나 개인정보를 입력하기 전
+조직의 데이터 처리 기준을 확인해야 합니다.
 
 설정을 변경한 뒤에는 `verify-db.ps1`이 아니라 `setup-dev.ps1` 또는 아래 Compose 명령으로 backend를 다시 빌드해야 적용됩니다.
 
@@ -540,10 +542,9 @@ docker compose run --rm backend python -m app.commands.public_rag_package rollba
 
 ```dotenv
 ALLOW_EXTERNAL_LLM=false
-ALLOW_PRIVATE_DOCUMENTS_TO_EXTERNAL_LLM=false
 ```
 
-첫 값이 `false`이면 OpenAI 호출 자체가 발생하지 않고 로컬 RAG와 안전 템플릿만 사용합니다. 외부 LLM을 명시적으로 켜더라도 회사 범위 근거가 하나라도 포함되면 두 번째 값이 `false`인 한 외부 전송을 차단합니다. 예전 직접 OpenAI 채팅 경로는 공개 API 라우터에서 제거했습니다. TTS 기능은 유지됩니다.
+이 값이 `false`이면 외부 모델 호출 자체가 발생하지 않고 로컬 RAG와 안전 템플릿만 사용합니다. 외부 모델을 명시적으로 켜더라도 회사 범위 근거가 하나라도 포함되면 코드 수준에서 외부 전송을 차단합니다. 예전 직접 OpenAI 채팅 경로는 공개 API 라우터에서 제거했습니다. TTS 기능은 유지됩니다.
 
 ### 최초 설치와 업데이트
 
@@ -573,3 +574,53 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 팀원 담당으로 제외됨: 로그인 토큰 발급, 현재 사용자 dependency, PDF 업로드 API(F01), 해당 API의 프런트 연결과 인증 기반 문서 관리 API. 이 항목이 합쳐지기 전에는 회사 문서 업로드·승인 화면이 완성된 것으로 간주하지 않습니다.
 
 별도 운영 작업 필요: 고객사 HTTPS 인증서/reverse proxy, Ed25519 키 수명주기와 오프라인 전달 절차, 실제 백업·PITR 자동화, 스캔 PDF용 검증된 로컬 OCR 엔진, 악성 PDF 안티바이러스/CDR, 로그 보존·모니터링 정책. 이 항목들은 동작하는 것처럼 화면에 표시하지 않습니다.
+
+## 하이브리드 RAG와 임시 GPT-4o-mini 설정
+
+현재 질의 흐름은 `상황 분석 → 키워드·BGE-M3 후보 검색 → 주제 불일치 제거 → rerank → 근거 답변` 순서입니다. 상황 분석기와 답변 생성기는 같은 OpenAI 호환 provider 인터페이스를 사용합니다. 팀의 Qwen3 서버가 준비되기 전에는 다음처럼 GPT-4o-mini를 사용합니다.
+
+```dotenv
+OPENAI_API_KEY=각자_발급한_키
+ALLOW_EXTERNAL_LLM=true
+LLM_BASE_URL=
+LLM_ANALYZER_MODEL=gpt-4o-mini
+LLM_ANSWER_MODEL=gpt-4o-mini
+LLM_ANALYZER_MAX_OUTPUT_TOKENS=500
+OPENAI_MAX_OUTPUT_TOKENS=1200
+```
+
+Qwen3가 OpenAI 호환 API로 준비되면 애플리케이션 코드를 수정하지 않고 `LLM_BASE_URL`, `LLM_ANALYZER_MODEL`, `LLM_ANSWER_MODEL`만 변경합니다. 모델 분석 JSON이 잘못되거나 시간 초과가 발생하면 입력값 기반 검색어로 대체합니다. 검색 근거가 없으면 모델이 답을 추측하지 않고 “근거 없음” 응답을 반환합니다. 회사 범위 문서가 결과에 포함된 경우에는 외부 모델 답변 생성을 항상 차단합니다.
+
+인증 dependency가 아직 연결되지 않은 요청의 검색 범위는 항상 공개 문서뿐입니다. 화면에서 선택한 매뉴얼은 파일명이 아니라 아래 UUID 필드로 전달해야 합니다.
+
+```json
+{
+  "context": {
+    "selected_document_ids": ["document-uuid"],
+    "selected_document_version_ids": ["document-version-uuid"]
+  }
+}
+```
+
+기존 `registered_manuals` 값이 UUID이면 단계적으로 호환되지만, 파일명 문자열은 검색 권한이나 범위로 사용하지 않습니다. 인증 담당자의 현재 사용자·사업장 권한 연결이 합쳐질 때만 `allow_company` 범위를 서버가 생성해야 하며 클라이언트가 임의로 회사 문서 권한을 부여해서는 안 됩니다.
+
+문서 worker는 팀의 `ai/preprocessing/pdf_pipeline.py`를 공통 처리 경로로 사용합니다. 텍스트 PDF는 페이지·섹션·제조사·제품군·모델 메타데이터와 결정적 청크 ID/해시를 저장합니다. 이미지 전용 PDF는 OCR이 준비되지 않은 경우 `ocr_required`, 내용이 없는 PDF는 `failed`로 구분합니다. 중단된 `processing` 작업은 제한 횟수 내 재시도하고 최종 실패 사유와 감사 이벤트를 남깁니다.
+
+```dotenv
+DOCUMENT_WORKER_MAX_ATTEMPTS=3
+DOCUMENT_WORKER_RETRY_DELAY_SECONDS=10
+DOCUMENT_WORKER_STALE_AFTER_SECONDS=300
+RAG_CANDIDATE_K=30
+RAG_MAX_CHUNKS_PER_DOCUMENT=2
+RAG_MIN_KEYWORD_SCORE=0.08
+```
+
+개발 검증은 운영 이미지와 분리된 Docker test stage에서 실행할 수 있습니다. DB 통합 테스트는 이름이 `_test`로 끝나는 별도 DB에서만 실행해야 합니다.
+
+```powershell
+docker build --target test -t safemaint-backend:test-suite .\backend
+docker run --rm safemaint-backend:test-suite
+
+docker build --target test -t safemaint-rag:test-suite -f .\ai\Dockerfile.rag .
+docker run --rm safemaint-rag:test-suite
+```
