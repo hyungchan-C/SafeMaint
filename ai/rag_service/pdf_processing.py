@@ -37,22 +37,6 @@ def _inspect_pdf(path: Path) -> tuple[int, bool]:
         return pdf.page_count, any(page.get_images(full=True) for page in pdf)
 
 
-def _parse_page_range(value: object) -> tuple[int | None, int | None]:
-    if isinstance(value, int):
-        return (value, value) if value >= 1 else (None, None)
-    if not isinstance(value, str):
-        return None, None
-    parts = value.strip().split("-", maxsplit=1)
-    try:
-        start = int(parts[0])
-        end = int(parts[-1])
-    except (TypeError, ValueError):
-        return None, None
-    if start < 1 or end < start:
-        return None, None
-    return start, end
-
-
 def process_document_pdf(
     pdf_path: str | Path,
     *,
@@ -77,7 +61,7 @@ def process_document_pdf(
     if page_count == 0:
         return ProcessedPdf(kind="empty", page_count=0, chunks=())
 
-    raw_chunks = process_pdf(
+    pipeline_result = process_pdf(
         str(path),
         product_type=product_type,
         model_name=model_name,
@@ -86,35 +70,39 @@ def process_document_pdf(
         overlap=overlap,
     )
     normalized: list[ProcessedChunk] = []
-    for raw_chunk in raw_chunks:
-        content = str(raw_chunk.get("text", "")).strip()
+    for raw_chunk in pipeline_result["chunks"]:
+        content = str(raw_chunk.get("content", "")).strip()
         if not content:
             continue
-        source_chunk_id = str(raw_chunk.get("chunk_id", "")).strip()
-        if not source_chunk_id:
-            source_chunk_id = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        source_chunk_id = (
+            f"{raw_chunk.get('document_external_id', '')}:{raw_chunk.get('chunk_index', '')}"
+        )
+        page_start = raw_chunk.get("page_start", raw_chunk.get("page_number"))
+        page_end = raw_chunk.get("page_end", raw_chunk.get("page_number"))
+        section_path = tuple(raw_chunk.get("section_path") or ())
         pipeline_metadata = dict(raw_chunk.get("metadata") or {})
-        page_start, page_end = _parse_page_range(pipeline_metadata.get("페이지"))
-        section = str(pipeline_metadata.get("챕터", "")).strip()
         metadata = {
             **pipeline_metadata,
             "document_title": title,
             "manufacturer": manufacturer,
             "product_type": product_type,
             "model_name": model_name,
-            "section": section or None,
+            "section": section_path[-1] if section_path else None,
             "page_start": page_start,
             "page_end": page_end,
             "source_chunk_id": source_chunk_id,
         }
+        content_hash = raw_chunk.get("content_hash") or hashlib.sha256(
+            content.encode("utf-8")
+        ).hexdigest()
         normalized.append(
             ProcessedChunk(
                 source_chunk_id=source_chunk_id,
                 content=content,
-                content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                content_hash=content_hash,
                 page_start=page_start,
                 page_end=page_end,
-                section_path=(section,) if section else (),
+                section_path=section_path,
                 metadata=metadata,
             )
         )
