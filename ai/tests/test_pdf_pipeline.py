@@ -36,19 +36,24 @@ def test_invalid_chunk_options_are_rejected(
         pdf_pipeline.chunk_text("안전", chunk_size=chunk_size, overlap=overlap)
 
 
-def test_repeated_section_titles_create_unique_chunk_ids(monkeypatch) -> None:
+def test_repeated_section_titles_create_unique_chunk_index(monkeypatch, tmp_path) -> None:
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake content for hashing only")
+
     monkeypatch.setattr(
         pdf_pipeline,
         "extract_sections",
         lambda _path: [
             {
                 "header": "주의",
+                "section_path": ["주의"],
                 "start_page": 1,
                 "end_page": 1,
                 "blocks": [{"type": "text", "text": "첫 번째 내용"}],
             },
             {
                 "header": "주의",
+                "section_path": ["주의"],
                 "start_page": 2,
                 "end_page": 2,
                 "blocks": [{"type": "text", "text": "두 번째 내용"}],
@@ -56,16 +61,16 @@ def test_repeated_section_titles_create_unique_chunk_ids(monkeypatch) -> None:
         ],
     )
 
-    chunks = pdf_pipeline.process_pdf(
-        "sample.pdf",
+    result = pdf_pipeline.process_pdf(
+        str(pdf_path),
         product_type="센서",
         model_name="M1",
         manufacturer="테스트 제조사",
         exclude_sections=[],
     )
-    chunk_ids = [chunk["chunk_id"] for chunk in chunks]
+    chunks = result["chunks"]
 
-    assert len(chunk_ids) == 2
-    assert len(chunk_ids) == len(set(chunk_ids))
-    assert chunk_ids[0].endswith("_0000_0000")
-    assert chunk_ids[1].endswith("_0001_0000")
+    assert len(chunks) == 2
+    assert [c["chunk_index"] for c in chunks] == [0, 1]
+    assert all(c["document_external_id"] == result["document"]["external_id"] for c in chunks)
+    assert len({c["content_hash"] for c in chunks}) == 2

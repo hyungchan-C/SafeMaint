@@ -5,6 +5,7 @@ from app.api.routes import (
     auth,
     chat,
     dashboard,
+    documents,
     speech,
 )
 
@@ -15,3 +16,4 @@ api_router.include_router(chat.router)
 api_router.include_router(assessments.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(speech.router)
+api_router.include_router(documents.router)

@@ -33,6 +33,7 @@ class Settings:
     )
     db_pool_size: int = int(getenv("DB_POOL_SIZE", "5"))
     db_max_overflow: int = int(getenv("DB_MAX_OVERFLOW", "10"))
+    session_expire_minutes: int = int(getenv("SESSION_EXPIRE_MINUTES", "60"))
     rag_service_url: str | None = getenv("RAG_SERVICE_URL") or None
     rag_request_timeout_seconds: float = float(
         getenv("RAG_REQUEST_TIMEOUT_SECONDS", "180")

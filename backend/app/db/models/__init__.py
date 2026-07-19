@@ -6,6 +6,7 @@ from app.db.models.assessment import (
 )
 from app.db.models.asset import Component, Equipment, Site
 from app.db.models.audit import AuditEvent
+from app.db.models.auth_session import AuthSession
 from app.db.models.document import (
     Document,
     DocumentChunk,
@@ -29,6 +30,7 @@ __all__ = [
     "AssessmentEvidence",
     "AssessmentHazard",
     "AuditEvent",
+    "AuthSession",
     "ChecklistItem",
     "Component",
     "Document",

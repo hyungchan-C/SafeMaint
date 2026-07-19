@@ -333,7 +333,7 @@ Git으로 공유되는 것은 Docker Compose 설정, SQLAlchemy 모델, Alembic 
 
 현재 구조는 한 고객사 내부 설치를 기준으로 합니다. 여러 고객사를 한 DB에 함께 저장하는 SaaS 구조로 전환할 때는 `organizations`와 각 업무 테이블의 `organization_id`를 별도 마이그레이션으로 추가해야 합니다.
 
-현재 로그인 성공 정보는 프런트엔드 화면 전환을 위해 브라우저 `localStorage`에만 보관하며, 아직 서버가 발급한 인증 토큰은 아닙니다. 다음 단계에서는 JWT access/refresh 토큰과 회수 정책, 보호 API의 역할·사업장 범위 인가, 관리자 전용 계정 관리와 권한 변경 감사 이벤트를 구현해야 합니다. DBeaver에서 임의로 평문 비밀번호나 기본 관리자 계정을 넣지 마세요.
+`POST /api/v1/auth/login`은 이제 `auth_sessions` 테이블에 저장되는 서버 세션 토큰을 발급합니다(원문은 클라이언트에만 반환되고 DB에는 SHA-256 해시만 저장, 기본 만료 `SESSION_EXPIRE_MINUTES`분). 보호가 필요한 라우트는 `app.api.deps.get_current_user`를 `Depends`로 붙여 `Authorization: Bearer <token>` 헤더를 검증하며, `POST /api/v1/auth/logout`으로 즉시 무효화(회수)할 수 있습니다. 아직 역할·사업장 범위 인가, 관리자 전용 계정 관리와 권한 변경 감사 이벤트는 구현되지 않았습니다. DBeaver에서 임의로 평문 비밀번호나 기본 관리자 계정을 넣지 마세요.
 
 ## 선택 실행: DB는 Docker, 백엔드 앱은 로컬
 
@@ -429,7 +429,9 @@ git pull origin dev
 | 메서드 | 경로 | 설명 |
 |---|---|---|
 | `POST` | `/api/v1/auth/register` | 로컬 계정 생성, Argon2id 해시 저장, 기본 `worker` 역할 부여 |
-| `POST` | `/api/v1/auth/login` | 사원번호·비밀번호 확인, 실패 횟수 및 15분 잠금 처리 |
+| `POST` | `/api/v1/auth/login` | 사원번호·비밀번호 확인, 실패 횟수 및 15분 잠금 처리, 세션 토큰 발급 |
+| `POST` | `/api/v1/auth/logout` | 현재 세션 토큰 무효화(회수) |
+| `POST` | `/api/v1/documents/upload` | PDF 업로드(인증 필요), `document_versions`/`document_processing_jobs` 생성 후 워커가 비동기 처리 |
 | `POST` | `/api/v1/speech/synthesize` | Supertonic 기반 한국어 안전 안내 WAV 생성 |
 | `POST` | `/api/v1/assessments/preview` | DB 저장 없는 기존 규칙 기반 미리보기 |
 | `POST` | `/api/v1/assessments` | 평가·위험요인·체크리스트·감사 이벤트 트랜잭션 저장 |

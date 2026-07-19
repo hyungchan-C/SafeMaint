@@ -30,6 +30,9 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 
+# Local dev-only Docker overrides (e.g. exposing db port for manual testing)
+docker-compose.override.yml
+
 # Local data and model artifacts
 /ai/data/raw/
 /ai/data/processed/
@@ -48,3 +51,8 @@ Thumbs.db
 
 # Personal notes (not shared)
 sr_할 일.md
+
+# One-off local test scripts (not shared)
+ai/preprocessing/run_test_other_pdf.py
+ai/preprocessing/run_test_phox_pdf.py
+ai/preprocessing/run_test_pq_pdf.py
