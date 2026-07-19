@@ -3,6 +3,7 @@ from collections.abc import Iterable
 
 from app.schemas.assessment import (
     AssessmentRequest,
+    EvidenceItem,
     HazardItem,
     RiskLevel,
 )
@@ -93,7 +94,9 @@ RULES: tuple[RiskRule, ...] = (
 
 class RiskEngine:
     def evaluate(
-        self, request: AssessmentRequest
+        self,
+        request: AssessmentRequest,
+        evidence: Iterable[EvidenceItem] = (),
     ) -> tuple[list[HazardItem], list[str]]:
         searchable_text = " ".join(
             filter(
@@ -139,6 +142,34 @@ class RiskEngine:
         checklist = self._deduplicate(
             item for rule in matched_rules for item in rule.checklist
         )
+        selected_evidence = list(evidence)[:3]
+        if selected_evidence:
+            evidence_actions = [
+                (
+                    f"근거 [{item.retrieval_rank}] {item.title}"
+                    f"{f' ({item.page_start}쪽)' if item.page_start else ''}의 "
+                    "관련 절차를 원문과 대조합니다."
+                )
+                for item in selected_evidence
+            ]
+            hazards = [
+                hazard.model_copy(
+                    update={
+                        "safety_actions": self._deduplicate(
+                            [*hazard.safety_actions, *evidence_actions]
+                        )
+                    }
+                )
+                for hazard in hazards
+            ]
+            checklist = self._deduplicate([*checklist, *evidence_actions])
+        else:
+            checklist = self._deduplicate(
+                [
+                    *checklist,
+                    "공통 안전수칙(문서 근거 없음): 제조사 매뉴얼과 현장 절차를 추가 확인",
+                ]
+            )
         return hazards, checklist
 
     @staticmethod

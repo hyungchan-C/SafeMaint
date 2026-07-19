@@ -18,7 +18,7 @@ service = AssessmentService()
     status_code=status.HTTP_201_CREATED,
 )
 def create_assessment_preview(payload: AssessmentRequest) -> AssessmentResponse:
-    """Create a non-authoritative draft before RAG is connected."""
+    """Create a non-authoritative draft with public RAG evidence when available."""
 
     return service.create_preview(payload)
 
@@ -32,7 +32,7 @@ def create_assessment(
     payload: AssessmentRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> AssessmentResponse:
-    """Create and persist a rule-based assessment draft in one transaction."""
+    """Retrieve first, then persist the complete assessment in one transaction."""
 
     return service.create_and_save(payload, db)
 

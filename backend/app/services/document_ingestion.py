@@ -390,6 +390,7 @@ def document_values(
         "external_id": document.external_id,
         "title": document.title,
         "source_type": "incident",
+        "document_type_code": "public_incident",
         "publisher": None,
         "source_url": None,
         "revision": None,
@@ -451,6 +452,7 @@ def _document_changed(existing: Document, values: dict[str, Any]) -> bool:
     comparisons = {
         "title": values["title"],
         "source_type": values["source_type"],
+        "document_type_code": values["document_type_code"],
         "publisher": values["publisher"],
         "source_url": values["source_url"],
         "revision": values["revision"],
@@ -489,6 +491,7 @@ def _upsert_document_batch(
     mutable_columns = (
         "title",
         "source_type",
+        "document_type_code",
         "publisher",
         "source_url",
         "revision",
@@ -590,6 +593,7 @@ def _upsert_chunk_batch(
     )
     statement = statement.on_conflict_do_update(
         index_elements=[table.c.document_id, table.c.chunk_index],
+        index_where=table.c.document_version_id.is_(None),
         set_=update_values,
         where=changed,
     )

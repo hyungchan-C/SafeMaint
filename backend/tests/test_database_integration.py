@@ -61,10 +61,16 @@ def test_schema_extension_and_alembic_head() -> None:
         "checklist_items",
         "components",
         "document_chunks",
+        "document_processing_jobs",
+        "document_types",
+        "document_versions",
         "documents",
         "equipment",
+        "permissions",
+        "public_rag_packages",
         "reference_codes",
         "roles",
+        "role_permissions",
         "sites",
         "user_roles",
         "user_sites",
@@ -90,7 +96,7 @@ def test_schema_extension_and_alembic_head() -> None:
         )
 
     assert extension_version
-    assert alembic_revision == "0002_users_roles_sites"
+    assert alembic_revision == "0006_worker_resilience"
     assert "ck_assessment_hazards_likelihood_range" in constraints
     assert "ck_assessment_hazards_severity_range" in constraints
     assert "ck_assessments_status" in constraints
