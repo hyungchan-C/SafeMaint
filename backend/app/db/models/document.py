@@ -31,6 +31,11 @@ class Document(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "access_level IN ('public', 'restricted', 'private')",
             name="access_level",
         ),
+        CheckConstraint(
+            "lifecycle_status IN ('pending', 'processing', 'review_required', "
+            "'active', 'failed', 'deleted')",
+            name="lifecycle_status",
+        ),
     )
 
     external_id: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
@@ -198,6 +203,16 @@ class PublicRagPackage(UuidPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "public_rag_packages"
     __table_args__ = (
         UniqueConstraint("package_version", name="uq_public_rag_packages_version"),
+        CheckConstraint(
+            "status IN ('importing', 'active', 'superseded', 'failed')",
+            name="status",
+        ),
+        Index(
+            "uq_public_rag_packages_one_active",
+            "status",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
     )
 
     package_version: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -226,6 +241,12 @@ class DocumentVersion(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "status IN ('pending', 'processing', 'review_required', 'active', "
             "'superseded', 'failed', 'ocr_required', 'deleted')",
             name="status",
+        ),
+        Index(
+            "uq_document_versions_one_active",
+            "document_id",
+            unique=True,
+            postgresql_where=text("is_active"),
         ),
     )
 
@@ -299,9 +320,14 @@ class DocumentProcessingJob(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     error_message: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     document_version: Mapped[DocumentVersion] = relationship(
         back_populates="processing_job"
     )
-    DateTime,

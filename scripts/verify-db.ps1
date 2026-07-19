@@ -71,7 +71,7 @@ try {
     if ($alembicVersion.Count -ne 1) {
         throw "Alembic 현재 버전을 확인할 수 없습니다."
     }
-    if ($alembicVersion[0] -ne "0005_defer_auth_integration") {
+    if ($alembicVersion[0] -ne "0006_worker_resilience") {
         throw "Alembic이 최신 버전이 아닙니다: $($alembicVersion[0])"
     }
 

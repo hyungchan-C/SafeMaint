@@ -105,5 +105,23 @@ def test_worker_extracts_embeds_and_moves_version_to_review(tmp_path: Path) -> N
             assert count >= 1
             assert dimension == 3
             assert embedding_status == "ready"
+
+            cursor.execute(
+                "SELECT id FROM document_chunks WHERE document_version_id = %s ORDER BY chunk_index",
+                (version_id,),
+            )
+            original_chunk_ids = [row[0] for row in cursor.fetchall()]
+
+    # A repeated completion for the same version replaces rows atomically and
+    # preserves deterministic chunk identifiers instead of creating duplicates.
+    complete_job(claimed, FakeEmbedder())  # type: ignore[arg-type]
+
+    with psycopg.connect(database_url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM document_chunks WHERE document_version_id = %s ORDER BY chunk_index",
+                (version_id,),
+            )
+            assert [row[0] for row in cursor.fetchall()] == original_chunk_ids
             cursor.execute("DELETE FROM documents WHERE id = %s", (document_id,))
         connection.commit()
