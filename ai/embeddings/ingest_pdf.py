@@ -30,6 +30,7 @@ def ingest_pdf(
     chunk_size: int = 600,
     overlap: int = 100,
     source_type: str = "manual",
+    document_type_code: str = "equipment_manual",
     access_level: str = "restricted",
 ) -> dict:
     """PDF -> 청크(embedding_status="pending") -> DB 적재. {"document_id", "chunk_count"}를 반환."""
@@ -42,6 +43,7 @@ def ingest_pdf(
         chunk_size=chunk_size,
         overlap=overlap,
         source_type=source_type,
+        document_type_code=document_type_code,
         access_level=access_level,
     )
     document_id = load_document(result["document"], result["chunks"])

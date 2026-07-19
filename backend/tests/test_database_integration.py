@@ -1,6 +1,6 @@
 import asyncio
 from os import getenv
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -11,6 +11,9 @@ from sqlalchemy.exc import IntegrityError
 from app.core.config import settings
 from app.db.models import (
     AuditEvent,
+    Document,
+    DocumentProcessingJob,
+    DocumentVersion,
     ReferenceCode,
     Role,
     Site,
@@ -54,6 +57,7 @@ def test_schema_extension_and_alembic_head() -> None:
 
     expected_tables = {
         "alembic_version",
+        "auth_sessions",
         "assessment_evidence",
         "assessment_hazards",
         "assessments",
@@ -96,7 +100,7 @@ def test_schema_extension_and_alembic_head() -> None:
         )
 
     assert extension_version
-    assert alembic_revision == "0006_worker_resilience"
+    assert alembic_revision == "0007_add_auth_sessions"
     assert "ck_assessment_hazards_likelihood_range" in constraints
     assert "ck_assessment_hazards_severity_range" in constraints
     assert "ck_assessments_status" in constraints
@@ -347,8 +351,11 @@ def test_registration_login_and_temporary_lock_use_database() -> None:
         )
     )
     assert successful_login.status_code == 200
-    assert successful_login.json()["roles"] == ["worker"]
-    assert successful_login.json()["last_login_at"] is not None
+    login_body = successful_login.json()
+    assert login_body["token_type"] == "bearer"
+    assert login_body["access_token"]
+    assert login_body["user"]["roles"] == ["worker"]
+    assert login_body["user"]["last_login_at"] is not None
 
     with SessionLocal() as session:
         user = session.get(User, user_id)
@@ -390,6 +397,116 @@ def test_registration_login_and_temporary_lock_use_database() -> None:
                 AuditEvent.event_type == "user.login_locked",
             )
         ) == 1
+
+
+def test_upload_requires_permission_and_creates_processing_job() -> None:
+    _assert_isolated_test_database()
+    suffix = uuid4().hex[:10].upper()
+    employee_number = f"UPLOAD-{suffix}"
+    password = "Correct-Horse-2026!"
+
+    registration = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/register",
+            json={
+                "employee_number": employee_number,
+                "name": "문서 업로드 통합 사용자",
+                "password": password,
+            },
+        )
+    )
+    assert registration.status_code == 201
+
+    login = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/login",
+            json={"employee_number": employee_number, "password": password},
+        )
+    )
+    assert login.status_code == 200
+    access_token = login.json()["access_token"]
+    headers = {"Authorization": f"Bearer {access_token}"}
+    upload_data = {
+        "product_type": "포토센서",
+        "model_name": f"BTS-{suffix}",
+        "manufacturer": "통합테스트 제조사",
+    }
+    upload_file = {
+        "file": ("manual.pdf", b"%PDF-1.4\n%%EOF\n", "application/pdf")
+    }
+
+    denied = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/documents/upload",
+            headers=headers,
+            data=upload_data,
+            files=upload_file,
+        )
+    )
+    assert denied.status_code == 403
+
+    with SessionLocal() as session:
+        user = session.scalar(
+            select(User).where(User.employee_number == employee_number)
+        )
+        manager_role = session.scalar(
+            select(Role).where(Role.code == "safety_manager")
+        )
+        assert user is not None
+        assert manager_role is not None
+        user_id = user.id
+        session.add(UserRole(user_id=user.id, role_id=manager_role.id))
+        session.commit()
+
+    uploaded = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/documents/upload",
+            headers=headers,
+            data=upload_data,
+            files=upload_file,
+        )
+    )
+    assert uploaded.status_code == 201
+    upload_body = uploaded.json()
+    assert upload_body["version_number"] == 1
+    assert upload_body["status"] == "pending"
+
+    with SessionLocal() as session:
+        document = session.get(Document, UUID(upload_body["document_id"]))
+        version = session.get(
+            DocumentVersion, UUID(upload_body["document_version_id"])
+        )
+        assert document is not None
+        assert document.created_by_user_id == user_id
+        assert document.document_type_code == "equipment_manual"
+        assert version is not None
+        assert version.uploaded_by_user_id == user_id
+        assert session.scalar(
+            select(func.count(DocumentProcessingJob.id)).where(
+                DocumentProcessingJob.document_version_id == version.id
+            )
+        ) == 1
+
+    logged_out = asyncio.run(
+        _request("POST", "/api/v1/auth/logout", headers=headers)
+    )
+    assert logged_out.status_code == 204
+
+    after_logout = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/documents/upload",
+            headers=headers,
+            data={**upload_data, "model_name": f"BTS-{suffix}-RETRY"},
+            files=upload_file,
+        )
+    )
+    assert after_logout.status_code == 401
+
 
 def test_assessment_is_persisted_and_dashboard_uses_database() -> None:
     _assert_isolated_test_database()

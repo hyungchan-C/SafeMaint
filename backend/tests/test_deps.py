@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_permission
 from app.db.models import User
 
 
@@ -46,3 +46,22 @@ def test_get_current_user_rejects_inactive_user() -> None:
             get_current_user(token="a-valid-token", db=object())
 
     assert excinfo.value.status_code == 401
+
+
+def test_require_permission_returns_user_when_role_grants_permission() -> None:
+    user = _make_user()
+    db = type("PermissionDb", (), {"scalar": lambda self, _statement: uuid4()})()
+    dependency = require_permission("document.upload")
+
+    assert dependency(current_user=user, db=db) is user
+
+
+def test_require_permission_rejects_missing_permission() -> None:
+    user = _make_user()
+    db = type("PermissionDb", (), {"scalar": lambda self, _statement: None})()
+    dependency = require_permission("document.upload")
+
+    with pytest.raises(HTTPException) as excinfo:
+        dependency(current_user=user, db=db)
+
+    assert excinfo.value.status_code == 403

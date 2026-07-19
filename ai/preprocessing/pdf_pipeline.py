@@ -490,6 +490,7 @@ def process_pdf(
     chunk_size: int = 600,
     overlap: int = 100,
     source_type: str = "manual",
+    document_type_code: str = "equipment_manual",
     access_level: str = "restricted",
 ) -> dict:
     """
@@ -518,6 +519,7 @@ def process_pdf(
         "external_id": external_id,
         "title": doc_name,
         "source_type": source_type,
+        "document_type_code": document_type_code,
         "publisher": manufacturer,
         "access_level": access_level,
         "file_sha256": file_sha256,

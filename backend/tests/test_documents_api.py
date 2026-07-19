@@ -3,7 +3,7 @@ from uuid import uuid4
 
 from httpx import ASGITransport, AsyncClient
 
-from app.api.deps import get_current_user
+from app.api.deps import require_document_upload
 from app.db.models import User
 from app.db.session import get_db
 from app.main import app
@@ -17,7 +17,7 @@ def _current_user() -> User:
 
 async def _upload(files: dict, data: dict, *, authenticated: bool = True):
     if authenticated:
-        app.dependency_overrides[get_current_user] = _current_user
+        app.dependency_overrides[require_document_upload] = _current_user
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -48,6 +48,17 @@ def test_upload_rejects_non_pdf_filename() -> None:
     response = asyncio.run(
         _upload(
             {"file": ("manual.txt", b"not a pdf", "text/plain")},
+            {"product_type": "포토센서", "model_name": "BTS"},
+        )
+    )
+
+    assert response.status_code == 422
+
+
+def test_upload_rejects_pdf_extension_with_invalid_header() -> None:
+    response = asyncio.run(
+        _upload(
+            _pdf_file(content=b"not really a pdf"),
             {"product_type": "포토센서", "model_name": "BTS"},
         )
     )

@@ -13,6 +13,23 @@ type LocalUser = {
   id: string;
   username: string;
   displayName: string;
+  accessToken: string;
+};
+
+type StoredSession = {
+  username: string;
+  displayName: string;
+  accessToken: string;
+};
+
+type LoginApiResponse = {
+  access_token?: string;
+  user?: {
+    id?: string;
+    employee_number?: string;
+    name?: string;
+  };
+  detail?: string;
 };
 
 type HistoryItem = {
@@ -77,22 +94,35 @@ export default function HomePage() {
   const [displayName, setDisplayName] = useState("");
 
   useEffect(() => {
-    const session = readStorage<{ username: string; displayName: string } | null>(STORAGE_KEYS.session, null);
-    if (session) {
+    const session = readStorage<StoredSession | null>(STORAGE_KEYS.session, null);
+    if (session?.accessToken) {
       setUsername(session.username);
       setDisplayName(session.displayName);
       setPage("workspace");
+    } else if (session) {
+      removeStorage(STORAGE_KEYS.session);
     }
   }, []);
 
   function handleLogin(user: LocalUser) {
     setUsername(user.username);
     setDisplayName(user.displayName);
-    writeStorage(STORAGE_KEYS.session, { username: user.username, displayName: user.displayName });
+    writeStorage<StoredSession>(STORAGE_KEYS.session, {
+      username: user.username,
+      displayName: user.displayName,
+      accessToken: user.accessToken,
+    });
     setPage("workspace");
   }
 
   function handleLogout() {
+    const session = readStorage<StoredSession | null>(STORAGE_KEYS.session, null);
+    if (session?.accessToken) {
+      void fetch(`${getApiBaseUrl()}/api/v1/auth/logout`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.accessToken}` },
+      }).catch(() => undefined);
+    }
     removeStorage(STORAGE_KEYS.session);
     setUsername("");
     setDisplayName("");
@@ -134,11 +164,22 @@ function LoginScreen({ onLogin }: { onLogin: (user: LocalUser) => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ employee_number: loginId, password }),
       });
-      const payload = await response.json() as { id?: string; employee_number?: string; name?: string; detail?: string };
-      if (!response.ok || !payload.id || !payload.employee_number || !payload.name) {
+      const payload = await response.json() as LoginApiResponse;
+      if (
+        !response.ok
+        || !payload.access_token
+        || !payload.user?.id
+        || !payload.user.employee_number
+        || !payload.user.name
+      ) {
         throw new Error(payload.detail || "로그인에 실패했습니다.");
       }
-      onLogin({ id: payload.id, username: payload.employee_number, displayName: payload.name });
+      onLogin({
+        id: payload.user.id,
+        username: payload.user.employee_number,
+        displayName: payload.user.name,
+        accessToken: payload.access_token,
+      });
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.");
     } finally {

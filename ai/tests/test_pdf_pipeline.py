@@ -70,6 +70,7 @@ def test_repeated_section_titles_create_unique_chunk_index(monkeypatch, tmp_path
     )
     chunks = result["chunks"]
 
+    assert result["document"]["document_type_code"] == "equipment_manual"
     assert len(chunks) == 2
     assert [c["chunk_index"] for c in chunks] == [0, 1]
     assert all(c["document_external_id"] == result["document"]["external_id"] for c in chunks)
