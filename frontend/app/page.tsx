@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssessmentResponse } from "@/types/assessment";
-import type { ChatMessage, ChatResponse } from "@/types/chat";
+import type { CatalogCandidate, ChatMessage, ChatResponse } from "@/types/chat";
 import { getApiBaseUrl } from "@/lib/api";
 
 type PageMode = "login" | "workspace" | "history";
@@ -43,6 +43,18 @@ const STORAGE_KEYS = {
   accessToken: "safemaint.accessToken",
   history: "safemaint.history",
   settings: "safemaint.settings",
+  workspacePrefix: "safemaint.workspace.",
+};
+
+type WorkspaceSnapshot = {
+  manuals: string[];
+  catalogIndexes: Record<string, string>;
+  selectedDocumentIds: string[];
+  sitePhotoName: string;
+  visionSummary: string;
+  visionStatus: string;
+  catalogCandidates: CatalogCandidate[];
+  messages: ChatMessage[];
 };
 
 function readStorage<T>(key: string, fallback: T): T {
@@ -70,6 +82,10 @@ function removeStorage(key: string) {
   } catch {
     // Authentication remains usable for the current tab when storage is blocked.
   }
+}
+
+function refersToAttachedPhoto(question: string): boolean {
+  return /(이건|이게|이것|이거|저건|저게|그건|그게|뭐야|무엇|어디에\s*쓰|용도|쓰이는|사용하는|어떤\s*(부품|제품)|비슷한|같은\s*(부품|제품)|후보)/i.test(question);
 }
 
 export default function HomePage() {
@@ -284,7 +300,13 @@ function WorkspaceScreen({
   const [fontSize, setFontSize] = useState<FontSize>("medium");
   const [autoSpeak, setAutoSpeak] = useState(false);
   const [manuals, setManuals] = useState<string[]>([]);
+  const [catalogIndexes, setCatalogIndexes] = useState<Record<string, string>>({});
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
+  const [manualStatus, setManualStatus] = useState("");
   const [sitePhotoName, setSitePhotoName] = useState("");
+  const [visionSummary, setVisionSummary] = useState("");
+  const [visionStatus, setVisionStatus] = useState("");
+  const [catalogCandidates, setCatalogCandidates] = useState<CatalogCandidate[]>([]);
   const [locationStatus, setLocationStatus] = useState("위치 미확인");
   const [activeTab, setActiveTab] = useState<"summary" | "accidents" | "evidence" | "tbm">("summary");
   const [question, setQuestion] = useState("");
@@ -293,6 +315,7 @@ function WorkspaceScreen({
   const [result, setResult] = useState<AssessmentResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isChatLoading, setIsChatLoading] = useState(false);
+  const [isVisionLoading, setIsVisionLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -301,6 +324,7 @@ function WorkspaceScreen({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const [error, setError] = useState("");
+  const [workspaceRestored, setWorkspaceRestored] = useState(false);
 
   useEffect(() => {
     const settings = readStorage<{ volume: number; fontSize: FontSize; autoSpeak?: boolean }>(STORAGE_KEYS.settings, { volume: 70, fontSize: "medium", autoSpeak: false });
@@ -308,6 +332,35 @@ function WorkspaceScreen({
     setFontSize(settings.fontSize);
     setAutoSpeak(settings.autoSpeak ?? false);
   }, []);
+
+  useEffect(() => {
+    const saved = readStorage<WorkspaceSnapshot | null>(`${STORAGE_KEYS.workspacePrefix}${username}`, null);
+    if (saved) {
+      setManuals(saved.manuals ?? []);
+      setCatalogIndexes(saved.catalogIndexes ?? {});
+      setSelectedDocumentIds(saved.selectedDocumentIds ?? []);
+      setSitePhotoName(saved.sitePhotoName ?? "");
+      setVisionSummary(saved.visionSummary ?? "");
+      setVisionStatus(saved.visionStatus ?? "");
+      setCatalogCandidates(saved.catalogCandidates ?? []);
+      setMessages(saved.messages ?? []);
+    }
+    setWorkspaceRestored(true);
+  }, [username]);
+
+  useEffect(() => {
+    if (!workspaceRestored) return;
+    writeStorage(`${STORAGE_KEYS.workspacePrefix}${username}`, {
+      manuals,
+      catalogIndexes,
+      selectedDocumentIds,
+      sitePhotoName,
+      visionSummary,
+      visionStatus,
+      catalogCandidates,
+      messages,
+    } satisfies WorkspaceSnapshot);
+  }, [catalogCandidates, catalogIndexes, manuals, messages, selectedDocumentIds, sitePhotoName, username, visionStatus, visionSummary, workspaceRestored]);
 
   useEffect(() => {
     if (typeof window !== "undefined") writeStorage(STORAGE_KEYS.settings, { volume, fontSize, autoSpeak });
@@ -370,7 +423,8 @@ function WorkspaceScreen({
   async function sendChat(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const submittedQuestion = question.trim();
-    if (!submittedQuestion || isChatLoading) return;
+    if (!submittedQuestion || isChatLoading || isVisionLoading) return;
+    const candidatesForAnswer = refersToAttachedPhoto(submittedQuestion) ? catalogCandidates : [];
 
     // Create the AudioContext synchronously within this user-gesture handler so
     // browsers don't block autoplay once the answer arrives after the awaits below.
@@ -398,7 +452,9 @@ function WorkspaceScreen({
             task_type: form.task_type,
             energy_source: form.energy_source || null,
             task_description: form.description || null,
+            visual_summary: visionSummary || null,
             registered_manuals: manuals,
+            selected_document_ids: selectedDocumentIds,
           },
         }),
       });
@@ -416,6 +472,7 @@ function WorkspaceScreen({
           generationMode: payload.generation_mode,
           model: payload.model,
           warning: payload.warning,
+          catalogCandidates: candidatesForAnswer,
         },
       ]);
       saveHistory(
@@ -439,9 +496,82 @@ function WorkspaceScreen({
     setForm((current) => ({ ...current, [field]: value }));
   }
 
-  function addManuals(files: FileList | null) {
+  async function addManuals(files: FileList | null) {
     if (!files) return;
-    setManuals((current) => Array.from(new Set([...current, ...Array.from(files, (file) => file.name)])));
+    const token = readStorage<string>(STORAGE_KEYS.accessToken, "");
+    setManualStatus("문서를 등록하고 로컬 이미지 인덱스를 생성하는 중...");
+    try {
+      for (const file of Array.from(files)) {
+        const uploadBody = new FormData();
+        uploadBody.append("file", file);
+        uploadBody.append("product_type", form.component_name || "미분류 설비");
+        uploadBody.append("model_name", form.model_number || form.equipment_name || "미지정 모델");
+        uploadBody.append("manufacturer", form.manufacturer || "미지정 제조사");
+        uploadBody.append("access_level", "restricted");
+        const uploadResponse = await fetch(`${getApiBaseUrl()}/api/v1/documents/upload`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: uploadBody,
+        });
+        const uploadPayload = await uploadResponse.json().catch(() => null) as { document_id?: string; detail?: string } | null;
+        if (!uploadResponse.ok || !uploadPayload?.document_id) throw new Error(uploadPayload?.detail || `${file.name} 문서 등록 실패`);
+
+        const indexBody = new FormData();
+        indexBody.append("file", file);
+        const indexResponse = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/index`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: indexBody,
+        });
+        const indexPayload = await indexResponse.json().catch(() => null) as { catalog_id?: string; detail?: string } | null;
+        if (!indexResponse.ok || !indexPayload?.catalog_id) throw new Error(indexPayload?.detail || `${file.name} 이미지 인덱싱 실패`);
+        setManuals((current) => Array.from(new Set([...current, file.name])));
+        setSelectedDocumentIds((current) => Array.from(new Set([...current, uploadPayload.document_id!])));
+        setCatalogIndexes((current) => ({ ...current, [file.name]: indexPayload.catalog_id! }));
+      }
+      setManualStatus("문서 등록 완료 · 승인 및 RAG 처리 후 검색 근거로 사용됩니다.");
+    } catch (requestError) {
+      setManualStatus(requestError instanceof Error ? requestError.message : "문서 등록 실패");
+    }
+  }
+
+  async function analyzePhoto(file: File | undefined) {
+    if (!file) return;
+    setIsVisionLoading(true);
+    const token = readStorage<string>(STORAGE_KEYS.accessToken, "");
+    setSitePhotoName(file.name);
+    setVisionStatus("로컬 이미지 분석 중...");
+    setCatalogCandidates([]);
+    const body = new FormData();
+    body.append("file", file);
+    body.append("catalog_ids", JSON.stringify(Object.values(catalogIndexes)));
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/match`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body,
+      });
+      const payload = await response.json().catch(() => null) as {
+        raw_visual_description?: string;
+        extracted_markdown?: string;
+        catalog_candidates?: CatalogCandidate[];
+        warnings?: string[];
+        detail?: string;
+      } | null;
+      if (!response.ok) throw new Error(payload?.detail || "이미지 분석 실패");
+      const candidates = payload?.catalog_candidates ?? [];
+      setCatalogCandidates(candidates);
+      setVisionSummary([
+        candidates.length ? `카탈로그 외형 유사 후보(동일 제품 확정 아님):\n${candidates.map((item, index) => `${index + 1}. ${item.visual_category || "종류 확인 불가"}, ${item.filename} ${item.page}페이지, 유사도 ${(item.similarity * 100).toFixed(1)}%, 특징 ${item.visual_features?.join(", ") || "확인 불가"}`).join("\n")}` : "신뢰 임계값을 넘는 카탈로그 후보 없음",
+        payload?.extracted_markdown ? `로컬 OCR 확인 내용:\n${payload.extracted_markdown}` : "",
+        payload?.raw_visual_description ? `로컬 비전 참고 설명(각인·규격 확정 근거 아님):\n${payload.raw_visual_description}` : "",
+      ].filter(Boolean).join("\n\n"));
+      setVisionStatus(payload?.warnings?.length ? `분석 완료 · ${payload.warnings.join(" · ")}` : "로컬 분석 완료");
+    } catch (requestError) {
+      setVisionStatus(requestError instanceof Error ? requestError.message : "로컬 비전 서비스 연결 실패");
+    } finally {
+      setIsVisionLoading(false);
+    }
   }
 
   function requestLocation() {
@@ -596,7 +726,7 @@ function WorkspaceScreen({
 
       <section className="quick-toolbar" aria-label="현장 빠른 기능">
         <button type="button" onClick={requestLocation}>📍 현재 위치</button>
-        <label className="toolbar-upload">📷 현장 사진<input type="file" accept="image/*" onChange={(event) => setSitePhotoName(event.target.files?.[0]?.name ?? "")} /></label>
+        <label className="toolbar-upload">📷 현장 사진<input type="file" accept="image/*" onChange={(event) => void analyzePhoto(event.target.files?.[0])} /></label>
         <button type="button" onClick={toggleVoiceInput} disabled={isTranscribing}>
           {isRecording ? "⏹ 녹음 중지" : isTranscribing ? "🎤 인식 중..." : "🎤 음성 입력"}
         </button>
@@ -622,8 +752,8 @@ function WorkspaceScreen({
       </section>
 
       <section className="manual-row upgraded-manual-row">
-        <label className="file-card">📄 작업 설비 매뉴얼 추가<input type="file" accept="application/pdf" multiple onChange={(event) => addManuals(event.target.files)} /></label>
-        <div><strong>{manuals.length ? `${manuals.length}개 매뉴얼 등록됨` : "등록된 매뉴얼 없음"}</strong><span>{sitePhotoName ? `현장 사진: ${sitePhotoName}` : "현장 사진 없음"} · 실제 업로드 API 연결 예정</span></div>
+        <label className="file-card">📄 작업 설비 매뉴얼 추가<input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
+        <div><strong>{manuals.length ? `${manuals.length}개 매뉴얼 등록됨` : "등록된 매뉴얼 없음"}</strong><span>{manualStatus || (sitePhotoName ? `현장 사진: ${sitePhotoName} · ${visionStatus}` : "현장 사진 없음")}</span></div>
         <div className="document-chip-list">{manuals.map((name) => <span key={name}>📄 {name}<button type="button" aria-label={`${name} 삭제`} onClick={() => setManuals((current) => current.filter((item) => item !== name))}>×</button></span>)}</div>
       </section>
 
@@ -642,6 +772,26 @@ function WorkspaceScreen({
                 </span>
               )}
               <p className="chat-answer-text">{message.text}</p>
+              {message.catalogCandidates && message.catalogCandidates.length > 0 && (
+                <div className="catalog-candidate-list">
+                  <strong>사진과 유사한 카탈로그 후보</strong>
+                  <div className="catalog-candidate-grid">
+                    {message.catalogCandidates.map((candidate, candidateIndex) => (
+                      <article className="catalog-candidate-card" key={`${candidate.catalog_id}-${candidate.page}-${candidate.image_index}`}>
+                        <SecureCandidateImage candidate={candidate} alt={`후보 ${candidateIndex + 1}`} />
+                        <div>
+                          <strong>후보 {candidateIndex + 1} · {candidate.visual_category || "제품 종류 확인 불가"}</strong>
+                          <span>{candidate.filename} · {candidate.page}페이지</span>
+                          <span>유사도 {(candidate.similarity * 100).toFixed(1)}% · 신뢰 {candidate.confidence}</span>
+                          {candidate.visual_features && candidate.visual_features.length > 0 && <p>{candidate.visual_features.join(" · ")}</p>}
+                          {candidate.page_excerpt && <small>{candidate.page_excerpt}</small>}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                  <p className="catalog-candidate-caution">후보 이미지는 외형 비교용이며 동일 모델·규격을 의미하지 않습니다.</p>
+                </div>
+              )}
               {message.warning && <p className="chat-warning">⚠ {message.warning}</p>}
               {message.sources && message.sources.length > 0 && (
                 <div className="chat-source-list">
@@ -667,10 +817,10 @@ function WorkspaceScreen({
           <button type="button" className="icon-action" title={isRecording ? "녹음 중지" : "음성 입력"} onClick={toggleVoiceInput} disabled={isTranscribing}>
             {isRecording ? "⏹" : "🎤"}
           </button>
-          <label className="icon-action file-icon" title="사진 첨부">📷<input type="file" accept="image/*" onChange={(event) => setSitePhotoName(event.target.files?.[0]?.name ?? "")} /></label>
-          <label className="icon-action file-icon" title="문서 첨부">📎<input type="file" accept="application/pdf" multiple onChange={(event) => addManuals(event.target.files)} /></label>
-          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="예: 전원을 차단하지 않고 센서만 빠르게 교체해도 될까요?" disabled={isChatLoading} />
-          <button type="submit" disabled={isChatLoading || !question.trim()}>{isChatLoading ? "답변 생성 중..." : "전송"}</button>
+          <label className="icon-action file-icon" title="사진 첨부">📷<input type="file" accept="image/*" onChange={(event) => void analyzePhoto(event.target.files?.[0])} /></label>
+          <label className="icon-action file-icon" title="문서 첨부">📎<input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
+          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={isVisionLoading ? "사진 분석이 끝나면 질문을 보낼 수 있습니다." : "예: 이건 뭐야? 어디에 쓰이는 거야?"} disabled={isChatLoading} />
+          <button type="submit" disabled={isChatLoading || isVisionLoading || !question.trim()}>{isVisionLoading ? "사진 분석 중..." : isChatLoading ? "답변 생성 중..." : "전송"}</button>
         </form>
       </section>
 
@@ -739,6 +889,34 @@ function EvidencePanel({ result, manuals }: { result: AssessmentResponse; manual
 function SimilarAccidentPanel({ result }: { result: AssessmentResponse }) {
   const types = Array.from(new Set(result.hazards.map((hazard) => hazard.accident_type)));
   return <div className="similar-accident-list">{types.map((type) => <article className="accident-card" key={type}><div><span>관련 사고유형</span><strong>{type} 사고</strong></div><p>현재 규칙 엔진이 감지한 사고유형입니다. 실제 유사 사고 원문과 유사도는 사고사례 검색 API 연결 후 표시됩니다.</p><ul><li>전원 차단 및 LOTO 확인</li><li>위험구역 통제와 관리자 확인</li></ul></article>)}</div>;
+}
+
+function SecureCandidateImage({ candidate, alt }: { candidate: CatalogCandidate; alt: string }) {
+  const [source, setSource] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = "";
+    const token = readStorage<string>(STORAGE_KEYS.accessToken, "");
+    void fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/image/${candidate.catalog_id}/${candidate.page}/${candidate.image_index}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error("후보 이미지 로드 실패");
+        return response.blob();
+      })
+      .then((blob) => {
+        objectUrl = URL.createObjectURL(blob);
+        if (active) setSource(objectUrl);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [candidate.catalog_id, candidate.image_index, candidate.page]);
+
+  return source ? <img src={source} alt={alt} loading="lazy" /> : <div className="catalog-image-placeholder">이미지 불러오는 중</div>;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

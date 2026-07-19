@@ -18,6 +18,19 @@ export interface ChatResponse {
   warning: string | null;
 }
 
+export interface CatalogCandidate {
+  catalog_id: string;
+  filename: string;
+  page: number;
+  image_index: number;
+  similarity: number;
+  confidence: string;
+  note: string;
+  visual_category?: string | null;
+  visual_features?: string[];
+  page_excerpt?: string | null;
+}
+
 export interface ChatMessage {
   role: "user" | "ai";
   text: string;
@@ -26,4 +39,5 @@ export interface ChatMessage {
   generationMode?: ChatResponse["generation_mode"];
   model?: string | null;
   warning?: string | null;
+  catalogCandidates?: CatalogCandidate[];
 }
