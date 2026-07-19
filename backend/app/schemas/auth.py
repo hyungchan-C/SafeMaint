@@ -64,3 +64,9 @@ class AuthUserResponse(BaseModel):
     status: UserStatus
     roles: list[str] = Field(default_factory=list)
     last_login_at: datetime | None
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: AuthUserResponse

@@ -8,6 +8,7 @@ x-backend-service: &backend-service
     APP_ENV: ${APP_ENV:-production}
     CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting SafeMaint}
+    SESSION_EXPIRE_MINUTES: ${SESSION_EXPIRE_MINUTES:-60}
     OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
     LLM_BASE_URL: ${LLM_BASE_URL:-}

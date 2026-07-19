@@ -7,9 +7,11 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.deps import oauth2_scheme
 from app.db.models import AuditEvent, Role, User, UserRole
 from app.db.session import get_db
-from app.schemas.auth import AuthUserResponse, LoginRequest, RegisterRequest
+from app.schemas.auth import AuthUserResponse, LoginRequest, LoginResponse, RegisterRequest
+from app.services.auth_sessions import create_session, revoke_session
 from app.services.passwords import (
     DUMMY_PASSWORD_HASH,
     hash_password,
@@ -117,11 +119,11 @@ def register(
     return _response(db, user)
 
 
-@router.post("/login", response_model=AuthUserResponse)
+@router.post("/login", response_model=LoginResponse)
 def login(
     payload: LoginRequest,
     db: Annotated[Session, Depends(get_db)],
-) -> AuthUserResponse:
+) -> LoginResponse:
     user = db.scalar(
         select(User)
         .where(User.employee_number == payload.employee_number)
@@ -196,6 +198,20 @@ def login(
             payload={},
         )
     )
+    access_token = create_session(db, user.id)
     db.commit()
 
-    return _response(db, user)
+    return LoginResponse(
+        access_token=access_token,
+        user=_response(db, user),
+    )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(
+    token: Annotated[str | None, Depends(oauth2_scheme)],
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    if token is not None:
+        revoke_session(db, token)
+        db.commit()
