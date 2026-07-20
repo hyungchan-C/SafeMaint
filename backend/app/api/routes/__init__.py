@@ -6,6 +6,7 @@ from app.api.routes import (
     chat,
     dashboard,
     documents,
+    gps,
     speech,
     vision,
 )
@@ -19,3 +20,4 @@ api_router.include_router(dashboard.router)
 api_router.include_router(speech.router)
 api_router.include_router(vision.router)
 api_router.include_router(documents.router)
+api_router.include_router(gps.router)

@@ -75,6 +75,7 @@ class Settings:
     stt_language: str = getenv("STT_LANGUAGE", "ko")
     stt_device: str = getenv("STT_DEVICE", "cpu")
     stt_compute_type: str = getenv("STT_COMPUTE_TYPE", "int8")
+    gps_proximity_radius_m: float = float(getenv("GPS_PROXIMITY_RADIUS_M", "30"))
 
 
 settings = Settings()
