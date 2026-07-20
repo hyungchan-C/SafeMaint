@@ -1,5 +1,6 @@
 from app.services.virtual_gps import (
     VIRTUAL_EQUIPMENT_LOCATIONS,
+    VirtualEquipmentLocation,
     build_checklist,
     find_nearby_equipment,
     haversine_distance_m,
@@ -67,6 +68,25 @@ def test_build_checklist_matches_electrical_hazard() -> None:
     hazards, _checklist = build_checklist(panel)
 
     assert any(hazard.accident_type == "감전" for hazard in hazards)
+
+
+def test_build_checklist_uses_equipment_type_even_when_name_omits_it() -> None:
+    # 설비명이 "1호기"처럼 종류를 알 수 없는 표기여도, equipment_type이 위험도
+    # 평가에 실제로 반영되어 용접기 특유의 화재 위험이 매칭되어야 한다.
+    unnamed_welder = VirtualEquipmentLocation(
+        equipment_code="TEST-01",
+        site_name="A공장",
+        equipment_name="1호기",
+        equipment_type="용접기",
+        manufacturer=None,
+        model_number=None,
+        latitude=37.5665,
+        longitude=126.9780,
+    )
+
+    hazards, _checklist = build_checklist(unnamed_welder)
+
+    assert any(hazard.accident_type == "화재" for hazard in hazards)
 
 
 def test_resolve_locations_without_origin_returns_original_coordinates() -> None:

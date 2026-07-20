@@ -155,7 +155,7 @@ def build_checklist(location: VirtualEquipmentLocation) -> tuple[list[HazardItem
         model_number=location.model_number,
         task_type="정기 순찰 점검",
         description=(
-            f"{location.equipment_name} 설비 근처에 접근했습니다. "
+            f"{location.equipment_type} '{location.equipment_name}' 설비 근처에 접근했습니다. "
             "작업 전 안전수칙을 확인하세요."
         ),
     )
