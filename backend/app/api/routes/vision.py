@@ -218,7 +218,10 @@ def match_catalog(
     db: Annotated[Session, Depends(get_db)],
     file: UploadFile = File(...),
     document_ids: str = Form("[]"),
+    analysis_mode: str = Form("deep"),
 ) -> dict[str, object]:
+    if analysis_mode not in {"fast", "deep"}:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "analysis_mode는 fast 또는 deep이어야 합니다.")
     selected_ids = _parse_document_ids(document_ids)
     catalog_to_document: dict[str, str] = {}
     for document_id in selected_ids:
@@ -235,7 +238,10 @@ def match_catalog(
         content=content,
         content_type=file.content_type or "application/octet-stream",
         fallback="카탈로그 이미지 비교에 실패했습니다.",
-        data={"catalog_ids": json.dumps(list(catalog_to_document))},
+        data={
+            "catalog_ids": json.dumps(list(catalog_to_document)),
+            "analysis_mode": analysis_mode,
+        },
     )
     safe_candidates = []
     candidates = payload.get("catalog_candidates")

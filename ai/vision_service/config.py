@@ -17,6 +17,8 @@ class Settings:
     enable_paddle: bool = _as_bool("VISION_ENABLE_PADDLE", True)
     enable_qwen: bool = _as_bool("VISION_ENABLE_QWEN", True)
     max_new_tokens: int = int(getenv("VISION_MAX_NEW_TOKENS", "192"))
+    embedding_model: str = getenv("VISION_EMBEDDING_MODEL", "facebook/dinov2-small")
+    embedding_device: str = getenv("VISION_EMBEDDING_DEVICE", "cpu")
     catalog_index_dir: str = getenv("VISION_CATALOG_INDEX_DIR", "/tmp/safemaint-catalogs")
     catalog_match_threshold: float = float(getenv("VISION_CATALOG_MATCH_THRESHOLD", "0.55"))
     image_max_upload_bytes: int = int(getenv("VISION_IMAGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))

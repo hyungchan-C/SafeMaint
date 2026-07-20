@@ -355,6 +355,7 @@ function WorkspaceScreen({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  const visionRequestIdRef = useRef(0);
   const [error, setError] = useState("");
   const [workspaceRestored, setWorkspaceRestored] = useState(false);
 
@@ -585,24 +586,31 @@ function WorkspaceScreen({
     setSitePhotoName(file.name);
     setVisionStatus("로컬 이미지 분석 중...");
     setCatalogCandidates([]);
-    const body = new FormData();
-    body.append("file", file);
-    body.append("document_ids", JSON.stringify(selectedDocumentIds));
-    try {
+    const requestId = ++visionRequestIdRef.current;
+    type VisionPayload = {
+      raw_visual_description?: string;
+      extracted_markdown?: string;
+      catalog_candidates?: CatalogCandidate[];
+      warnings?: string[];
+      detail?: string;
+    };
+    const requestAnalysis = async (analysisMode: "fast" | "deep") => {
+      const body = new FormData();
+      body.append("file", file);
+      body.append("document_ids", JSON.stringify(selectedDocumentIds));
+      body.append("analysis_mode", analysisMode);
       const response = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/match`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body,
       });
       requireActiveSession(response);
-      const payload = await response.json().catch(() => null) as {
-        raw_visual_description?: string;
-        extracted_markdown?: string;
-        catalog_candidates?: CatalogCandidate[];
-        warnings?: string[];
-        detail?: string;
-      } | null;
+      const payload = await response.json().catch(() => null) as VisionPayload | null;
       if (!response.ok) throw new Error(payload?.detail || "이미지 분석 실패");
+      return payload;
+    };
+    const applyPayload = (payload: VisionPayload | null, precise: boolean) => {
+      if (visionRequestIdRef.current !== requestId) return;
       const candidates = payload?.catalog_candidates ?? [];
       setCatalogCandidates(candidates);
       setVisionSummary([
@@ -610,11 +618,24 @@ function WorkspaceScreen({
         payload?.extracted_markdown ? `로컬 OCR 확인 내용:\n${payload.extracted_markdown}` : "",
         payload?.raw_visual_description ? `로컬 비전 참고 설명(각인·규격 확정 근거 아님):\n${payload.raw_visual_description}` : "",
       ].filter(Boolean).join("\n\n"));
-      setVisionStatus(payload?.warnings?.length ? `분석 완료 · ${payload.warnings.join(" · ")}` : "로컬 분석 완료");
+      setVisionStatus(
+        precise
+          ? (payload?.warnings?.length ? `정밀 분석 완료 · ${payload.warnings.join(" · ")}` : "정밀 분석 완료")
+          : "빠른 후보 검색 완료 · 정밀 분석 진행 중...",
+      );
+    };
+    try {
+      const fastPayload = await requestAnalysis("fast");
+      applyPayload(fastPayload, false);
+      if (visionRequestIdRef.current === requestId) setIsVisionLoading(false);
+      const deepPayload = await requestAnalysis("deep");
+      applyPayload(deepPayload, true);
     } catch (requestError) {
-      setVisionStatus(requestError instanceof Error ? requestError.message : "로컬 비전 서비스 연결 실패");
+      if (visionRequestIdRef.current === requestId) {
+        setVisionStatus(requestError instanceof Error ? requestError.message : "로컬 비전 서비스 연결 실패");
+      }
     } finally {
-      setIsVisionLoading(false);
+      if (visionRequestIdRef.current === requestId) setIsVisionLoading(false);
     }
   }
 

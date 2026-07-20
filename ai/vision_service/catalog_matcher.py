@@ -14,25 +14,35 @@ from vision_service.schemas import CatalogCandidate, CatalogIndexResponse
 
 
 class _SemanticEmbedder:
-    def __init__(self) -> None:
+    def __init__(self, model_name: str, device: str, cache_dir: str) -> None:
+        self.model_name = model_name
+        self.device = device
+        self.cache_dir = cache_dir
         self._model = None
-        self._transform = None
+        self._processor = None
 
     def encode(self, image: Image.Image) -> np.ndarray:
         import torch
-        from torchvision.models import EfficientNet_B0_Weights, efficientnet_b0
+        from transformers import AutoImageProcessor, AutoModel
 
         if self._model is None:
-            weights = EfficientNet_B0_Weights.DEFAULT
-            model = efficientnet_b0(weights=weights)
-            model.classifier = torch.nn.Identity()
-            self._model = model.eval().cpu()
-            self._transform = weights.transforms()
+            self._processor = AutoImageProcessor.from_pretrained(
+                self.model_name,
+                cache_dir=self.cache_dir,
+                use_fast=True,
+            )
+            self._model = AutoModel.from_pretrained(
+                self.model_name,
+                cache_dir=self.cache_dir,
+            ).eval().to(self.device)
             torch.set_num_threads(min(4, torch.get_num_threads()))
-        assert self._transform is not None
+        assert self._processor is not None
         with torch.inference_mode():
-            vector = self._model(self._transform(image.convert("RGB")).unsqueeze(0)).squeeze(0)
-        result = vector.float().numpy()
+            inputs = self._processor(images=image.convert("RGB"), return_tensors="pt")
+            inputs = {key: value.to(self.device) for key, value in inputs.items()}
+            outputs = self._model(**inputs)
+            vector = outputs.last_hidden_state[:, 0].squeeze(0)
+        result = vector.float().cpu().numpy()
         norm = float(np.linalg.norm(result))
         return result / norm if norm else result
 
@@ -74,6 +84,9 @@ class CatalogImageMatcher:
         max_pages: int = 500,
         max_images: int = 5000,
         max_image_pixels: int = 40_000_000,
+        embedding_model: str = "facebook/dinov2-small",
+        embedding_device: str = "cpu",
+        model_cache_dir: str = "/models",
     ) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -81,11 +94,13 @@ class CatalogImageMatcher:
         self.max_pages = max_pages
         self.max_images = max_images
         self.max_image_pixels = max_image_pixels
-        self.embedder = _SemanticEmbedder()
+        self.embedding_model = embedding_model
+        self.embedder = _SemanticEmbedder(embedding_model, embedding_device, model_cache_dir)
 
     def index_pdf(self, pdf_path: Path, filename: str) -> CatalogIndexResponse:
         data = pdf_path.read_bytes()
-        catalog_id = hashlib.sha256(data + b"safemaint-semantic-v2").hexdigest()[:20]
+        index_version = f"safemaint-matrix-v3:{self.embedding_model}".encode()
+        catalog_id = hashlib.sha256(data + index_version).hexdigest()[:20]
         target = self.root / catalog_id
         manifest_path = target / "manifest.json"
         if manifest_path.exists():
@@ -100,6 +115,7 @@ class CatalogImageMatcher:
             raise ValueError(f"PDF 페이지 수는 {self.max_pages}개를 넘을 수 없습니다.")
         target.mkdir(parents=True, exist_ok=True)
         entries: list[dict[str, object]] = []
+        embeddings: list[np.ndarray] = []
         warnings: list[str] = []
         for page_number, page in enumerate(reader.pages, start=1):
             if len(entries) >= self.max_images:
@@ -122,11 +138,11 @@ class CatalogImageMatcher:
                         continue
                     image_name = f"p{page_number:04d}-i{image_index:03d}.jpg"
                     image.save(target / image_name, format="JPEG", quality=90)
-                    feature_name = f"{image_name}.npy"
-                    np.save(target / feature_name, self.embedder.encode(image), allow_pickle=False)
+                    vector_index = len(embeddings)
+                    embeddings.append(self.embedder.encode(image))
                     entries.append({
                         "page": page_number, "image_index": image_index,
-                        "image": image_name, "feature": feature_name,
+                        "image": image_name, "vector_index": vector_index,
                         "page_text": page_text,
                     })
                 except Exception:
@@ -136,6 +152,9 @@ class CatalogImageMatcher:
             "page_count": len(reader.pages), "image_count": len(entries),
             "warnings": warnings,
         }
+        if embeddings:
+            matrix = np.stack(embeddings).astype(np.float32, copy=False)
+            np.save(target / "embeddings.npy", matrix, allow_pickle=False)
         manifest_path.write_text(
             json.dumps({"summary": summary, "entries": entries}, ensure_ascii=False),
             encoding="utf-8",
@@ -154,13 +173,31 @@ class CatalogImageMatcher:
                 continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             filename = manifest["summary"]["filename"]
-            for entry in manifest["entries"][: self.max_images]:
-                candidate = np.load(self.root / catalog_id / entry["feature"], allow_pickle=False)
-                if candidate.shape != query.shape:
-                    # Ignore indexes made by an older descriptor version. Re-uploading the
-                    # catalog creates the current semantic index without breaking analysis.
+            entries = manifest["entries"][: self.max_images]
+            matrix_path = self.root / catalog_id / "embeddings.npy"
+            if matrix_path.exists():
+                matrix = np.load(matrix_path, mmap_mode="r", allow_pickle=False)
+                if matrix.ndim != 2 or matrix.shape[1:] != query.shape or matrix.shape[0] < len(entries):
                     continue
-                similarity = max(0.0, min(1.0, float(np.dot(query, candidate))))
+                similarities = np.asarray(matrix[: len(entries)] @ query, dtype=np.float32)
+            else:
+                # Compatibility for indexes created before the matrix format.
+                legacy_vectors = []
+                compatible_entries = []
+                for entry in entries:
+                    feature = entry.get("feature")
+                    if not feature:
+                        continue
+                    candidate = np.load(self.root / catalog_id / str(feature), allow_pickle=False)
+                    if candidate.shape == query.shape:
+                        legacy_vectors.append(candidate)
+                        compatible_entries.append(entry)
+                if not legacy_vectors:
+                    continue
+                entries = compatible_entries
+                similarities = np.stack(legacy_vectors) @ query
+            for entry, raw_similarity in zip(entries, similarities):
+                similarity = max(0.0, min(1.0, float(raw_similarity)))
                 if similarity < self.threshold:
                     continue
                 confidence = "높음" if similarity >= 0.90 else "보통" if similarity >= 0.82 else "낮음"

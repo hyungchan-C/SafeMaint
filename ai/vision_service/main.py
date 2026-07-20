@@ -23,6 +23,9 @@ matcher = CatalogImageMatcher(
     max_pages=settings.pdf_max_pages,
     max_images=settings.catalog_max_images,
     max_image_pixels=settings.image_max_pixels,
+    embedding_model=settings.embedding_model,
+    embedding_device=settings.embedding_device,
+    model_cache_dir=settings.model_cache_dir,
 )
 SUPPORTED_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
@@ -116,6 +119,7 @@ def catalog_image(catalog_id: str, page: int, image_index: int) -> FileResponse:
 def match_catalog(
     file: UploadFile = File(...),
     catalog_ids: str = Form("[]"),
+    analysis_mode: str = Form("deep"),
 ) -> CatalogAnalysisResponse:
     if file.content_type not in SUPPORTED_TYPES:
         raise HTTPException(status_code=415, detail="JPEG, PNG, WEBP 이미지만 분석할 수 있습니다.")
@@ -128,6 +132,8 @@ def match_catalog(
     selected_ids = list(dict.fromkeys(str(value) for value in raw_ids))
     if not all(len(value) == 20 and all(char in "0123456789abcdef" for char in value) for value in selected_ids):
         raise HTTPException(status_code=422, detail="카탈로그 ID 형식이 올바르지 않습니다.")
+    if analysis_mode not in {"fast", "deep"}:
+        raise HTTPException(status_code=422, detail="analysis_mode는 fast 또는 deep이어야 합니다.")
     content = _read_limited(file, settings.image_max_upload_bytes)
     _validate_image(content)
     suffix = Path(file.filename or "field-image.png").suffix or ".png"
@@ -135,11 +141,19 @@ def match_catalog(
         temporary.write(content)
         path = Path(temporary.name)
     try:
-        response = analyzer.analyze(path, file.filename or path.name)
         try:
             candidates = matcher.match(path, selected_ids)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+        if analysis_mode == "fast":
+            return CatalogAnalysisResponse(
+                filename=file.filename or path.name,
+                items=[],
+                warnings=["빠른 임베딩 검색 결과이며 정밀 분석이 이어서 진행됩니다."],
+                models=[settings.embedding_model],
+                catalog_candidates=candidates[:3],
+            )
+        response = analyzer.analyze(path, file.filename or path.name)
         candidate_pairs = [(candidate, matcher.image_path(candidate)) for candidate in candidates]
         candidate_pairs = [(candidate, image) for candidate, image in candidate_pairs if image is not None]
         verified = analyzer.rerank_catalog_candidates(
