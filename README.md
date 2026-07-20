@@ -428,6 +428,67 @@ git pull origin dev
 
 기존 named volume은 유지되고 새로운 마이그레이션과 seed만 다시 적용됩니다. 운영용 설치·업데이트·백업·복구 자동화와 외부 DB 전용 Compose 프로필은 별도 배포 단계에서 추가합니다. 그 전에는 고객사 실데이터를 넣지 마세요.
 
+## 오프라인 카탈로그·현장 사진 분석
+
+`docker-compose.vision.yml`은 인터넷이 없는 현장을 위한 선택 서비스입니다.
+PaddleOCR-VL 0.9B가 카탈로그의 글자·표·레이아웃을 추출하고,
+EfficientNet-B0가 PDF에서 추출한 제품 이미지와 현장 사진의 외형 후보를 검색하며,
+Qwen3-VL-4B-Instruct가 이미지 구조화와 후보 의미 검토를 수행합니다. 모델은 모두 로컬에
+저장되며 OpenAI API 키를 사용하지 않습니다.
+
+RTX 2060 6GB 기준으로 PaddleOCR-VL은 CPU, Qwen3-VL은 GPU 4비트로 실행합니다.
+두 모델이 좁은 VRAM을 동시에 점유하지 않게 분리한 구성입니다. 처음 한 번은
+인터넷이 되는 환경에서 이미지와 모델을 내려받아야 합니다.
+
+```powershell
+docker compose `
+  --env-file .env `
+  -f docker-compose.yml `
+  -f docker-compose.dev.yml `
+  -f docker-compose.vision.yml `
+  up -d --build vision backend frontend
+```
+
+첫 실행에서는 모델 다운로드, Triton 커널 컴파일과 초기화 때문에 5~15분 정도 걸릴
+수 있습니다. RTX 2060 6GB에서는 Qwen 분석 중 GPU 메모리를 거의 모두 사용하므로
+다른 GPU 프로그램을 함께 실행하지 않는 것을 권장합니다. 이후 요청은 프로세스에
+로드된 모델을 재사용합니다.
+
+```powershell
+Invoke-RestMethod http://localhost:8020/health/live
+
+$form = @{ file = Get-Item "C:\path\catalog-page.png" }
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://localhost:8020/v1/catalog/analyze `
+  -Form $form
+```
+
+모델 다운로드가 끝난 뒤 인터넷 차단 환경에서는 `.env`를 다음처럼 바꾸고 서비스를
+재시작합니다.
+
+```dotenv
+HF_HUB_OFFLINE=1
+PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=true
+```
+
+모델은 `safemaint_vision_models`, 카탈로그 이미지 인덱스는
+`safemaint_catalog_index` Docker 볼륨에 보관됩니다. 오프라인 배포 전에 두 볼륨을
+현장 장비로 별도 복제해야 하며, `docker compose down -v`를
+실행하면 모델 캐시가 삭제되므로 사용하지 마세요.
+
+OCR만 필요한 저사양 현장 장비에서는 `.env`의 `VISION_ENABLE_QWEN=false`로 두면
+PaddleOCR-VL만 CPU에서 실행됩니다. 이미지 의미 분석이 필요하면 기본값 `true`를
+사용합니다.
+
+매뉴얼 첨부 UI는 `POST /api/v1/vision/catalog/index`, 사진 첨부 UI는
+`POST /api/v1/vision/catalog/match`를 호출합니다. PDF의 제품 이미지를 추출해 로컬
+임베딩으로 후보를 좁히고 Qwen3-VL이 지도·인증서·로고·다른 부품을 다시 걸러냅니다.
+후보는 같은 모델이나 규격의 확정 근거가 아니며, 신뢰 임계값을 넘지 못하면 표시하지
+않습니다. 분석된
+JSON은 채팅의 로컬 이미지 분석 문맥으로 전달되므로, 향후 최종 답변 모델을
+Qwen3.5-27B로 교체해도 이 비전 서비스는 그대로 사용할 수 있습니다.
+
 ## API
 
 | 메서드 | 경로 | 설명 |

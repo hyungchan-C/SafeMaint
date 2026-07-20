@@ -172,6 +172,7 @@ class ChatService:
                     "registered_manuals",
                     "selected_document_ids",
                     "selected_document_version_ids",
+                    "visual_summary",
                 },
             ),
             ensure_ascii=False,
@@ -224,6 +225,16 @@ class ChatService:
             ("작업 종류", context.task_type),
             ("에너지원", context.energy_source),
             ("작업 설명", context.task_description),
+            (
+                "로컬 이미지 분석(외형 후보이며 모델·규격 확정 근거가 아님)",
+                context.visual_summary,
+            ),
+            (
+                "사진 지시어 해석",
+                "'이건 뭐야', '어디에 쓰여' 같은 짧은 질문은 최근 첨부 사진을 가리킴"
+                if context.visual_summary
+                else None,
+            ),
         )
         lines = [f"{label}: {value}" for label, value in fields if value]
         lines.append("\n검증된 검색 근거:")
