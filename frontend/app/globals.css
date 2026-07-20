@@ -613,6 +613,14 @@ a {
 .chat-bubble.user { background: #e9f1ff; margin-left: auto; }
 .chat-bubble.ai { background: #eaf6ef; }
 .chat-answer-text { margin: 0; white-space: pre-wrap; }
+.catalog-candidate-list { border-top: 1px solid #bfd9ca; display: grid; gap: 9px; margin-top: 8px; padding-top: 10px; }
+.catalog-candidate-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.catalog-candidate-card { background: #fff; border: 1px solid #bfd4c8; border-radius: 10px; overflow: hidden; }
+.catalog-candidate-card img { aspect-ratio: 4 / 3; background: #f5f7f7; display: block; object-fit: contain; width: 100%; }
+.catalog-candidate-card > div { display: grid; gap: 4px; padding: 9px; }
+.catalog-candidate-card span, .catalog-candidate-card small { color: var(--muted); font-size: 11px; }
+.catalog-candidate-card p { font-size: 12px; margin: 2px 0 0; }
+.catalog-candidate-caution { color: #765600; font-size: 11px; margin: 0; }
 .retrieval-badge { border-radius: 999px; font-size: 11px; font-weight: 800; justify-self: start; padding: 3px 8px; }
 .retrieval-badge.bge-m3 { background: #d8ecff; color: #144d79; }
 .retrieval-badge.safety-fallback { background: #fff1c8; color: #775500; }
@@ -645,7 +653,9 @@ a {
 
 /* 현장형 UI 확장 */
 .quick-toolbar { align-items: center; background: white; border: 1px solid var(--line); border-radius: 14px; display: flex; flex-wrap: wrap; gap: 10px; margin: 18px auto; max-width: 1500px; padding: 12px 14px; }
-.quick-toolbar button, .toolbar-upload { align-items: center; background: #f7fafb; border: 1px solid #cfdde3; border-radius: 10px; color: var(--navy); cursor: pointer; display: inline-flex; font-weight: 700; min-height: 40px; padding: 9px 13px; }
+.quick-toolbar button, .toolbar-upload { align-items: center; background: #f7fafb; border: 1px solid #cfdde3; border-radius: 10px; color: var(--navy); cursor: pointer; display: inline-flex; font-weight: 700; gap: 7px; min-height: 40px; padding: 9px 13px; }
+.quick-toolbar button:hover, .toolbar-upload:hover { background: #eaf4f5; border-color: var(--teal); color: #075f59; }
+.interface-icon { display: block; flex: 0 0 auto; height: 20px; width: 20px; }
 .quick-toolbar > span { color: var(--muted); font-size: 12px; margin-left: auto; }
 .toolbar-upload input, .file-icon input { display: none; }
 .field-overview-grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1.3fr) minmax(290px, .7fr); margin: 0 auto 18px; max-width: 1500px; }
@@ -659,9 +669,15 @@ a {
 .risk-overview-card p, .risk-overview-card small, .muted-copy { color: var(--muted); }
 .accident-chip-list { display: flex; flex-wrap: wrap; gap: 7px; justify-content: center; margin: 10px 0 15px; }
 .accident-chip-list span { background: #fff4e8; border: 1px solid #f1d2ae; border-radius: 999px; color: #8d541d; font-size: 12px; font-weight: 700; padding: 7px 10px; }
-.ppe-grid { display: grid; gap: 9px; grid-template-columns: repeat(2, 1fr); }
-.ppe-grid span { align-items: center; background: #f5f8fa; border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; font-size: 24px; gap: 5px; padding: 13px 7px; }
-.ppe-grid b { font-size: 12px; }
+.ppe-checklist { display: grid; gap: 9px; }
+.ppe-checklist label { align-items: center; background: #f7f9fa; border: 1px solid #d5e0e5; border-radius: 10px; cursor: pointer; display: grid; gap: 10px; grid-template-columns: 22px 30px 1fr auto; min-height: 51px; padding: 9px 12px; transition: background .15s, border-color .15s; }
+.ppe-checklist label:hover { border-color: var(--teal); }
+.ppe-checklist label.checked { background: #eaf7f4; border-color: #86c8ba; }
+.ppe-checklist input { height: 19px; margin: 0; width: 19px; accent-color: var(--teal); }
+.ppe-check-icon { align-items: center; background: #dfe8eb; border-radius: 50%; color: #6e8088; display: flex; font-size: 14px; font-weight: 900; height: 27px; justify-content: center; width: 27px; }
+.ppe-checklist .checked .ppe-check-icon { background: var(--teal); color: white; }
+.ppe-checklist b { font-size: 14px; }
+.ppe-checklist small { color: var(--muted); font-size: 11px; }
 .compact-heading { margin-bottom: 15px; }
 .upgraded-manual-row { grid-template-columns: minmax(220px, 340px) minmax(240px, 1fr); }
 .document-chip-list { display: flex !important; flex-direction: row; flex-wrap: wrap; gap: 7px; grid-column: 1 / -1; }
@@ -671,8 +687,10 @@ a {
 .chat-heading div { display: grid; gap: 3px; }
 .chat-heading span { color: var(--muted); font-size: 12px; }
 .chat-heading button { background: transparent; border: 0; color: var(--red); cursor: pointer; font-weight: 700; }
-.upgraded-chat .chat-input-row { grid-template-columns: 42px 42px 42px minmax(0, 1fr) 90px; }
-.icon-action { align-items: center; background: #f5f8fa !important; border: 1px solid #d5e0e5 !important; border-radius: 9px !important; color: var(--navy) !important; cursor: pointer; display: flex; height: 42px; justify-content: center; min-width: 42px; padding: 0 !important; }
+.upgraded-chat .chat-input-row { grid-template-columns: auto auto auto minmax(0, 1fr) 110px; }
+.icon-action { align-items: center; background: #f5f8fa !important; border: 1px solid #cbd9df !important; border-radius: 9px !important; color: var(--navy) !important; cursor: pointer; display: flex; font-size: 12px; font-weight: 800; gap: 5px; height: 42px; justify-content: center; min-width: 66px; padding: 0 10px !important; }
+.icon-action:hover { background: #e8f4f3 !important; border-color: var(--teal) !important; color: #075f59 !important; }
+.icon-action .interface-icon { height: 18px; width: 18px; }
 .search-progress { background: #f8fafb; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 18px; padding: 16px; }
 .status-pill.active { animation: status-pulse 1.2s ease-in-out infinite; }
 @keyframes status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
@@ -705,9 +723,10 @@ a {
 
 @media (max-width: 620px) {
   .progress-steps { grid-template-columns: repeat(2, 1fr); }
-  .upgraded-chat .chat-input-row { grid-template-columns: 40px 40px 40px 1fr; }
+  .upgraded-chat .chat-input-row { grid-template-columns: repeat(3, 1fr) 90px; }
   .upgraded-chat .chat-input-row > input { grid-column: 1 / -1; grid-row: 2; }
   .upgraded-chat .chat-input-row > button[type="submit"] { grid-column: 4; grid-row: 1; }
+  .icon-action { min-width: 0; padding: 0 7px !important; }
   .signup-grid { grid-template-columns: 1fr; }
   .signup-grid label:last-child { grid-column: auto; }
   .prototype-shell { padding: 0; }
