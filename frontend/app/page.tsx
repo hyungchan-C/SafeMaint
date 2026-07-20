@@ -362,7 +362,13 @@ function WorkspaceScreen({
   const [calibratedEquipment, setCalibratedEquipment] = useState<VirtualEquipment[]>([]);
   const [gpsResult, setGpsResult] = useState<GpsCheckResponse | null>(null);
   const [isGpsChecking, setIsGpsChecking] = useState(false);
+  const [gpsSource, setGpsSource] = useState<"default" | "real">("default");
+  const [gpsPermissionDenied, setGpsPermissionDenied] = useState(false);
+  const [manualLatitude, setManualLatitude] = useState("37.5665");
+  const [manualLongitude, setManualLongitude] = useState("126.9780");
   const gpsWatchIdRef = useRef<number | null>(null);
+  const gpsOriginRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  const gpsOriginLockedRef = useRef(false);
   const [activeTab, setActiveTab] = useState<"summary" | "accidents" | "evidence" | "tbm">("summary");
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -410,39 +416,48 @@ function WorkspaceScreen({
   }, [volume, fontSize, autoSpeak]);
 
   useEffect(() => {
-    if (typeof navigator === "undefined" || !navigator.geolocation) {
-      setLocationStatus("위치 기능 미지원(브라우저)");
-      return;
-    }
+    // 실제 GPS 권한/응답을 기다리지 않고, 기본 좌표로 즉시 한 번 확인해 화면에
+    // "자동으로 위치가 잡혀 있는" 상태를 바로 보여준다. 실제 위치 추적이 성공하면
+    // 아래 효과가 이어서 이 값을 진짜 위치로 갱신하고, 화면에 어느 쪽인지 표시한다.
+    recalibrateManualLocation(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    let cancelled = false;
-    setLocationStatus("실제 위치 확인 중...");
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) return;
 
-    navigator.geolocation.getCurrentPosition(
+    // getCurrentPosition을 한 번만 부르고 성공했을 때만 watchPosition을 시작하면,
+    // 이 최초 시도가 실패하는 PC에서는 이후 실제로 위치가 잡혀도(예: 개발자도구
+    // Sensors로 위치를 바꾸는 경우 포함) 영원히 감지되지 않는다. 그래서 처음부터
+    // watchPosition 하나로 계속 감시하면서, 오는 업데이트를 그때그때 반영한다.
+    // gpsOriginRef는 "지금 기준점이 무엇인가"를 항상 최신으로 들고 있어서, 수동으로
+    // 위치를 다시 잡은 뒤에도 이어지는 실제 위치 변화가 그 기준점 대비로 계속 반영된다.
+    const watchId = navigator.geolocation.watchPosition(
       (position) => {
-        if (cancelled) return;
-        const origin = { latitude: position.coords.latitude, longitude: position.coords.longitude };
-        setGpsOrigin(origin);
-        void loadCalibratedEquipment(origin);
-
-        gpsWatchIdRef.current = navigator.geolocation.watchPosition(
-          (update) => {
-            const current = { latitude: update.coords.latitude, longitude: update.coords.longitude };
-            setGpsLivePosition(current);
-            void checkLocation(current.latitude, current.longitude, origin);
-          },
-          () => setLocationStatus("위치 추적 중 오류가 발생했습니다"),
-          { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 },
-        );
+        setGpsPermissionDenied(false);
+        const current = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+        if (!gpsOriginLockedRef.current) {
+          gpsOriginLockedRef.current = true;
+          gpsOriginRef.current = current;
+          setGpsOrigin(current);
+          void loadCalibratedEquipment(current);
+        }
+        // 기준점(설비 배치)을 옮기는 것과 별개로, 이 결과가 "실제 위치"에서 온
+        // 것이라는 표시는 실제 위치 업데이트가 올 때마다 매번 갱신한다.
+        setGpsSource("real");
+        setGpsLivePosition(current);
+        void checkLocation(current.latitude, current.longitude, gpsOriginRef.current ?? current);
       },
-      () => setLocationStatus("위치 권한이 필요합니다"),
-      { enableHighAccuracy: true, timeout: 10000 },
+      (watchError) => {
+        // 권한 차단은 조용히 넘기면 사용자가 원인을 알 수 없으므로 명확히 표시한다.
+        // 그 외(시간 초과·신호 약화 등)는 흔한 일이므로 마지막 상태를 그대로 유지한다.
+        if (watchError.code === watchError.PERMISSION_DENIED) setGpsPermissionDenied(true);
+      },
+      { enableHighAccuracy: false, maximumAge: 10_000, timeout: 20_000 },
     );
+    gpsWatchIdRef.current = watchId;
 
-    return () => {
-      cancelled = true;
-      if (gpsWatchIdRef.current !== null) navigator.geolocation.clearWatch(gpsWatchIdRef.current);
-    };
+    return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
   useEffect(() => () => {
@@ -708,6 +723,48 @@ function WorkspaceScreen({
     }
   }
 
+  function parseManualCoordinates(): { latitude: number; longitude: number } | null {
+    const latitude = Number(manualLatitude);
+    const longitude = Number(manualLongitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      setLocationStatus("위도/경도를 올바르게 입력해 주세요");
+      return null;
+    }
+    return { latitude, longitude };
+  }
+
+  // lockOrigin=true(기본값)는 사용자가 명시적으로 기준점을 다시 잡는 경우로,
+  // 이후 실제 GPS가 잡혀도 이 기준점을 몰래 덮어쓰지 않도록 잠근다.
+  // mount 시 자동 기본값 설정만 lockOrigin=false로 호출해, 실제 GPS가 처음
+  // 잡히면 그쪽으로 자동 승격될 수 있게 열어둔다.
+  function recalibrateManualLocation(lockOrigin = true) {
+    const point = parseManualCoordinates();
+    if (!point) return;
+    gpsOriginRef.current = point;
+    if (lockOrigin) gpsOriginLockedRef.current = true;
+    setGpsOrigin(point);
+    setGpsLivePosition(point);
+    setGpsSource("default");
+    void loadCalibratedEquipment(point);
+    void checkLocation(point.latitude, point.longitude, point);
+  }
+
+  function checkManualLocation() {
+    const point = parseManualCoordinates();
+    if (!point) return;
+    if (!gpsOriginRef.current) {
+      gpsOriginRef.current = point;
+      gpsOriginLockedRef.current = true;
+      setGpsOrigin(point);
+      void loadCalibratedEquipment(point);
+    }
+    // 수동 입력으로 확인한 결과이므로, 직전에 실제 위치로 표시돼 있었더라도
+    // 지금 보여주는 결과의 출처는 "기본 테스트 좌표"로 명확히 되돌린다.
+    setGpsSource("default");
+    setGpsLivePosition(point);
+    void checkLocation(point.latitude, point.longitude, gpsOriginRef.current);
+  }
+
   function stopSpeech() {
     const source = audioSourceRef.current;
     if (!source) return false;
@@ -855,16 +912,24 @@ function WorkspaceScreen({
         <span>{locationStatus}</span>
       </section>
 
-      <section className="panel gps-map-panel" aria-label="가상 GPS 자동 위치 추적">
-        <div className="panel-heading compact-heading">
-          <div><span className="section-number">GPS</span><h2>가상 GPS 자동 위치 추적</h2></div>
+      <details className="assessment-drawer gps-drawer">
+        <summary>
+          📍 가상 GPS 자동 위치 추적 열기
           <span className={isGpsChecking ? "status-pill active" : "status-pill"}>{locationStatus}</span>
-        </div>
+          <span className="panel-tag muted">{gpsSource === "real" ? "실제 위치 사용 중" : "기본 테스트 좌표 사용 중"}</span>
+        </summary>
+        <section className="panel gps-map-panel" aria-label="가상 GPS 자동 위치 추적">
         <p className="muted-copy">
-          브라우저 위치 권한을 허용하면, 지금 계신 곳을 기준으로 가상 설비들이 주변에 배치됩니다.
-          이후 실제로 움직이면 자동으로 위치를 다시 확인해 근처 설비의 체크리스트를 보여줍니다.
+          브라우저가 실제 위치를 확인하면 자동으로 그 위치 기준으로 전환되고, 실패하면 기본 테스트 좌표를 사용합니다.
+          아래 위경도 값을 바꿔서 "이동"을 시뮬레이션할 수도 있습니다(수동으로 확인하면 실제 위치 대신 그 값이 기준이 됩니다).
           (점선 원은 설비별 근접 판정 반경 {GPS_EQUIPMENT_RADIUS_M}m)
         </p>
+        {gpsPermissionDenied && (
+          <p className="error-message">
+            이 브라우저에서 위치 권한이 차단되어 있어 실제 위치로 전환될 수 없습니다.
+            주소창 왼쪽의 자물쇠(사이트 정보) 아이콘 → 위치 권한을 "허용"으로 바꾼 뒤 새로고침해 주세요.
+          </p>
+        )}
         {gpsMapCenter ? (
           <div className="gps-map" style={{ width: GPS_MAP_SIZE_PX, height: GPS_MAP_SIZE_PX }}>
             {calibratedEquipment.map((eq) => {
@@ -896,6 +961,33 @@ function WorkspaceScreen({
         ) : (
           <p className="muted-copy">위치 권한을 허용하면 지도가 표시됩니다.</p>
         )}
+        <div className="gps-manual-input">
+          <p className="muted-copy">기본 좌표로 이미 자동 확인되어 있습니다. 다른 위치를 테스트하려면 값을 바꿔서 확인해 보세요.</p>
+          <div className="gps-manual-fields">
+            <label>
+              위도
+              <input
+                value={manualLatitude}
+                onChange={(event) => setManualLatitude(event.target.value)}
+                inputMode="decimal"
+              />
+            </label>
+            <label>
+              경도
+              <input
+                value={manualLongitude}
+                onChange={(event) => setManualLongitude(event.target.value)}
+                inputMode="decimal"
+              />
+            </label>
+            <button type="button" onClick={checkManualLocation} disabled={isGpsChecking}>
+              이 위치로 확인
+            </button>
+            <button type="button" onClick={() => recalibrateManualLocation()} disabled={isGpsChecking}>
+              이 위치로 다시 보정
+            </button>
+          </div>
+        </div>
       </section>
 
       {gpsResult && (() => {
@@ -943,6 +1035,7 @@ function WorkspaceScreen({
           </section>
         );
       })()}
+      </details>
 
       <section className="field-overview-grid">
         <article className={`risk-overview-card risk-${highestRisk}`}>
