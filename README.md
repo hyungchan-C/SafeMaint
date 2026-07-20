@@ -518,6 +518,8 @@ worker가 고객사 서버 안에서 PyMuPDF로 텍스트를 추출하고 BGE-M3
 
 패키지는 안전한 ZIP 안에 canonical JSON인 `manifest.json`, `documents.jsonl`, `chunks.jsonl`, `signature.ed25519`만 포함합니다. pickle은 사용하지 않습니다. manifest에는 패키지·스키마 버전, 모델, 차원, 출처 유형, 문서/청크 수, 파일별 SHA-256, 이전 버전 정보가 들어갑니다.
 
+`safemaint_api_data`에는 국내재해·사고사망 및 안전보건법령 스마트검색 수집기와 공용 패키지 생성기가 있습니다. 각 하위 프로젝트의 `output/`은 로컬 생성 데이터이므로 Git에 포함되지 않습니다. 공용 패키지 생성기는 별도 `rag_documents`/`rag_chunks` 테이블이나 직접 적재 SQL을 만들지 않고, 기존 Alembic `documents`/`document_chunks` 형식과 아래 Ed25519 검증 CLI를 사용합니다. 자세한 입력 규격과 빌드 명령은 `safemaint_api_data/safemaint_public_rag_package/README.md`를 참고하세요.
+
 중앙 생성 환경에서 Ed25519 키를 별도 비밀 저장소에 보관하고 다음 CLI를 사용합니다.
 
 ```powershell

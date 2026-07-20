@@ -1,0 +1,12 @@
+{
+  "package_name": "public_safety_rag_package",
+  "package_version": "1.0.0",
+  "chunk_size_chars": 700,
+  "chunk_overlap_chars": 100,
+  "embedding_model": "BAAI/bge-m3",
+  "embedding_dimension": 1024,
+  "embedding_max_length": 1024,
+  "embedding_batch_size_gpu": 8,
+  "embedding_batch_size_cpu": 2,
+  "normalize_embeddings": true
+}
