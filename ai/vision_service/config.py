@@ -18,7 +18,9 @@ class Settings:
     enable_qwen: bool = _as_bool("VISION_ENABLE_QWEN", True)
     max_new_tokens: int = int(getenv("VISION_MAX_NEW_TOKENS", "128"))
     qwen_max_pixels: int = int(getenv("VISION_QWEN_MAX_PIXELS", str(1024 * 1024)))
-    embedding_model: str = getenv("VISION_EMBEDDING_MODEL", "facebook/dinov2-small")
+    embedding_model: str = getenv(
+        "VISION_EMBEDDING_MODEL", "google/siglip2-base-patch16-naflex"
+    )
     embedding_device: str = getenv("VISION_EMBEDDING_DEVICE", "cpu")
     catalog_index_dir: str = getenv("VISION_CATALOG_INDEX_DIR", "/tmp/safemaint-catalogs")
     catalog_match_threshold: float = float(getenv("VISION_CATALOG_MATCH_THRESHOLD", "0.55"))

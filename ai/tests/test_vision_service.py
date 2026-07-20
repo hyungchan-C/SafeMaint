@@ -8,7 +8,7 @@ from vision_service.analyzer import (
 )
 from vision_service.schemas import CatalogItem
 from vision_service.config import Settings
-from vision_service.catalog_matcher import _feature
+from vision_service.catalog_matcher import CatalogImageMatcher, _feature
 from PIL import Image, ImageDraw
 import numpy as np
 
@@ -80,3 +80,15 @@ def test_offline_catalog_feature_is_stable_across_white_margins() -> None:
     similarity = float(np.dot(_feature(small), _feature(large)))
 
     assert similarity > 0.98
+
+
+def test_small_part_search_uses_overlapping_detail_views() -> None:
+    image = Image.new("RGB", (1000, 800), "black")
+
+    views = CatalogImageMatcher._query_views(image)
+
+    assert len(views) == 7
+    assert views[0].size == (1000, 800)
+    assert len({view.size for view in views[1:]}) == 1
+    assert views[1].width < image.width
+    assert views[1].height < image.height

@@ -432,11 +432,12 @@ git pull origin dev
 
 `docker-compose.vision.yml`은 인터넷이 없는 현장을 위한 선택 서비스입니다.
 PaddleOCR-VL 0.9B가 카탈로그의 글자·표·레이아웃을 추출하고,
-DINOv2-small이 PDF에서 추출한 제품 이미지와 현장 사진의 외형 후보를 검색하며,
+SigLIP2-base NaFlex가 PDF에서 추출한 제품 이미지와 원본·다중 확대 현장 사진의 외형 후보를 검색하고,
 Qwen3-VL-2B-Instruct가 이미지 구조화와 후보 의미 검토를 수행합니다. 모델은 모두 로컬에
 저장되며 OpenAI API 키를 사용하지 않습니다.
 
-사진 첨부는 2단계로 동작합니다. 먼저 `analysis_mode=fast`가 DINOv2 임베딩의 일괄
+사진 첨부는 2단계로 동작합니다. 먼저 `analysis_mode=fast`가 원본과 겹치는 확대 영역을
+SigLIP2 배치 임베딩으로 일괄
 행렬 검색으로 후보를 즉시 표시하고, 이어서 `analysis_mode=deep`가 Qwen 검토를
 수행해 같은 화면의 후보와 채팅 문맥을 정밀 결과로 갱신합니다. 현장 사진에서는 느린
 문서용 PaddleOCR-VL을 생략하며, Qwen 입력은 최대 1,048,576픽셀로 제한합니다. 빠른 후보에는 모델·규격

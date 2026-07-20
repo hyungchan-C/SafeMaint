@@ -22,11 +22,14 @@ class _SemanticEmbedder:
         self._processor = None
 
     def encode(self, image: Image.Image) -> np.ndarray:
+        return self.encode_many([image])[0]
+
+    def encode_many(self, images: list[Image.Image]) -> np.ndarray:
         import torch
-        from transformers import AutoImageProcessor, AutoModel
+        from transformers import AutoModel, AutoProcessor
 
         if self._model is None:
-            self._processor = AutoImageProcessor.from_pretrained(
+            self._processor = AutoProcessor.from_pretrained(
                 self.model_name,
                 cache_dir=self.cache_dir,
                 use_fast=True,
@@ -38,13 +41,19 @@ class _SemanticEmbedder:
             torch.set_num_threads(min(4, torch.get_num_threads()))
         assert self._processor is not None
         with torch.inference_mode():
-            inputs = self._processor(images=image.convert("RGB"), return_tensors="pt")
+            inputs = self._processor(
+                images=[image.convert("RGB") for image in images],
+                return_tensors="pt",
+            )
             inputs = {key: value.to(self.device) for key, value in inputs.items()}
-            outputs = self._model(**inputs)
-            vector = outputs.last_hidden_state[:, 0].squeeze(0)
-        result = vector.float().cpu().numpy()
-        norm = float(np.linalg.norm(result))
-        return result / norm if norm else result
+            if hasattr(self._model, "get_image_features"):
+                vectors = self._model.get_image_features(**inputs)
+            else:
+                outputs = self._model(**inputs)
+                vectors = outputs.last_hidden_state[:, 0]
+        result = vectors.float().cpu().numpy()
+        norms = np.linalg.norm(result, axis=1, keepdims=True)
+        return result / np.maximum(norms, 1e-12)
 
 
 def _feature(image: Image.Image) -> np.ndarray:
@@ -84,7 +93,7 @@ class CatalogImageMatcher:
         max_pages: int = 500,
         max_images: int = 5000,
         max_image_pixels: int = 40_000_000,
-        embedding_model: str = "facebook/dinov2-small",
+        embedding_model: str = "google/siglip2-base-patch16-naflex",
         embedding_device: str = "cpu",
         model_cache_dir: str = "/models",
     ) -> None:
@@ -97,9 +106,28 @@ class CatalogImageMatcher:
         self.embedding_model = embedding_model
         self.embedder = _SemanticEmbedder(embedding_model, embedding_device, model_cache_dir)
 
+    @staticmethod
+    def _query_views(image: Image.Image) -> list[Image.Image]:
+        """Return full image plus overlapping detail views for hand-held small parts."""
+        width, height = image.size
+        crop_width = max(64, int(width * 0.58))
+        crop_height = max(64, int(height * 0.58))
+        if crop_width >= width or crop_height >= height:
+            return [image]
+        positions = (
+            (0, 0), (width - crop_width, 0),
+            (0, height - crop_height), (width - crop_width, height - crop_height),
+            ((width - crop_width) // 2, (height - crop_height) // 2),
+            ((width - crop_width) // 2, height - crop_height),
+        )
+        return [image, *(
+            image.crop((left, top, left + crop_width, top + crop_height))
+            for left, top in positions
+        )]
+
     def index_pdf(self, pdf_path: Path, filename: str) -> CatalogIndexResponse:
         data = pdf_path.read_bytes()
-        index_version = f"safemaint-matrix-v3:{self.embedding_model}".encode()
+        index_version = f"safemaint-matrix-v4:{self.embedding_model}".encode()
         catalog_id = hashlib.sha256(data + index_version).hexdigest()[:20]
         target = self.root / catalog_id
         manifest_path = target / "manifest.json"
@@ -165,7 +193,7 @@ class CatalogImageMatcher:
         query_image = Image.open(image_path)
         if query_image.width * query_image.height > self.max_image_pixels:
             raise ValueError(f"이미지 픽셀 수는 {self.max_image_pixels}개를 넘을 수 없습니다.")
-        query = self.embedder.encode(query_image)
+        queries = self.embedder.encode_many(self._query_views(query_image))
         scored: list[CatalogCandidate] = []
         for catalog_id in catalog_ids:
             manifest_path = self.root / catalog_id / "manifest.json"
@@ -177,9 +205,11 @@ class CatalogImageMatcher:
             matrix_path = self.root / catalog_id / "embeddings.npy"
             if matrix_path.exists():
                 matrix = np.load(matrix_path, mmap_mode="r", allow_pickle=False)
-                if matrix.ndim != 2 or matrix.shape[1:] != query.shape or matrix.shape[0] < len(entries):
+                if matrix.ndim != 2 or matrix.shape[1] != queries.shape[1] or matrix.shape[0] < len(entries):
                     continue
-                similarities = np.asarray(matrix[: len(entries)] @ query, dtype=np.float32)
+                similarities = np.asarray(
+                    np.max(matrix[: len(entries)] @ queries.T, axis=1), dtype=np.float32
+                )
             else:
                 # Compatibility for indexes created before the matrix format.
                 legacy_vectors = []
@@ -189,13 +219,13 @@ class CatalogImageMatcher:
                     if not feature:
                         continue
                     candidate = np.load(self.root / catalog_id / str(feature), allow_pickle=False)
-                    if candidate.shape == query.shape:
+                    if candidate.shape == queries.shape[1:]:
                         legacy_vectors.append(candidate)
                         compatible_entries.append(entry)
                 if not legacy_vectors:
                     continue
                 entries = compatible_entries
-                similarities = np.stack(legacy_vectors) @ query
+                similarities = np.max(np.stack(legacy_vectors) @ queries.T, axis=1)
             for entry, raw_similarity in zip(entries, similarities):
                 similarity = max(0.0, min(1.0, float(raw_similarity)))
                 if similarity < self.threshold:
