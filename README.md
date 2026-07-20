@@ -433,7 +433,7 @@ git pull origin dev
 `docker-compose.vision.yml`은 인터넷이 없는 현장을 위한 선택 서비스입니다.
 PaddleOCR-VL 0.9B가 카탈로그의 글자·표·레이아웃을 추출하고,
 DINOv2-small이 PDF에서 추출한 제품 이미지와 현장 사진의 외형 후보를 검색하며,
-Qwen3-VL-4B-Instruct가 이미지 구조화와 후보 의미 검토를 수행합니다. 모델은 모두 로컬에
+Qwen3-VL-2B-Instruct가 이미지 구조화와 후보 의미 검토를 수행합니다. 모델은 모두 로컬에
 저장되며 OpenAI API 키를 사용하지 않습니다.
 
 사진 첨부는 2단계로 동작합니다. 먼저 `analysis_mode=fast`가 DINOv2 임베딩의 일괄

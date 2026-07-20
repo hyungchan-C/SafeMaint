@@ -6,7 +6,7 @@ services:
       dockerfile: Dockerfile.vision
     restart: unless-stopped
     environment:
-      VISION_QWEN_MODEL: ${VISION_QWEN_MODEL:-Qwen/Qwen3-VL-4B-Instruct}
+      VISION_QWEN_MODEL: ${VISION_QWEN_MODEL:-Qwen/Qwen3-VL-2B-Instruct}
       VISION_PADDLE_MODEL: ${VISION_PADDLE_MODEL:-PaddlePaddle/PaddleOCR-VL}
       VISION_MODEL_CACHE_DIR: /models
       VISION_DEVICE: ${VISION_DEVICE:-cuda}

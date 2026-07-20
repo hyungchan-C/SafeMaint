@@ -8,7 +8,7 @@ def _as_bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    qwen_model: str = getenv("VISION_QWEN_MODEL", "Qwen/Qwen3-VL-4B-Instruct")
+    qwen_model: str = getenv("VISION_QWEN_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
     paddle_model: str = getenv("VISION_PADDLE_MODEL", "PaddlePaddle/PaddleOCR-VL")
     model_cache_dir: str = getenv("VISION_MODEL_CACHE_DIR", "/models")
     device: str = getenv("VISION_DEVICE", "cuda")
