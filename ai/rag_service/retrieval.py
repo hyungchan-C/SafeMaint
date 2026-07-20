@@ -289,13 +289,10 @@ class PgvectorRetriever:
                           AND dt.scope = 'company'
                           AND (%s OR d.access_level <> 'private')
                           AND (%s OR d.site_id::text = ANY(%s))
-                          AND (
-                              %s
-                              OR d.id = ANY(%s::uuid[])
-                              OR dv.id = ANY(%s::uuid[])
-                          )
                       )
                   )
+                  AND (%s OR d.id = ANY(%s::uuid[]))
+                  AND (%s OR dv.id = ANY(%s::uuid[]))
                   {scope_clause}
                   AND dc.embedding_status = 'ready'
                   AND dc.embedding IS NOT NULL
@@ -329,7 +326,8 @@ class PgvectorRetriever:
         vector = self.embedder.encode(search_query)
         selected_documents = request.context.effective_document_ids()
         selected_versions = tuple(request.context.selected_document_version_ids)
-        include_all_allowed_company = not selected_documents and not selected_versions
+        include_all_documents = not selected_documents
+        include_all_versions = not selected_versions
         parameters = (
             vector,
             search_query,
@@ -337,8 +335,9 @@ class PgvectorRetriever:
             request.access_scope.allow_private,
             request.access_scope.all_sites,
             request.access_scope.site_ids,
-            include_all_allowed_company,
+            include_all_documents,
             list(selected_documents),
+            include_all_versions,
             list(selected_versions),
             *scope_parameters,
             self.settings.model_name,

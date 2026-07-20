@@ -56,3 +56,9 @@ sr_할 일.md
 ai/preprocessing/run_test_other_pdf.py
 ai/preprocessing/run_test_phox_pdf.py
 ai/preprocessing/run_test_pq_pdf.py
+
+# SafeMaint API data generated artifacts stay local and are never committed
+/safemaint_api_data/**/output/
+/safemaint_api_data/safemaint_public_rag_package/output/
+/safemaint_api_data/safemaint_qwen35_9b_finetuning_result/01_finetuned_model/best_adapter/
+/safemaint_api_data/safemaint_qwen35_9b_finetuning_result/01_finetuned_model/tokenizer/

@@ -19,7 +19,7 @@ export interface ChatResponse {
 }
 
 export interface CatalogCandidate {
-  catalog_id: string;
+  document_id: string;
   filename: string;
   page: number;
   image_index: number;

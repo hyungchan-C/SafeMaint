@@ -14,6 +14,23 @@ type LocalUser = {
   id: string;
   username: string;
   displayName: string;
+  accessToken: string;
+};
+
+type StoredSession = {
+  username: string;
+  displayName: string;
+  accessToken: string;
+};
+
+type LoginApiResponse = {
+  access_token?: string;
+  user?: {
+    id?: string;
+    employee_number?: string;
+    name?: string;
+  };
+  detail?: string;
 };
 
 type HistoryItem = {
@@ -59,7 +76,6 @@ function metersOffsetFromCenter(center: { lat: number; lon: number }, lat: numbe
 const STORAGE_KEYS = {
   users: "safemaint.users",
   session: "safemaint.session",
-  accessToken: "safemaint.accessToken",
   history: "safemaint.history",
   settings: "safemaint.settings",
   workspacePrefix: "safemaint.workspace.",
@@ -67,13 +83,7 @@ const STORAGE_KEYS = {
 
 type WorkspaceSnapshot = {
   manuals: string[];
-  catalogIndexes: Record<string, string>;
   selectedDocumentIds: string[];
-  sitePhotoName: string;
-  visionSummary: string;
-  visionStatus: string;
-  catalogCandidates: CatalogCandidate[];
-  messages: ChatMessage[];
 };
 
 function readStorage<T>(key: string, fallback: T): T {
@@ -103,6 +113,10 @@ function removeStorage(key: string) {
   }
 }
 
+function getAccessToken(): string {
+  return readStorage<StoredSession | null>(STORAGE_KEYS.session, null)?.accessToken ?? "";
+}
+
 function refersToAttachedPhoto(question: string): boolean {
   return /(이건|이게|이것|이거|저건|저게|그건|그게|뭐야|무엇|어디에\s*쓰|용도|쓰이는|사용하는|어떤\s*(부품|제품)|비슷한|같은\s*(부품|제품)|후보)/i.test(question);
 }
@@ -113,24 +127,36 @@ export default function HomePage() {
   const [displayName, setDisplayName] = useState("");
 
   useEffect(() => {
-    const session = readStorage<{ username: string; displayName: string } | null>(STORAGE_KEYS.session, null);
-    if (session) {
+    const session = readStorage<StoredSession | null>(STORAGE_KEYS.session, null);
+    if (session?.accessToken) {
       setUsername(session.username);
       setDisplayName(session.displayName);
       setPage("workspace");
+    } else if (session) {
+      removeStorage(STORAGE_KEYS.session);
     }
   }, []);
 
   function handleLogin(user: LocalUser) {
     setUsername(user.username);
     setDisplayName(user.displayName);
-    writeStorage(STORAGE_KEYS.session, { username: user.username, displayName: user.displayName });
+    writeStorage<StoredSession>(STORAGE_KEYS.session, {
+      username: user.username,
+      displayName: user.displayName,
+      accessToken: user.accessToken,
+    });
     setPage("workspace");
   }
 
   function handleLogout() {
+    const session = readStorage<StoredSession | null>(STORAGE_KEYS.session, null);
+    if (session?.accessToken) {
+      void fetch(`${getApiBaseUrl()}/api/v1/auth/logout`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.accessToken}` },
+      }).catch(() => undefined);
+    }
     removeStorage(STORAGE_KEYS.session);
-    removeStorage(STORAGE_KEYS.accessToken);
     setUsername("");
     setDisplayName("");
     setPage("login");
@@ -171,17 +197,22 @@ function LoginScreen({ onLogin }: { onLogin: (user: LocalUser) => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ employee_number: loginId, password }),
       });
-      const payload = await response.json() as {
-        access_token?: string;
-        user?: { id?: string; employee_number?: string; name?: string };
-        detail?: string;
-      };
-      const user = payload.user;
-      if (!response.ok || !payload.access_token || !user?.id || !user.employee_number || !user.name) {
+      const payload = await response.json() as LoginApiResponse;
+      if (
+        !response.ok
+        || !payload.access_token
+        || !payload.user?.id
+        || !payload.user.employee_number
+        || !payload.user.name
+      ) {
         throw new Error(payload.detail || "로그인에 실패했습니다.");
       }
-      writeStorage(STORAGE_KEYS.accessToken, payload.access_token);
-      onLogin({ id: user.id, username: user.employee_number, displayName: user.name });
+      onLogin({
+        id: payload.user.id,
+        username: payload.user.employee_number,
+        displayName: payload.user.name,
+        accessToken: payload.access_token,
+      });
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.");
     } finally {
@@ -319,7 +350,6 @@ function WorkspaceScreen({
   const [fontSize, setFontSize] = useState<FontSize>("medium");
   const [autoSpeak, setAutoSpeak] = useState(false);
   const [manuals, setManuals] = useState<string[]>([]);
-  const [catalogIndexes, setCatalogIndexes] = useState<Record<string, string>>({});
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
   const [manualStatus, setManualStatus] = useState("");
   const [sitePhotoName, setSitePhotoName] = useState("");
@@ -362,13 +392,7 @@ function WorkspaceScreen({
     const saved = readStorage<WorkspaceSnapshot | null>(`${STORAGE_KEYS.workspacePrefix}${username}`, null);
     if (saved) {
       setManuals(saved.manuals ?? []);
-      setCatalogIndexes(saved.catalogIndexes ?? {});
       setSelectedDocumentIds(saved.selectedDocumentIds ?? []);
-      setSitePhotoName(saved.sitePhotoName ?? "");
-      setVisionSummary(saved.visionSummary ?? "");
-      setVisionStatus(saved.visionStatus ?? "");
-      setCatalogCandidates(saved.catalogCandidates ?? []);
-      setMessages(saved.messages ?? []);
     }
     setWorkspaceRestored(true);
   }, [username]);
@@ -377,15 +401,9 @@ function WorkspaceScreen({
     if (!workspaceRestored) return;
     writeStorage(`${STORAGE_KEYS.workspacePrefix}${username}`, {
       manuals,
-      catalogIndexes,
       selectedDocumentIds,
-      sitePhotoName,
-      visionSummary,
-      visionStatus,
-      catalogCandidates,
-      messages,
     } satisfies WorkspaceSnapshot);
-  }, [catalogCandidates, catalogIndexes, manuals, messages, selectedDocumentIds, sitePhotoName, username, visionStatus, visionSummary, workspaceRestored]);
+  }, [manuals, selectedDocumentIds, username, workspaceRestored]);
 
   useEffect(() => {
     if (typeof window !== "undefined") writeStorage(STORAGE_KEYS.settings, { volume, fontSize, autoSpeak });
@@ -501,9 +519,13 @@ function WorkspaceScreen({
     setMessages((current) => [...current, { role: "user", text: submittedQuestion }]);
 
     try {
+      const token = getAccessToken();
       const response = await fetch(`${getApiBaseUrl()}/api/v1/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
           question: submittedQuestion,
           context: {
@@ -538,11 +560,13 @@ function WorkspaceScreen({
           catalogCandidates: candidatesForAnswer,
         },
       ]);
-      saveHistory(
-        submittedQuestion,
-        `${payload.answer.slice(0, 180)}${payload.answer.length > 180 ? "…" : ""}`,
-        "검토 필요",
-      );
+      if (!visionSummary) {
+        saveHistory(
+          submittedQuestion,
+          `${payload.answer.slice(0, 180)}${payload.answer.length > 180 ? "…" : ""}`,
+          "검토 필요",
+        );
+      }
       if (autoSpeak) {
         void playSpeech(payload.answer);
       }
@@ -561,7 +585,7 @@ function WorkspaceScreen({
 
   async function addManuals(files: FileList | null) {
     if (!files) return;
-    const token = readStorage<string>(STORAGE_KEYS.accessToken, "");
+    const token = getAccessToken();
     setManualStatus("문서를 등록하고 로컬 이미지 인덱스를 생성하는 중...");
     try {
       for (const file of Array.from(files)) {
@@ -580,17 +604,16 @@ function WorkspaceScreen({
         if (!uploadResponse.ok || !uploadPayload?.document_id) throw new Error(uploadPayload?.detail || `${file.name} 문서 등록 실패`);
 
         const indexBody = new FormData();
-        indexBody.append("file", file);
+        indexBody.append("document_id", uploadPayload.document_id);
         const indexResponse = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/index`, {
           method: "POST",
           headers: { Authorization: `Bearer ${token}` },
           body: indexBody,
         });
-        const indexPayload = await indexResponse.json().catch(() => null) as { catalog_id?: string; detail?: string } | null;
-        if (!indexResponse.ok || !indexPayload?.catalog_id) throw new Error(indexPayload?.detail || `${file.name} 이미지 인덱싱 실패`);
+        const indexPayload = await indexResponse.json().catch(() => null) as { document_id?: string; detail?: string } | null;
+        if (!indexResponse.ok || indexPayload?.document_id !== uploadPayload.document_id) throw new Error(indexPayload?.detail || `${file.name} 이미지 인덱싱 실패`);
         setManuals((current) => Array.from(new Set([...current, file.name])));
         setSelectedDocumentIds((current) => Array.from(new Set([...current, uploadPayload.document_id!])));
-        setCatalogIndexes((current) => ({ ...current, [file.name]: indexPayload.catalog_id! }));
       }
       setManualStatus("문서 등록 완료 · 승인 및 RAG 처리 후 검색 근거로 사용됩니다.");
     } catch (requestError) {
@@ -601,13 +624,13 @@ function WorkspaceScreen({
   async function analyzePhoto(file: File | undefined) {
     if (!file) return;
     setIsVisionLoading(true);
-    const token = readStorage<string>(STORAGE_KEYS.accessToken, "");
+    const token = getAccessToken();
     setSitePhotoName(file.name);
     setVisionStatus("로컬 이미지 분석 중...");
     setCatalogCandidates([]);
     const body = new FormData();
     body.append("file", file);
-    body.append("catalog_ids", JSON.stringify(Object.values(catalogIndexes)));
+    body.append("document_ids", JSON.stringify(selectedDocumentIds));
     try {
       const response = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/match`, {
         method: "POST",
@@ -963,7 +986,7 @@ function WorkspaceScreen({
                   <strong>사진과 유사한 카탈로그 후보</strong>
                   <div className="catalog-candidate-grid">
                     {message.catalogCandidates.map((candidate, candidateIndex) => (
-                      <article className="catalog-candidate-card" key={`${candidate.catalog_id}-${candidate.page}-${candidate.image_index}`}>
+                      <article className="catalog-candidate-card" key={`${candidate.document_id}-${candidate.page}-${candidate.image_index}`}>
                         <SecureCandidateImage candidate={candidate} alt={`후보 ${candidateIndex + 1}`} />
                         <div>
                           <strong>후보 {candidateIndex + 1} · {candidate.visual_category || "제품 종류 확인 불가"}</strong>
@@ -1083,8 +1106,8 @@ function SecureCandidateImage({ candidate, alt }: { candidate: CatalogCandidate;
   useEffect(() => {
     let active = true;
     let objectUrl = "";
-    const token = readStorage<string>(STORAGE_KEYS.accessToken, "");
-    void fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/image/${candidate.catalog_id}/${candidate.page}/${candidate.image_index}`, {
+    const token = getAccessToken();
+    void fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/image/${candidate.document_id}/${candidate.page}/${candidate.image_index}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((response) => {
@@ -1100,7 +1123,7 @@ function SecureCandidateImage({ candidate, alt }: { candidate: CatalogCandidate;
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [candidate.catalog_id, candidate.image_index, candidate.page]);
+  }, [candidate.document_id, candidate.image_index, candidate.page]);
 
   return source ? <img src={source} alt={alt} loading="lazy" /> : <div className="catalog-image-placeholder">이미지 불러오는 중</div>;
 }

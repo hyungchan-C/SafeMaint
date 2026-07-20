@@ -1,6 +1,6 @@
 import asyncio
 from os import getenv
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -11,6 +11,9 @@ from sqlalchemy.exc import IntegrityError
 from app.core.config import settings
 from app.db.models import (
     AuditEvent,
+    Document,
+    DocumentProcessingJob,
+    DocumentVersion,
     ReferenceCode,
     Role,
     Site,
@@ -21,6 +24,8 @@ from app.db.models import (
 from app.db.seed import REFERENCE_CODES, ROLES, seed_reference_data, seed_roles
 from app.db.session import SessionLocal, engine
 from app.main import app
+from app.schemas.chat import ChatResponse
+from app.services.chat import get_chat_service
 from app.services.passwords import verify_password
 
 
@@ -54,6 +59,7 @@ def test_schema_extension_and_alembic_head() -> None:
 
     expected_tables = {
         "alembic_version",
+        "auth_sessions",
         "assessment_evidence",
         "assessment_hazards",
         "assessments",
@@ -96,7 +102,7 @@ def test_schema_extension_and_alembic_head() -> None:
         )
 
     assert extension_version
-    assert alembic_revision == "0006_worker_resilience"
+    assert alembic_revision == "0007_add_auth_sessions"
     assert "ck_assessment_hazards_likelihood_range" in constraints
     assert "ck_assessment_hazards_severity_range" in constraints
     assert "ck_assessments_status" in constraints
@@ -347,8 +353,11 @@ def test_registration_login_and_temporary_lock_use_database() -> None:
         )
     )
     assert successful_login.status_code == 200
-    assert successful_login.json()["roles"] == ["worker"]
-    assert successful_login.json()["last_login_at"] is not None
+    login_body = successful_login.json()
+    assert login_body["token_type"] == "bearer"
+    assert login_body["access_token"]
+    assert login_body["user"]["roles"] == ["worker"]
+    assert login_body["user"]["last_login_at"] is not None
 
     with SessionLocal() as session:
         user = session.get(User, user_id)
@@ -390,6 +399,447 @@ def test_registration_login_and_temporary_lock_use_database() -> None:
                 AuditEvent.event_type == "user.login_locked",
             )
         ) == 1
+
+
+def test_upload_requires_permission_and_creates_processing_job() -> None:
+    _assert_isolated_test_database()
+    suffix = uuid4().hex[:10].upper()
+    employee_number = f"UPLOAD-{suffix}"
+    password = f"Test-{uuid4().hex}-A!"
+
+    registration = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/register",
+            json={
+                "employee_number": employee_number,
+                "name": "문서 업로드 통합 사용자",
+                "password": password,
+            },
+        )
+    )
+    assert registration.status_code == 201
+
+    login = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/login",
+            json={"employee_number": employee_number, "password": password},
+        )
+    )
+    assert login.status_code == 200
+    access_token = login.json()["access_token"]
+    headers = {"Authorization": f"Bearer {access_token}"}
+    upload_data = {
+        "product_type": "포토센서",
+        "model_name": f"BTS-{suffix}",
+        "manufacturer": "통합테스트 제조사",
+    }
+    upload_file = {
+        "file": ("manual.pdf", b"%PDF-1.4\n%%EOF\n", "application/pdf")
+    }
+
+    denied = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/documents/upload",
+            headers=headers,
+            data=upload_data,
+            files=upload_file,
+        )
+    )
+    assert denied.status_code == 403
+
+    with SessionLocal() as session:
+        user = session.scalar(
+            select(User).where(User.employee_number == employee_number)
+        )
+        manager_role = session.scalar(
+            select(Role).where(Role.code == "safety_manager")
+        )
+        assert user is not None
+        assert manager_role is not None
+        user_id = user.id
+        session.add(UserRole(user_id=user.id, role_id=manager_role.id))
+        session.commit()
+
+    public_access = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/documents/upload",
+            headers=headers,
+            data={**upload_data, "access_level": "public"},
+            files=upload_file,
+        )
+    )
+    assert public_access.status_code == 422
+
+    public_type = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/documents/upload",
+            headers=headers,
+            data={**upload_data, "document_type_code": "public_guide"},
+            files=upload_file,
+        )
+    )
+    assert public_type.status_code == 422
+
+    uploaded = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/documents/upload",
+            headers=headers,
+            data=upload_data,
+            files=upload_file,
+        )
+    )
+    assert uploaded.status_code == 201
+    upload_body = uploaded.json()
+    assert upload_body["version_number"] == 1
+    assert upload_body["status"] == "pending"
+
+    with SessionLocal() as session:
+        document = session.get(Document, UUID(upload_body["document_id"]))
+        version = session.get(
+            DocumentVersion, UUID(upload_body["document_version_id"])
+        )
+        assert document is not None
+        assert document.created_by_user_id == user_id
+        assert document.document_type_code == "equipment_manual"
+        assert version is not None
+        assert version.uploaded_by_user_id == user_id
+        assert session.scalar(
+            select(func.count(DocumentProcessingJob.id)).where(
+                DocumentProcessingJob.document_version_id == version.id
+            )
+        ) == 1
+
+    logged_out = asyncio.run(
+        _request("POST", "/api/v1/auth/logout", headers=headers)
+    )
+    assert logged_out.status_code == 204
+
+    after_logout = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/documents/upload",
+            headers=headers,
+            data={**upload_data, "model_name": f"BTS-{suffix}-RETRY"},
+            files=upload_file,
+        )
+    )
+    assert after_logout.status_code == 401
+
+
+def test_document_approval_activates_and_supersedes_versions() -> None:
+    _assert_isolated_test_database()
+    suffix = uuid4().hex[:10].upper()
+    employee_number = f"APPROVE-{suffix}"
+    password = f"Test-{uuid4().hex}-A!"
+
+    registration = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/register",
+            json={
+                "employee_number": employee_number,
+                "name": "문서 승인 통합 사용자",
+                "password": password,
+            },
+        )
+    )
+    assert registration.status_code == 201
+
+    with SessionLocal() as session:
+        user = session.scalar(
+            select(User).where(User.employee_number == employee_number)
+        )
+        manager_role = session.scalar(
+            select(Role).where(Role.code == "document_manager")
+        )
+        assert user is not None
+        assert manager_role is not None
+        session.add(UserRole(user_id=user.id, role_id=manager_role.id))
+        session.commit()
+
+    login = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/login",
+            json={"employee_number": employee_number, "password": password},
+        )
+    )
+    assert login.status_code == 200
+    manager_headers = {
+        "Authorization": f"Bearer {login.json()['access_token']}"
+    }
+    upload_data = {
+        "product_type": "라이트커튼",
+        "model_name": f"TEST-LC-{suffix}",
+        "manufacturer": "SafeMaint E2E",
+    }
+    upload_file = {
+        "file": ("approval-manual.pdf", b"%PDF-1.4\n%%EOF\n", "application/pdf")
+    }
+
+    first_upload = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/documents/upload",
+            headers=manager_headers,
+            data=upload_data,
+            files=upload_file,
+        )
+    )
+    assert first_upload.status_code == 201
+    first_body = first_upload.json()
+    document_id = UUID(first_body["document_id"])
+    first_version_id = UUID(first_body["document_version_id"])
+
+    pending_approval = asyncio.run(
+        _request(
+            "POST",
+            f"/api/v1/documents/{document_id}/versions/{first_version_id}/approve",
+            headers=manager_headers,
+        )
+    )
+    assert pending_approval.status_code == 409
+
+    worker_number = f"APPROVE-WORKER-{suffix}"
+    worker_password = f"Test-{uuid4().hex}-A!"
+    assert asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/register",
+            json={
+                "employee_number": worker_number,
+                "name": "승인 권한 없는 사용자",
+                "password": worker_password,
+            },
+        )
+    ).status_code == 201
+    worker_login = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/login",
+            json={"employee_number": worker_number, "password": worker_password},
+        )
+    )
+    assert worker_login.status_code == 200
+    worker_headers = {
+        "Authorization": f"Bearer {worker_login.json()['access_token']}"
+    }
+    unauthorized = asyncio.run(
+        _request(
+            "POST",
+            f"/api/v1/documents/{document_id}/versions/{first_version_id}/approve",
+            headers=worker_headers,
+        )
+    )
+    assert unauthorized.status_code == 403
+
+    with SessionLocal() as session:
+        document = session.get(Document, document_id)
+        first_version = session.get(DocumentVersion, first_version_id)
+        assert document is not None
+        assert first_version is not None
+        document.lifecycle_status = "review_required"
+        first_version.status = "review_required"
+        unrelated_document = Document(
+            external_id=f"approval-other:{suffix}",
+            title="Unrelated approval document",
+            source_type="manual",
+            document_type_code="equipment_manual",
+            access_level="restricted",
+            metadata_json={},
+        )
+        session.add(unrelated_document)
+        session.commit()
+        unrelated_document_id = unrelated_document.id
+
+    mismatched = asyncio.run(
+        _request(
+            "POST",
+            f"/api/v1/documents/{unrelated_document_id}/versions/{first_version_id}/approve",
+            headers=manager_headers,
+        )
+    )
+    assert mismatched.status_code == 404
+
+    first_approval = asyncio.run(
+        _request(
+            "POST",
+            f"/api/v1/documents/{document_id}/versions/{first_version_id}/approve",
+            headers=manager_headers,
+        )
+    )
+    assert first_approval.status_code == 200
+    assert first_approval.json()["status"] == "active"
+    assert first_approval.json()["is_active"] is True
+
+    second_upload = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/documents/upload",
+            headers=manager_headers,
+            data=upload_data,
+            files=upload_file,
+        )
+    )
+    assert second_upload.status_code == 201
+    second_body = second_upload.json()
+    assert second_body["version_number"] == 2
+    second_version_id = UUID(second_body["document_version_id"])
+
+    with SessionLocal() as session:
+        second_version = session.get(DocumentVersion, second_version_id)
+        assert second_version is not None
+        second_version.status = "review_required"
+        session.commit()
+
+    second_approval = asyncio.run(
+        _request(
+            "POST",
+            f"/api/v1/documents/{document_id}/versions/{second_version_id}/approve",
+            headers=manager_headers,
+        )
+    )
+    assert second_approval.status_code == 200
+
+    with SessionLocal() as session:
+        document = session.get(Document, document_id)
+        first_version = session.get(DocumentVersion, first_version_id)
+        second_version = session.get(DocumentVersion, second_version_id)
+        assert document is not None
+        assert document.current_version_id == second_version_id
+        assert document.lifecycle_status == "active"
+        assert first_version is not None
+        assert first_version.status == "superseded"
+        assert first_version.is_active is False
+        assert second_version is not None
+        assert second_version.status == "active"
+        assert second_version.is_active is True
+        assert second_version.approved_by_user_id is not None
+        assert second_version.approved_at is not None
+        assert session.scalar(
+            select(func.count(AuditEvent.id)).where(
+                AuditEvent.entity_id == document_id,
+                AuditEvent.event_type == "DOCUMENT_VERSION_APPROVED",
+            )
+        ) == 2
+
+
+def test_chat_scope_is_derived_from_authenticated_roles_and_sites() -> None:
+    _assert_isolated_test_database()
+    suffix = uuid4().hex[:10].upper()
+    employee_number = f"CHAT-{suffix}"
+    password = f"Test-{uuid4().hex}-A!"
+    captured_scopes = []
+
+    class CapturingChatService:
+        async def answer(self, request, access_scope=None) -> ChatResponse:
+            captured_scopes.append(access_scope)
+            return ChatResponse(
+                answer="scope captured",
+                sources=[],
+                retrieval_mode="hybrid",
+            )
+
+    app.dependency_overrides[get_chat_service] = lambda: CapturingChatService()
+    try:
+        anonymous = asyncio.run(
+            _request(
+                "POST",
+                "/api/v1/chat",
+                json={
+                    "question": "public safety guide",
+                    "access_scope": {
+                        "allow_company": True,
+                        "all_sites": True,
+                    },
+                },
+            )
+        )
+        assert anonymous.status_code == 200
+        assert captured_scopes[-1].allow_company is False
+        assert captured_scopes[-1].all_sites is False
+
+        registration = asyncio.run(
+            _request(
+                "POST",
+                "/api/v1/auth/register",
+                json={
+                    "employee_number": employee_number,
+                    "name": "채팅 범위 통합 사용자",
+                    "password": password,
+                },
+            )
+        )
+        assert registration.status_code == 201
+
+        with SessionLocal() as session:
+            user = session.scalar(
+                select(User).where(User.employee_number == employee_number)
+            )
+            assert user is not None
+            site = Site(code=f"CHAT-SITE-{suffix}", name="Chat scope site")
+            session.add(site)
+            session.flush()
+            site_id = site.id
+            session.add(UserSite(user_id=user.id, site_id=site.id, is_primary=True))
+            session.commit()
+
+        login = asyncio.run(
+            _request(
+                "POST",
+                "/api/v1/auth/login",
+                json={"employee_number": employee_number, "password": password},
+            )
+        )
+        assert login.status_code == 200
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        scoped = asyncio.run(
+            _request(
+                "POST",
+                "/api/v1/chat",
+                headers=headers,
+                json={"question": "company equipment manual"},
+            )
+        )
+        assert scoped.status_code == 200
+        assert captured_scopes[-1].allow_company is True
+        assert captured_scopes[-1].all_sites is False
+        assert captured_scopes[-1].site_ids == [str(site_id)]
+        assert captured_scopes[-1].allow_private is False
+
+        with SessionLocal() as session:
+            user = session.scalar(
+                select(User).where(User.employee_number == employee_number)
+            )
+            manager_role = session.scalar(
+                select(Role).where(Role.code == "document_manager")
+            )
+            assert user is not None
+            assert manager_role is not None
+            session.add(UserRole(user_id=user.id, role_id=manager_role.id))
+            session.commit()
+
+        global_scope = asyncio.run(
+            _request(
+                "POST",
+                "/api/v1/chat",
+                headers=headers,
+                json={"question": "company equipment manual"},
+            )
+        )
+        assert global_scope.status_code == 200
+        assert captured_scopes[-1].allow_company is True
+        assert captured_scopes[-1].all_sites is True
+        assert captured_scopes[-1].site_ids == []
+    finally:
+        app.dependency_overrides.clear()
+
 
 def test_assessment_is_persisted_and_dashboard_uses_database() -> None:
     _assert_isolated_test_database()

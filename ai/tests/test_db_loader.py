@@ -40,6 +40,7 @@ def test_load_document_is_idempotent_on_external_id() -> None:
         "external_id": "manual:테스트제조사:M1:ingest-test-doc",
         "title": "ingest-test-doc",
         "source_type": "manual",
+        "document_type_code": "equipment_manual",
         "publisher": "테스트제조사",
         "access_level": "restricted",
         "file_sha256": "0" * 64,
