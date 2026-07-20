@@ -48,6 +48,9 @@ class Settings:
         "LLM_ANSWER_MODEL", getenv("OPENAI_MODEL", "gpt-4o-mini")
     )
     vision_service_url: str = getenv("VISION_SERVICE_URL", "http://vision:8020")
+    vision_image_max_upload_bytes: int = int(
+        getenv("VISION_IMAGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))
+    )
     openai_timeout_seconds: float = float(getenv("OPENAI_TIMEOUT_SECONDS", "30"))
     openai_max_output_tokens: int = int(
         getenv("OPENAI_MAX_OUTPUT_TOKENS", "1200")

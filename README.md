@@ -454,15 +454,9 @@ docker compose `
 다른 GPU 프로그램을 함께 실행하지 않는 것을 권장합니다. 이후 요청은 프로세스에
 로드된 모델을 재사용합니다.
 
-```powershell
-Invoke-RestMethod http://localhost:8020/health/live
-
-$form = @{ file = Get-Item "C:\path\catalog-page.png" }
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://localhost:8020/v1/catalog/analyze `
-  -Form $form
-```
+비전 컨테이너는 호스트 포트를 열지 않으며 Docker 내부 네트워크에서 백엔드만
+접근합니다. 브라우저와 외부 도구는 로그인 후 발급받은 Bearer 토큰으로
+`http://localhost:8000/api/v1/vision/...` 백엔드 API만 호출해야 합니다.
 
 모델 다운로드가 끝난 뒤 인터넷 차단 환경에서는 `.env`를 다음처럼 바꾸고 서비스를
 재시작합니다.
@@ -481,13 +475,19 @@ OCR만 필요한 저사양 현장 장비에서는 `.env`의 `VISION_ENABLE_QWEN=
 PaddleOCR-VL만 CPU에서 실행됩니다. 이미지 의미 분석이 필요하면 기본값 `true`를
 사용합니다.
 
-매뉴얼 첨부 UI는 `POST /api/v1/vision/catalog/index`, 사진 첨부 UI는
-`POST /api/v1/vision/catalog/match`를 호출합니다. PDF의 제품 이미지를 추출해 로컬
+매뉴얼 첨부 UI는 문서 업로드 후 반환된 `document_id`로
+`POST /api/v1/vision/catalog/index`를 호출하고, 사진 첨부 UI는 접근 가능한
+`document_ids`와 함께 `POST /api/v1/vision/catalog/match`를 호출합니다. 원본 PDF를
+인덱싱 API에 다시 보내거나 내부 `catalog_id`를 브라우저에 저장하지 않습니다. 백엔드는
+문서 소유자·역할·사업장 권한을 확인한 뒤 PDF의 제품 이미지를 추출해 로컬
 임베딩으로 후보를 좁히고 Qwen3-VL이 지도·인증서·로고·다른 부품을 다시 걸러냅니다.
 후보는 같은 모델이나 규격의 확정 근거가 아니며, 신뢰 임계값을 넘지 못하면 표시하지
 않습니다. 분석된
-JSON은 채팅의 로컬 이미지 분석 문맥으로 전달되므로, 향후 최종 답변 모델을
-Qwen3.5-27B로 교체해도 이 비전 서비스는 그대로 사용할 수 있습니다.
+JSON은 현재 브라우저 탭의 메모리에서만 채팅의 로컬 이미지 분석 문맥으로 사용하며
+OCR·후보·내부 인덱스 ID는 `localStorage`에 저장하지 않습니다. 이미지 분석 문맥이
+포함된 요청은 외부 LLM 답변 생성을 건너뛰어 현장 이미지 정보가 외부로 전송되지
+않습니다. 향후 사내 Qwen 계열 모델로 교체해도 이 비전 서비스는 그대로 사용할 수
+있습니다.
 
 ## API
 
@@ -498,6 +498,9 @@ Qwen3.5-27B로 교체해도 이 비전 서비스는 그대로 사용할 수 있�
 | `POST` | `/api/v1/auth/logout` | 현재 세션 토큰 무효화(회수) |
 | `POST` | `/api/v1/documents/upload` | PDF 업로드(인증 필요), `document_versions`/`document_processing_jobs` 생성 후 워커가 비동기 처리 |
 | `POST` | `/api/v1/documents/{document_id}/versions/{version_id}/approve` | `document.approve` 권한으로 검토 완료 버전을 활성화하고 기존 버전을 superseded 처리 |
+| `POST` | `/api/v1/vision/catalog/index` | `document.upload` 권한과 소유권을 확인해 저장된 PDF의 로컬 이미지 인덱스 생성 |
+| `POST` | `/api/v1/vision/catalog/match` | `document.read` 권한 범위의 문서만 현장 사진과 로컬 비교 |
+| `GET` | `/api/v1/vision/catalog/image/{document_id}/{page}/{image_index}` | 문서 접근 권한 확인 후 후보 이미지 반환(`private, no-store`) |
 | `POST` | `/api/v1/chat` | 익명은 공용 문서만, 로그인 사용자는 서버가 계산한 역할·사업장 범위로 RAG 검색 |
 | `POST` | `/api/v1/speech/synthesize` | Supertonic 기반 한국어 안전 안내 WAV 생성 |
 | `POST` | `/api/v1/assessments/preview` | DB 저장 없는 기존 규칙 기반 미리보기 |

@@ -17,6 +17,11 @@ services:
       VISION_MAX_NEW_TOKENS: ${VISION_MAX_NEW_TOKENS:-192}
       VISION_CATALOG_INDEX_DIR: /catalog-index
       VISION_CATALOG_MATCH_THRESHOLD: ${VISION_CATALOG_MATCH_THRESHOLD:-0.55}
+      VISION_IMAGE_MAX_UPLOAD_BYTES: ${VISION_IMAGE_MAX_UPLOAD_BYTES:-10485760}
+      VISION_PDF_MAX_UPLOAD_BYTES: ${DOCUMENT_MAX_UPLOAD_BYTES:-26214400}
+      VISION_IMAGE_MAX_PIXELS: ${VISION_IMAGE_MAX_PIXELS:-40000000}
+      VISION_PDF_MAX_PAGES: ${VISION_PDF_MAX_PAGES:-500}
+      VISION_CATALOG_MAX_IMAGES: ${VISION_CATALOG_MAX_IMAGES:-5000}
       TORCH_HOME: /models/torch
       HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
       HF_HOME: /models/huggingface
@@ -25,8 +30,6 @@ services:
     volumes:
       - safemaint_vision_models:/models
       - safemaint_catalog_index:/catalog-index
-    ports:
-      - "127.0.0.1:${VISION_PORT:-8020}:8020"
     deploy:
       resources:
         reservations:
@@ -38,6 +41,7 @@ services:
   backend:
     environment:
       VISION_SERVICE_URL: http://vision:8020
+      VISION_IMAGE_MAX_UPLOAD_BYTES: ${VISION_IMAGE_MAX_UPLOAD_BYTES:-10485760}
     depends_on:
       vision:
         condition: service_started

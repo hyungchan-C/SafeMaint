@@ -265,3 +265,53 @@ def test_company_evidence_is_never_sent_to_external_model() -> None:
     assert response.generation_mode == "template"
     assert response.answer == "Local grounded template answer"
     assert "회사 문서" in (response.warning or "")
+
+
+def test_local_vision_summary_is_never_sent_to_external_answer_model() -> None:
+    class MustNotGenerateFromLocalVision:
+        def analyze(self, question: str, context: str) -> QueryAnalysis:
+            assert "현장 OCR 비밀값" not in context
+            return QueryAnalysis(search_keywords=["bearing"])
+
+        def answer(self, question: str, context: str | None = None) -> str:
+            raise AssertionError("Local vision context must not leave the server")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answer": "Local grounded template answer",
+                "sources": [
+                    {
+                        "document_id": "public-doc",
+                        "chunk_id": "public-chunk",
+                        "title": "Public safety guide",
+                        "source_type": "regulation",
+                        "document_scope": "public",
+                        "excerpt": "Lock out the equipment before maintenance.",
+                        "similarity": 0.8,
+                    }
+                ],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            ai_service=MustNotGenerateFromLocalVision(),  # type: ignore[arg-type]
+            openai_enabled=True,
+        ).answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "이 부품은 뭐야?",
+                    "context": {"visual_summary": "현장 OCR 비밀값"},
+                }
+            )
+        )
+    )
+
+    assert response.generation_mode == "template"
+    assert response.answer == "Local grounded template answer"
+    assert "로컬 이미지 분석" in (response.warning or "")

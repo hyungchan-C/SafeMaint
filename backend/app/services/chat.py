@@ -31,6 +31,9 @@ LLM_FALLBACK_WARNING = (
 COMPANY_LLM_WARNING = (
     "회사 문서 내용은 외부 LLM으로 전송하지 않았습니다."
 )
+LOCAL_VISION_LLM_WARNING = (
+    "로컬 이미지 분석 내용은 외부 LLM으로 전송하지 않았습니다."
+)
 
 
 class ChatService:
@@ -74,6 +77,17 @@ class ChatService:
 
         if not retrieval_response.sources or not self.openai_enabled:
             return retrieval_response
+
+        # visual_summary is produced locally but is still supplied by the client.
+        # Never forward OCR, labels, or image-derived text to an external provider.
+        if analyzed_request.context.visual_summary:
+            return retrieval_response.model_copy(
+                update={
+                    "warning": self._append_warning(
+                        retrieval_response.warning, LOCAL_VISION_LLM_WARNING
+                    )
+                }
+            )
 
         # This is intentionally unconditional: no company evidence is sent to
         # an external provider, even if a legacy environment flag says otherwise.
