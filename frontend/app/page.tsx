@@ -484,6 +484,8 @@ function WorkspaceScreen({
             energy_source: form.energy_source || null,
             task_description: form.description || null,
             visual_summary: visionSummary || null,
+            visual_categories: catalogCandidates.map((item) => item.visual_category).filter((value): value is string => Boolean(value)),
+            visual_features: catalogCandidates.flatMap((item) => item.visual_features || []),
             registered_manuals: manuals,
             selected_document_ids: selectedDocumentIds,
           },

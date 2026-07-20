@@ -232,14 +232,14 @@ class CatalogAnalyzer:
         for candidate in candidates:
             if candidate.similarity < 0.65:
                 continue
-            category = (
+            category = candidate.visual_category or (
                 f"{fallback_category}와 외형이 유사한 제품"
                 if fallback_category
                 else "현장 사진과 외형이 유사한 제품"
             )
             fallback.append(candidate.model_copy(update={
                 "visual_category": category,
-                "visual_features": ["로컬 이미지 임베딩에서 외형 유사도가 높게 계산됨"],
+                "visual_features": candidate.visual_features or ["로컬 이미지 임베딩에서 외형 유사도가 높게 계산됨"],
                 "confidence": "낮음",
                 "note": "Qwen3-VL 재검토에서 확정되지 않은 탐색 후보입니다. 동일 제품·모델·규격으로 사용할 수 없습니다.",
             }))

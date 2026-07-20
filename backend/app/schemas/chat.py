@@ -14,6 +14,8 @@ class ChatContext(BaseModel):
     energy_source: str | None = Field(default=None, max_length=100)
     task_description: str | None = Field(default=None, max_length=2000)
     visual_summary: str | None = Field(default=None, max_length=30000)
+    visual_categories: list[str] = Field(default_factory=list, max_length=10)
+    visual_features: list[str] = Field(default_factory=list, max_length=20)
     registered_manuals: list[str] = Field(default_factory=list, max_length=20)
     selected_document_ids: list[UUID] = Field(default_factory=list, max_length=20)
     selected_document_version_ids: list[UUID] = Field(

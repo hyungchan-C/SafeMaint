@@ -75,6 +75,19 @@ class ChatService:
                 }
             )
 
+        visual_answer = self._visual_answer(analyzed_request)
+        if visual_answer:
+            return retrieval_response.model_copy(
+                update={
+                    "answer": visual_answer,
+                    "generation_mode": "template",
+                    "warning": self._append_warning(
+                        retrieval_response.warning,
+                        "사진에서 직접 관찰한 일반 형상과 로컬 유사도 검색 결과이며, 정확한 제품·모델·규격을 확정한 결과가 아닙니다.",
+                    ),
+                }
+            )
+
         if not retrieval_response.sources or not self.openai_enabled:
             return retrieval_response
 
@@ -187,6 +200,8 @@ class ChatService:
                     "selected_document_ids",
                     "selected_document_version_ids",
                     "visual_summary",
+                    "visual_categories",
+                    "visual_features",
                 },
             ),
             ensure_ascii=False,
@@ -271,6 +286,52 @@ class ChatService:
     @staticmethod
     def _append_warning(current: str | None, additional: str) -> str:
         return f"{current} {additional}" if current else additional
+
+    @staticmethod
+    def _visual_answer(request: ChatRequest) -> str | None:
+        question = request.question.casefold()
+        if not request.context.visual_categories or not any(
+            token in question
+            for token in ("이건", "이것", "뭐", "무엇", "사진", "어디에 쓰", "용도", "부품")
+        ):
+            return None
+        categories = list(
+            dict.fromkeys(
+                value.strip()
+                for value in request.context.visual_categories
+                if value.strip()
+            )
+        )[:3]
+        if not categories:
+            return None
+        primary = categories[0]
+        features = list(
+            dict.fromkeys(
+                value.strip()
+                for value in request.context.visual_features
+                if value.strip()
+            )
+        )[:3]
+        lines = [f"사진에서 보이는 일반 형상은 **{primary}**로 추정됩니다."]
+        if features:
+            lines.append("관찰 근거: " + ", ".join(features) + ".")
+        if "어디에 쓰" in question or "용도" in question:
+            usage = "부품을 서로 체결하는 용도"
+            if "너트" in primary:
+                usage = "볼트와 함께 부품을 조여 고정하는 용도"
+            elif "와셔" in primary:
+                usage = "체결 하중을 분산하거나 표면 손상을 줄이는 용도"
+            elif "베어링" in primary:
+                usage = "회전축을 지지하고 마찰을 줄이는 용도"
+            elif "센서" in primary:
+                usage = "상태나 물리량을 감지하는 용도"
+            elif "카메라" in primary:
+                usage = "대상을 촬영하거나 검사하는 용도"
+            lines.append(f"일반적으로는 {usage}에 사용됩니다.")
+        lines.append(
+            "다만 현재 결과는 사진 형상에 대한 추정이므로, 정확한 제품명·규격·적용 위치는 각인과 카탈로그 표의 일치 여부를 추가로 확인해야 합니다."
+        )
+        return "\n\n".join(lines)
 
     @staticmethod
     def _fallback(request: ChatRequest) -> ChatResponse:

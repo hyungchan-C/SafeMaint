@@ -315,3 +315,53 @@ def test_local_vision_summary_is_never_sent_to_external_answer_model() -> None:
     assert response.generation_mode == "template"
     assert response.answer == "Local grounded template answer"
     assert "로컬 이미지 분석" in (response.warning or "")
+
+
+def test_visual_question_uses_local_generic_shape_without_document_evidence() -> None:
+    class MustNotUseExternalModel:
+        def analyze(self, question: str, context: str) -> QueryAnalysis:
+            return QueryAnalysis(search_keywords=["bolt"])
+
+        def answer(self, question: str, context: str | None = None) -> str:
+            raise AssertionError("Local visual observations must not leave the server")
+
+    response = asyncio.run(
+        ChatService(
+            service_url=None,
+            ai_service=MustNotUseExternalModel(),  # type: ignore[arg-type]
+            openai_enabled=True,
+        ).answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "그럼 이건 뭐야?",
+                    "context": {
+                        "visual_categories": ["사진상 육각 머리 볼트"],
+                        "visual_features": ["육각형 머리와 나사산이 보임"],
+                    },
+                }
+            )
+        )
+    )
+
+    assert response.generation_mode == "template"
+    assert "육각 머리 볼트" in response.answer
+    assert "육각형 머리" in response.answer
+    assert "정확한 제품명" in response.answer
+
+
+def test_visual_usage_question_returns_only_generic_usage() -> None:
+    response = asyncio.run(
+        ChatService(service_url=None, openai_enabled=False).answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "이건 어디에 쓰여?",
+                    "context": {
+                        "visual_categories": ["사진상 둥근 머리 내부 육각 소켓 나사"],
+                    },
+                }
+            )
+        )
+    )
+
+    assert "부품을 서로 체결" in response.answer
+    assert "규격" in response.answer

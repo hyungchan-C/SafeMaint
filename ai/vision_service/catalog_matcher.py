@@ -20,6 +20,7 @@ class _SemanticEmbedder:
         self.cache_dir = cache_dir
         self._model = None
         self._processor = None
+        self._text_vectors: np.ndarray | None = None
 
     def encode(self, image: Image.Image) -> np.ndarray:
         return self.encode_many([image])[0]
@@ -54,6 +55,55 @@ class _SemanticEmbedder:
         result = vectors.float().cpu().numpy()
         norms = np.linalg.norm(result, axis=1, keepdims=True)
         return result / np.maximum(norms, 1e-12)
+
+    def classify(self, image_vectors: np.ndarray) -> tuple[str, list[str]]:
+        """Return a generic shape label using only the local SigLIP2 model."""
+        import torch
+
+        labels = (
+            ("사진상 육각 머리 볼트", "육각형 머리와 나사산이 보임"),
+            ("사진상 둥근 머리 내부 육각 소켓 나사", "둥근 머리와 내부 육각 홈이 보임"),
+            ("사진상 원통 머리 내부 육각 소켓 나사", "원통형 머리와 내부 육각 홈이 보임"),
+            ("사진상 접시 머리 나사", "머리 윗면이 평평하고 아래쪽이 경사진 형상"),
+            ("사진상 십자 또는 일자 홈 나사", "드라이버용 머리 홈이 보임"),
+            ("사진상 너트", "중앙 체결 구멍이 있는 다각형 부품"),
+            ("사진상 와셔", "얇은 고리 모양 부품"),
+            ("사진상 베어링", "동심 원형의 내륜과 외륜이 보임"),
+            ("사진상 기어", "둘레에 반복되는 톱니가 보임"),
+            ("사진상 산업용 센서", "센서 하우징과 연결부가 보임"),
+            ("사진상 산업용 카메라", "렌즈 또는 렌즈 마운트가 있는 카메라 형상"),
+            ("사진상 전기 커넥터", "전기 접속용 단자 또는 소켓 형상"),
+            ("사진상 밸브", "유체 개폐용 몸체와 연결부 형상"),
+        )
+        prompts = [
+            "a close-up product photo of a hex head bolt",
+            "a close-up product photo of a button head hex socket screw",
+            "a close-up product photo of a socket head cap screw",
+            "a close-up product photo of a countersunk flat head screw",
+            "a close-up product photo of a slotted or Phillips head screw",
+            "a close-up product photo of a hex nut",
+            "a close-up product photo of a flat washer",
+            "a close-up product photo of a ball bearing",
+            "a close-up product photo of a mechanical gear",
+            "a close-up product photo of an industrial sensor",
+            "a close-up product photo of an industrial camera",
+            "a close-up product photo of an electrical connector",
+            "a close-up product photo of an industrial valve",
+        ]
+        assert self._model is not None and self._processor is not None
+        if self._text_vectors is None:
+            with torch.inference_mode():
+                inputs = self._processor(
+                    text=prompts, padding="max_length", return_tensors="pt"
+                )
+                inputs = {key: value.to(self.device) for key, value in inputs.items()}
+                vectors = self._model.get_text_features(**inputs)
+            text_vectors = vectors.float().cpu().numpy()
+            norms = np.linalg.norm(text_vectors, axis=1, keepdims=True)
+            self._text_vectors = text_vectors / np.maximum(norms, 1e-12)
+        scores = np.max(image_vectors @ self._text_vectors.T, axis=0)
+        best = int(np.argmax(scores))
+        return labels[best][0], [labels[best][1], "사진 형상만으로 분류한 추정 결과"]
 
 
 def _feature(image: Image.Image) -> np.ndarray:
@@ -194,6 +244,7 @@ class CatalogImageMatcher:
         if query_image.width * query_image.height > self.max_image_pixels:
             raise ValueError(f"이미지 픽셀 수는 {self.max_image_pixels}개를 넘을 수 없습니다.")
         queries = self.embedder.encode_many(self._query_views(query_image))
+        visual_category, visual_features = self.embedder.classify(queries)
         scored: list[CatalogCandidate] = []
         for catalog_id in catalog_ids:
             manifest_path = self.root / catalog_id / "manifest.json"
@@ -236,6 +287,8 @@ class CatalogImageMatcher:
                     page=int(entry["page"]), image_index=int(entry["image_index"]),
                     similarity=round(similarity, 4), confidence=confidence,
                     note="외형 유사 후보이며 동일 제품·모델로 확정할 수 없습니다.",
+                    visual_category=visual_category,
+                    visual_features=visual_features,
                     page_excerpt=str(entry.get("page_text") or "") or None,
                 ))
         return sorted(scored, key=lambda item: item.similarity, reverse=True)[:limit]
