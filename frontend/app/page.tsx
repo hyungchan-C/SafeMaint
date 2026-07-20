@@ -40,6 +40,7 @@ const levelLabel = { low: "낮음", medium: "보통", high: "높음" } as const;
 const STORAGE_KEYS = {
   users: "safemaint.users",
   session: "safemaint.session",
+  accessToken: "safemaint.accessToken",
   history: "safemaint.history",
   settings: "safemaint.settings",
 };
@@ -94,6 +95,7 @@ export default function HomePage() {
 
   function handleLogout() {
     removeStorage(STORAGE_KEYS.session);
+    removeStorage(STORAGE_KEYS.accessToken);
     setUsername("");
     setDisplayName("");
     setPage("login");
@@ -134,11 +136,17 @@ function LoginScreen({ onLogin }: { onLogin: (user: LocalUser) => void }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ employee_number: loginId, password }),
       });
-      const payload = await response.json() as { id?: string; employee_number?: string; name?: string; detail?: string };
-      if (!response.ok || !payload.id || !payload.employee_number || !payload.name) {
+      const payload = await response.json() as {
+        access_token?: string;
+        user?: { id?: string; employee_number?: string; name?: string };
+        detail?: string;
+      };
+      const user = payload.user;
+      if (!response.ok || !payload.access_token || !user?.id || !user.employee_number || !user.name) {
         throw new Error(payload.detail || "로그인에 실패했습니다.");
       }
-      onLogin({ id: payload.id, username: payload.employee_number, displayName: payload.name });
+      writeStorage(STORAGE_KEYS.accessToken, payload.access_token);
+      onLogin({ id: user.id, username: user.employee_number, displayName: user.name });
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.");
     } finally {
@@ -274,6 +282,7 @@ function WorkspaceScreen({
 }) {
   const [volume, setVolume] = useState(70);
   const [fontSize, setFontSize] = useState<FontSize>("medium");
+  const [autoSpeak, setAutoSpeak] = useState(false);
   const [manuals, setManuals] = useState<string[]>([]);
   const [sitePhotoName, setSitePhotoName] = useState("");
   const [locationStatus, setLocationStatus] = useState("위치 미확인");
@@ -287,17 +296,22 @@ function WorkspaceScreen({
   const [isSpeaking, setIsSpeaking] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const settings = readStorage<{ volume: number; fontSize: FontSize }>(STORAGE_KEYS.settings, { volume: 70, fontSize: "medium" });
+    const settings = readStorage<{ volume: number; fontSize: FontSize; autoSpeak?: boolean }>(STORAGE_KEYS.settings, { volume: 70, fontSize: "medium", autoSpeak: false });
     setVolume(settings.volume);
     setFontSize(settings.fontSize);
+    setAutoSpeak(settings.autoSpeak ?? false);
   }, []);
 
   useEffect(() => {
-    if (typeof window !== "undefined") writeStorage(STORAGE_KEYS.settings, { volume, fontSize });
-  }, [volume, fontSize]);
+    if (typeof window !== "undefined") writeStorage(STORAGE_KEYS.settings, { volume, fontSize, autoSpeak });
+  }, [volume, fontSize, autoSpeak]);
 
   useEffect(() => () => {
     const source = audioSourceRef.current;
@@ -307,6 +321,15 @@ function WorkspaceScreen({
       source.disconnect();
     }
     void audioContextRef.current?.close();
+  }, []);
+
+  useEffect(() => () => {
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.onstop = null;
+      recorder.stop();
+      recorder.stream.getTracks().forEach((track) => track.stop());
+    }
   }, []);
 
   const fontClass = useMemo(() => `font-${fontSize}`, [fontSize]);
@@ -348,6 +371,12 @@ function WorkspaceScreen({
     event.preventDefault();
     const submittedQuestion = question.trim();
     if (!submittedQuestion || isChatLoading) return;
+
+    // Create the AudioContext synchronously within this user-gesture handler so
+    // browsers don't block autoplay once the answer arrives after the awaits below.
+    if (autoSpeak && !audioContextRef.current) {
+      audioContextRef.current = new AudioContext();
+    }
 
     setQuestion("");
     setIsChatLoading(true);
@@ -394,6 +423,9 @@ function WorkspaceScreen({
         `${payload.answer.slice(0, 180)}${payload.answer.length > 180 ? "…" : ""}`,
         "검토 필요",
       );
+      if (autoSpeak) {
+        void playSpeech(payload.answer);
+      }
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.";
       setMessages((current) => [...current, { role: "ai", text: message, warning: "검색 결과를 생성하지 못했습니다." }]);
@@ -425,26 +457,23 @@ function WorkspaceScreen({
     );
   }
 
-  async function speakGuidance() {
-    if (audioSourceRef.current) {
-      const source = audioSourceRef.current;
-      source.onended = null;
-      try { source.stop(); } catch { /* already stopped */ }
-      source.disconnect();
-      audioSourceRef.current = null;
-      setIsSpeaking(false);
-      return;
-    }
+  function stopSpeech() {
+    const source = audioSourceRef.current;
+    if (!source) return false;
+    source.onended = null;
+    try { source.stop(); } catch { /* already stopped */ }
+    source.disconnect();
+    audioSourceRef.current = null;
+    setIsSpeaking(false);
+    return true;
+  }
 
-    const latestAnswer = [...messages].reverse().find((message) => message.role === "ai")?.text;
-    const text = latestAnswer ?? (result
-      ? `현재 분석된 위험요인은 ${result.hazards.length}건입니다. ${result.hazards.map((hazard) => `${hazard.name}. ${hazard.safety_actions.join(". ")}`).join(". ")}`
-      : `현재 작업은 ${form.equipment_name}의 ${form.task_type}입니다. 위험성평가를 실행한 뒤 음성 안전 안내를 들을 수 있습니다.`);
-
+  async function playSpeech(text: string) {
+    stopSpeech();
     setIsSpeaking(true);
     setError("");
     try {
-      // Unlock audio playback while the button click is still an active user gesture.
+      // Unlock audio playback while the triggering click/submit is still an active user gesture.
       const audioContext = audioContextRef.current ?? new AudioContext();
       audioContextRef.current = audioContext;
       await audioContext.resume();
@@ -480,6 +509,72 @@ function WorkspaceScreen({
     }
   }
 
+  async function speakGuidance() {
+    if (stopSpeech()) return;
+
+    const latestAnswer = [...messages].reverse().find((message) => message.role === "ai")?.text;
+    const text = latestAnswer ?? (result
+      ? `현재 분석된 위험요인은 ${result.hazards.length}건입니다. ${result.hazards.map((hazard) => `${hazard.name}. ${hazard.safety_actions.join(". ")}`).join(". ")}`
+      : `현재 작업은 ${form.equipment_name}의 ${form.task_type}입니다. 위험성평가를 실행한 뒤 음성 안전 안내를 들을 수 있습니다.`);
+
+    await playSpeech(text);
+  }
+
+  async function toggleVoiceInput() {
+    if (isRecording) {
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+    if (isTranscribing) return;
+
+    setError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      recordedChunksRef.current = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) recordedChunksRef.current.push(event.data);
+      };
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        setIsRecording(false);
+        const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        recordedChunksRef.current = [];
+        if (blob.size === 0) return;
+
+        setIsTranscribing(true);
+        try {
+          const formData = new FormData();
+          formData.append("file", blob, "voice-input.webm");
+          const response = await fetch(`${getApiBaseUrl()}/api/v1/speech/transcribe`, {
+            method: "POST",
+            body: formData,
+          });
+          const payload = (await response.json()) as { text?: string; detail?: string };
+          if (!response.ok || typeof payload.text !== "string") {
+            throw new Error(payload.detail || "음성 인식에 실패했습니다.");
+          }
+          const transcribed = payload.text.trim();
+          if (transcribed) {
+            setQuestion((current) => (current ? `${current} ${transcribed}` : transcribed));
+          }
+        } catch (transcribeError) {
+          setError(transcribeError instanceof Error ? transcribeError.message : "음성 인식 중 오류가 발생했습니다.");
+        } finally {
+          setIsTranscribing(false);
+        }
+      };
+
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setIsRecording(true);
+    } catch (mediaError) {
+      setError(mediaError instanceof Error ? mediaError.message : "마이크에 접근할 수 없습니다. 브라우저 마이크 권한을 확인해 주세요.");
+    }
+  }
+
   return (
     <main className={`prototype-shell ${fontClass}`}>
       <header className="prototype-topbar">
@@ -489,6 +584,7 @@ function WorkspaceScreen({
             <h2>메뉴</h2>
             <label>🔊 음량 <strong>{volume}</strong><input type="range" min="0" max="100" value={volume} onChange={(event) => setVolume(Number(event.target.value))} /></label>
             <label>글자 크기<select value={fontSize} onChange={(event) => setFontSize(event.target.value as FontSize)}><option value="small">작게</option><option value="medium">보통</option><option value="large">크게</option></select></label>
+            <label>💬 채팅 답변 자동 음성 출력<input type="checkbox" checked={autoSpeak} onChange={(event) => setAutoSpeak(event.target.checked)} /></label>
             <button onClick={() => setMessages([])}>🧹 대화 초기화</button>
             <button onClick={() => setManuals([])}>📚 매뉴얼 목록 초기화</button>
             <button className="logout-button" onClick={onLogout}>🚪 로그아웃</button>
@@ -501,7 +597,9 @@ function WorkspaceScreen({
       <section className="quick-toolbar" aria-label="현장 빠른 기능">
         <button type="button" onClick={requestLocation}>📍 현재 위치</button>
         <label className="toolbar-upload">📷 현장 사진<input type="file" accept="image/*" onChange={(event) => setSitePhotoName(event.target.files?.[0]?.name ?? "")} /></label>
-        <button type="button" onClick={() => window.alert("음성 입력은 STT 연결 예정입니다.")}>🎤 음성 입력</button>
+        <button type="button" onClick={toggleVoiceInput} disabled={isTranscribing}>
+          {isRecording ? "⏹ 녹음 중지" : isTranscribing ? "🎤 인식 중..." : "🎤 음성 입력"}
+        </button>
         <button type="button" onClick={speakGuidance}>{isSpeaking ? "⏹ 음성 중지" : "🔊 음성 안내"}</button>
         <button type="button" onClick={onHistory}>🗂 결과 기록</button>
         <span>{locationStatus}</span>
@@ -566,7 +664,9 @@ function WorkspaceScreen({
           {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>안전자료를 검색하고 AI 답변을 생성하고 있습니다…</div>}
         </div>
         <form className="chat-input-row" onSubmit={sendChat}>
-          <button type="button" className="icon-action" title="음성 입력" onClick={() => window.alert("음성 입력 기능은 STT 연결 예정입니다.")}>🎤</button>
+          <button type="button" className="icon-action" title={isRecording ? "녹음 중지" : "음성 입력"} onClick={toggleVoiceInput} disabled={isTranscribing}>
+            {isRecording ? "⏹" : "🎤"}
+          </button>
           <label className="icon-action file-icon" title="사진 첨부">📷<input type="file" accept="image/*" onChange={(event) => setSitePhotoName(event.target.files?.[0]?.name ?? "")} /></label>
           <label className="icon-action file-icon" title="문서 첨부">📎<input type="file" accept="application/pdf" multiple onChange={(event) => addManuals(event.target.files)} /></label>
           <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="예: 전원을 차단하지 않고 센서만 빠르게 교체해도 될까요?" disabled={isChatLoading} />
