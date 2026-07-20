@@ -409,6 +409,12 @@ function WorkspaceScreen({
   const highestRisk = result?.hazards.some((hazard) => hazard.risk_level === "high") ? "high" : result?.hazards.some((hazard) => hazard.risk_level === "medium") ? "medium" : result ? "low" : "pending";
   const accidentTypes = result ? Array.from(new Set(result.hazards.map((hazard) => hazard.accident_type))) : [];
 
+  function requireActiveSession(response: Response) {
+    if (response.status !== 401) return;
+    onLogout();
+    throw new Error("로그인 세션이 만료되었습니다. 다시 로그인해 주세요.");
+  }
+
   function saveHistory(questionText: string, summary: string, riskLabel: string) {
     const current = readStorage<HistoryItem[]>(STORAGE_KEYS.history, []);
     const next: HistoryItem = {
@@ -482,6 +488,7 @@ function WorkspaceScreen({
           },
         }),
       });
+      requireActiveSession(response);
       const payload = (await response.json()) as ChatResponse & { detail?: string };
       if (!response.ok || !payload.answer) {
         throw new Error(payload.detail || "안전자료 검색에 실패했습니다.");
@@ -525,6 +532,10 @@ function WorkspaceScreen({
   async function addManuals(files: FileList | null) {
     if (!files) return;
     const token = getAccessToken();
+    if (!token) {
+      onLogout();
+      return;
+    }
     setManualStatus("문서를 등록하고 로컬 이미지 인덱스를 생성하는 중...");
     try {
       for (const file of Array.from(files)) {
@@ -539,6 +550,7 @@ function WorkspaceScreen({
           headers: { Authorization: `Bearer ${token}` },
           body: uploadBody,
         });
+        requireActiveSession(uploadResponse);
         const uploadPayload = await uploadResponse.json().catch(() => null) as { document_id?: string; detail?: string } | null;
         if (!uploadResponse.ok || !uploadPayload?.document_id) throw new Error(uploadPayload?.detail || `${file.name} 문서 등록 실패`);
 
@@ -549,6 +561,7 @@ function WorkspaceScreen({
           headers: { Authorization: `Bearer ${token}` },
           body: indexBody,
         });
+        requireActiveSession(indexResponse);
         const indexPayload = await indexResponse.json().catch(() => null) as { document_id?: string; detail?: string } | null;
         if (!indexResponse.ok || indexPayload?.document_id !== uploadPayload.document_id) throw new Error(indexPayload?.detail || `${file.name} 이미지 인덱싱 실패`);
         setManuals((current) => Array.from(new Set([...current, file.name])));
@@ -564,6 +577,11 @@ function WorkspaceScreen({
     if (!file) return;
     setIsVisionLoading(true);
     const token = getAccessToken();
+    if (!token) {
+      setIsVisionLoading(false);
+      onLogout();
+      return;
+    }
     setSitePhotoName(file.name);
     setVisionStatus("로컬 이미지 분석 중...");
     setCatalogCandidates([]);
@@ -576,6 +594,7 @@ function WorkspaceScreen({
         headers: { Authorization: `Bearer ${token}` },
         body,
       });
+      requireActiveSession(response);
       const payload = await response.json().catch(() => null) as {
         raw_visual_description?: string;
         extracted_markdown?: string;
