@@ -18,10 +18,14 @@
 
 html {
   scroll-behavior: smooth;
+  max-width: 100%;
+  overflow-x: clip;
 }
 
 body {
   margin: 0;
+  max-width: 100%;
+  overflow-x: clip;
   background: var(--background);
   color: var(--ink);
   font-family: "Pretendard", "Noto Sans KR", "Segoe UI", sans-serif;
@@ -560,7 +564,7 @@ a {
 .success-message { background: #ebf8f3; border-radius: 8px; color: #176a58; padding: 10px; }
 .prototype-note { font-size: 11px; margin-top: 18px !important; }
 
-.prototype-shell { min-height: 100vh; padding: 18px; position: relative; }
+.prototype-shell { max-width: 100%; min-height: 100vh; min-width: 0; padding: 18px; position: relative; }
 .prototype-shell.font-small { font-size: 14px; }
 .prototype-shell.font-medium { font-size: 16px; }
 .prototype-shell.font-large { font-size: 19px; }
@@ -613,6 +617,7 @@ a {
 .chat-bubble.user { background: #e9f1ff; margin-left: auto; }
 .chat-bubble.ai { background: #eaf6ef; }
 .chat-answer-text { margin: 0; white-space: pre-wrap; }
+.chat-answer-text, .chat-warning, .chat-source-card p, .catalog-candidate-card small { overflow-wrap: anywhere; word-break: break-word; }
 .catalog-candidate-list { border-top: 1px solid #bfd9ca; display: grid; gap: 9px; margin-top: 8px; padding-top: 10px; }
 .catalog-candidate-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
 .catalog-candidate-card { background: #fff; border: 1px solid #bfd4c8; border-radius: 10px; overflow: hidden; }
@@ -698,6 +703,7 @@ a {
 .upgraded-manual-row { grid-template-columns: minmax(220px, 340px) minmax(240px, 1fr); }
 .document-chip-list { display: flex !important; flex-direction: row; flex-wrap: wrap; gap: 7px; grid-column: 1 / -1; }
 .document-chip-list > span { align-items: center; background: #f4f8fa; border: 1px solid var(--line); border-radius: 999px; display: inline-flex; gap: 5px; max-width: 100%; padding: 6px 9px; }
+.document-chip-list > span { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 .document-chip-list button { background: transparent; border: 0; color: var(--red); cursor: pointer; font-weight: 900; }
 .chat-heading { align-items: center; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; padding: 15px 18px; }
 .chat-heading div { display: grid; gap: 3px; }
@@ -729,12 +735,36 @@ a {
 .pending-document-list span { background: #f5f8fa; border-radius: 8px; font-size: 12px; padding: 8px; }
 
 @media (max-width: 900px) {
+  .prototype-shell { padding: 10px; }
   .field-overview-grid { grid-template-columns: 1fr; }
   .progress-steps { grid-template-columns: repeat(3, 1fr); }
-  .prototype-topbar { grid-template-columns: auto 1fr; }
+  .prototype-topbar { grid-template-columns: auto minmax(0, 1fr); }
+  .prototype-topbar > div:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
   .user-label { display: none; }
+  .menu-control { position: static; }
+  .floating-menu {
+    bottom: auto;
+    left: 10px;
+    max-height: calc(100dvh - 84px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    position: fixed;
+    right: 10px;
+    top: 74px;
+    width: auto;
+    z-index: 1000;
+  }
+  .floating-menu input[type="range"], .floating-menu select { max-width: 100%; width: 100%; }
   .manual-row, .workspace-grid.embedded { grid-template-columns: 1fr; }
   .visual-stage { min-height: 260px; }
+  .quick-toolbar, .field-overview-grid, .manual-row, .chat-stage, .assessment-drawer { min-width: 0; width: 100%; }
+  .panel, .manual-row > div, .chat-bubble, .chat-source-card, .catalog-candidate-card { min-width: 0; }
+  .upgraded-chat .chat-input-row { grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(82px, .8fr); }
+  .upgraded-chat .chat-input-row > input { grid-column: 1 / -1; grid-row: 2; min-width: 0; }
+  .upgraded-chat .chat-input-row > button[type="submit"] { grid-column: 4; grid-row: 1; min-width: 0; }
+  .icon-action { min-width: 0; padding-left: 7px !important; padding-right: 7px !important; }
+  .chat-bubble { max-width: 92%; }
+  .catalog-candidate-grid { grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr)); }
 }
 
 @media (max-width: 620px) {
@@ -745,14 +775,15 @@ a {
   .icon-action { min-width: 0; padding: 0 7px !important; }
   .signup-grid { grid-template-columns: 1fr; }
   .signup-grid label:last-child { grid-column: auto; }
-  .prototype-shell { padding: 0; }
+  .prototype-shell { padding: 0; width: 100%; }
   .prototype-topbar { border-radius: 0; padding: 12px; }
   .prototype-topbar span { display: none; }
   .menu-button { padding: 9px 11px; }
-  .floating-menu { left: 10px; top: 67px; width: calc(100% - 20px); }
+  .floating-menu { left: 8px; right: 8px; top: 61px; width: auto; }
   .visual-stage { min-height: 230px; }
   .manual-row { padding: 12px; }
   .chat-history { min-height: 300px; }
+  .chat-bubble { max-width: 100%; }
   .chat-input-row { grid-template-columns: 1fr 70px; }
   .assessment-drawer { padding: 0 10px 10px; }
   .form-grid { grid-template-columns: 1fr; }

@@ -54,6 +54,7 @@ const initialForm = {
 };
 
 const levelLabel = { low: "낮음", medium: "보통", high: "높음" } as const;
+const ppeItems = ["안전모", "보호장갑", "보안경", "안전화"] as const;
 
 // 위경도 ↔ 미터 변환(근사). 위경도 1도당 거리는 위도에 따라 달라지므로
 // 경도는 현재 위도의 코사인으로 보정한다. 좁은 지역(수백m 이내) 가정.
@@ -356,6 +357,7 @@ function WorkspaceScreen({
   const [visionSummary, setVisionSummary] = useState("");
   const [visionStatus, setVisionStatus] = useState("");
   const [catalogCandidates, setCatalogCandidates] = useState<CatalogCandidate[]>([]);
+  const [ppeChecks, setPpeChecks] = useState<Record<string, boolean>>({});
   const [locationStatus, setLocationStatus] = useState("위치 미확인");
   const [gpsOrigin, setGpsOrigin] = useState<{ latitude: number; longitude: number } | null>(null);
   const [gpsLivePosition, setGpsLivePosition] = useState<{ latitude: number; longitude: number } | null>(null);
@@ -903,12 +905,12 @@ function WorkspaceScreen({
       </header>
 
       <section className="quick-toolbar" aria-label="현장 빠른 기능">
-        <label className="toolbar-upload">📷 현장 사진<input type="file" accept="image/*" onChange={(event) => void analyzePhoto(event.target.files?.[0])} /></label>
+        <label className="toolbar-upload"><InterfaceIcon name="image" />현장 사진<input type="file" accept="image/*" onChange={(event) => void analyzePhoto(event.target.files?.[0])} /></label>
         <button type="button" onClick={toggleVoiceInput} disabled={isTranscribing}>
-          {isRecording ? "⏹ 녹음 중지" : isTranscribing ? "🎤 인식 중..." : "🎤 음성 입력"}
+          <InterfaceIcon name={isRecording ? "stop" : "microphone"} />{isRecording ? "녹음 중지" : isTranscribing ? "인식 중..." : "음성 입력"}
         </button>
-        <button type="button" onClick={speakGuidance}>{isSpeaking ? "⏹ 음성 중지" : "🔊 음성 안내"}</button>
-        <button type="button" onClick={onHistory}>🗂 결과 기록</button>
+        <button type="button" onClick={speakGuidance}><InterfaceIcon name={isSpeaking ? "stop" : "speaker"} />{isSpeaking ? "음성 중지" : "음성 안내"}</button>
+        <button type="button" onClick={onHistory}><InterfaceIcon name="history" />결과 기록</button>
         <span>{locationStatus}</span>
       </section>
 
@@ -1048,7 +1050,12 @@ function WorkspaceScreen({
         </article>
         <article className="panel ppe-panel">
           <div className="panel-heading compact-heading"><h2>필수 보호구</h2><span className="panel-tag">현장 확인</span></div>
-          <div className="ppe-grid"><span>🪖<b>안전모</b></span><span>🧤<b>보호장갑</b></span><span>🥽<b>보안경</b></span><span>👢<b>안전화</b></span></div>
+          <div className="ppe-checklist">
+            {ppeItems.map((item) => <label className={ppeChecks[item] ? "checked" : ""} key={item}>
+              <input type="checkbox" checked={Boolean(ppeChecks[item])} onChange={(event) => setPpeChecks((current) => ({ ...current, [item]: event.target.checked }))} />
+              <span className="ppe-check-icon" aria-hidden="true">✓</span><b>{item}</b><small>{ppeChecks[item] ? "착용 확인" : "확인 필요"}</small>
+            </label>)}
+          </div>
           <p className="muted-copy">작업과 화학물질 특성에 따라 추가 보호구가 필요할 수 있습니다.</p>
         </article>
       </section>
@@ -1116,11 +1123,9 @@ function WorkspaceScreen({
           {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>안전자료를 검색하고 AI 답변을 생성하고 있습니다…</div>}
         </div>
         <form className="chat-input-row" onSubmit={sendChat}>
-          <button type="button" className="icon-action" title={isRecording ? "녹음 중지" : "음성 입력"} onClick={toggleVoiceInput} disabled={isTranscribing}>
-            {isRecording ? "⏹" : "🎤"}
-          </button>
-          <label className="icon-action file-icon" title="사진 첨부">📷<input type="file" accept="image/*" onChange={(event) => void analyzePhoto(event.target.files?.[0])} /></label>
-          <label className="icon-action file-icon" title="문서 첨부">📎<input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
+          <button type="button" className="icon-action" aria-label={isRecording ? "녹음 중지" : "음성 입력"} onClick={toggleVoiceInput} disabled={isTranscribing}><InterfaceIcon name={isRecording ? "stop" : "microphone"} /><span>음성</span></button>
+          <label className="icon-action file-icon" aria-label="사진 첨부"><InterfaceIcon name="image" /><span>사진</span><input type="file" accept="image/*" onChange={(event) => void analyzePhoto(event.target.files?.[0])} /></label>
+          <label className="icon-action file-icon" aria-label="문서 첨부"><InterfaceIcon name="paperclip" /><span>문서</span><input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
           <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={isVisionLoading ? "사진 분석이 끝나면 질문을 보낼 수 있습니다." : "예: 이건 뭐야? 어디에 쓰이는 거야?"} disabled={isChatLoading} />
           <button type="submit" disabled={isChatLoading || isVisionLoading || !question.trim()}>{isVisionLoading ? "사진 분석 중..." : isChatLoading ? "답변 생성 중..." : "전송"}</button>
         </form>
@@ -1219,6 +1224,21 @@ function SecureCandidateImage({ candidate, alt }: { candidate: CatalogCandidate;
   }, [candidate.document_id, candidate.image_index, candidate.page]);
 
   return source ? <img src={source} alt={alt} loading="lazy" /> : <div className="catalog-image-placeholder">이미지 불러오는 중</div>;
+}
+
+type InterfaceIconName = "location" | "image" | "microphone" | "speaker" | "stop" | "history" | "paperclip";
+
+function InterfaceIcon({ name }: { name: InterfaceIconName }) {
+  const paths: Record<InterfaceIconName, React.ReactNode> = {
+    location: <><path d="M12 21s6-5.1 6-11a6 6 0 1 0-12 0c0 5.9 6 11 6 11Z" /><circle cx="12" cy="10" r="2" /></>,
+    image: <><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9" r="1.5" /><path d="m4 17 5-5 4 4 2-2 5 5" /></>,
+    microphone: <><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8" /></>,
+    speaker: <><path d="M5 9v6h4l5 4V5L9 9H5Z" /><path d="M17 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12" /></>,
+    stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
+    history: <><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8" /><path d="M4 4v4h4M12 8v5l3 2" /></>,
+    paperclip: <path d="m9 17 7.5-7.5a3 3 0 0 0-4.2-4.2L4.8 12.8a5 5 0 0 0 7.1 7.1l7-7" />,
+  };
+  return <svg className="interface-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
