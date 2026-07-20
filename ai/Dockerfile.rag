@@ -18,6 +18,7 @@ FROM base AS test
 COPY ai/requirements-dev.txt ./requirements-dev.txt
 RUN python -m pip install --no-cache-dir -r requirements-dev.txt
 COPY ai ./ai
+COPY backend/app ./backend/app
 COPY backend/app/services/safety_guidance.py ./safety_guidance.py
 ENV PYTHONPATH=/app:/app/ai
 CMD ["python", "-m", "pytest", "-q", "/app/ai/tests"]

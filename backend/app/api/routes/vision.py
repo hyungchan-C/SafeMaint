@@ -1,14 +1,33 @@
+import json
+from pathlib import Path
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from httpx import Client, HTTPError
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import (
+    get_current_user,
+    get_retrieval_access_scope,
+    require_document_read,
+    require_document_upload,
+)
 from app.core.config import settings
-from app.db.models import User
+from app.db.models import Document, DocumentVersion, User
+from app.db.session import get_db
+from app.schemas.chat import RetrievalAccessScope
 
 
 router = APIRouter(prefix="/vision", tags=["vision"])
+
+CATALOG_METADATA_KEY = "vision_catalog_id"
+PDF_MAGIC = b"%PDF-"
+IMAGE_SIGNATURES = (
+    b"\xff\xd8\xff",
+    b"\x89PNG\r\n\x1a\n",
+)
 
 
 def _detail(response: object, fallback: str) -> str:
@@ -19,13 +38,103 @@ def _detail(response: object, fallback: str) -> str:
         return fallback
 
 
-@router.get("/catalog/image/{catalog_id}/{page}/{image_index}")
+def _can_access_document(
+    document: Document,
+    current_user: User,
+    access_scope: RetrievalAccessScope,
+) -> bool:
+    if document.lifecycle_status == "deleted":
+        return False
+    if document.created_by_user_id == current_user.id:
+        return True
+    if document.access_level == "public":
+        return True
+    if document.access_level == "private" or not access_scope.allow_company:
+        return False
+    return access_scope.all_sites or (
+        document.site_id is not None
+        and str(document.site_id) in access_scope.site_ids
+    )
+
+
+def _require_accessible_document(
+    db: Session,
+    document_id: UUID,
+    current_user: User,
+    access_scope: RetrievalAccessScope,
+) -> Document:
+    document = db.get(Document, document_id)
+    if document is None or not _can_access_document(document, current_user, access_scope):
+        # Do not reveal whether an inaccessible document exists.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "문서를 찾을 수 없습니다.")
+    return document
+
+
+def _read_upload(file: UploadFile, *, limit: int, expected: str) -> bytes:
+    content = file.file.read(limit + 1)
+    if not content:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "빈 파일은 처리할 수 없습니다.")
+    if len(content) > limit:
+        raise HTTPException(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            f"파일 크기는 {limit} 바이트를 넘을 수 없습니다.",
+        )
+    if expected == "pdf" and not content.startswith(PDF_MAGIC):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "PDF 파일 헤더가 올바르지 않습니다.")
+    if expected == "image" and not (
+        content.startswith(IMAGE_SIGNATURES)
+        or (content.startswith(b"RIFF") and content[8:12] == b"WEBP")
+    ):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "이미지 파일 헤더가 올바르지 않습니다.")
+    return content
+
+
+def _forward_content(
+    path: str,
+    *,
+    filename: str,
+    content: bytes,
+    content_type: str,
+    fallback: str,
+    data: dict[str, str] | None = None,
+) -> dict[str, object]:
+    try:
+        with Client(timeout=900.0) as client:
+            response = client.post(
+                f"{settings.vision_service_url.rstrip('/')}{path}",
+                files={"file": (filename, content, content_type)},
+                data=data,
+            )
+        if response.is_error:
+            raise HTTPException(response.status_code, _detail(response, fallback))
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, fallback)
+        return payload
+    except HTTPException:
+        raise
+    except (HTTPError, OSError, ValueError) as error:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "로컬 비전 서비스에 연결할 수 없습니다.",
+        ) from error
+
+
+@router.get("/catalog/image/{document_id}/{page}/{image_index}")
 def catalog_image(
-    catalog_id: str,
+    document_id: UUID,
     page: int,
     image_index: int,
-    _current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_document_read)],
+    access_scope: Annotated[RetrievalAccessScope, Depends(get_retrieval_access_scope)],
+    db: Annotated[Session, Depends(get_db)],
 ) -> Response:
+    if page < 1 or image_index < 1:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "후보 이미지를 찾을 수 없습니다.")
+    document = _require_accessible_document(db, document_id, current_user, access_scope)
+    catalog_id = str((document.metadata_json or {}).get(CATALOG_METADATA_KEY) or "")
+    if not catalog_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "카탈로그 인덱스를 찾을 수 없습니다.")
     try:
         with Client(timeout=30.0) as client:
             response = client.get(
@@ -37,7 +146,7 @@ def catalog_image(
         return Response(
             content=response.content,
             media_type=response.headers.get("content-type", "image/jpeg"),
-            headers={"Cache-Control": "private, max-age=3600"},
+            headers={"Cache-Control": "private, no-store"},
         )
     except HTTPException:
         raise
@@ -47,26 +156,102 @@ def catalog_image(
 
 @router.post("/catalog/index")
 def index_catalog(
-    _current_user: Annotated[User, Depends(get_current_user)],
-    file: UploadFile = File(...),
+    current_user: Annotated[User, Depends(require_document_upload)],
+    access_scope: Annotated[RetrievalAccessScope, Depends(get_retrieval_access_scope)],
+    db: Annotated[Session, Depends(get_db)],
+    document_id: Annotated[UUID, Form()],
 ) -> dict[str, object]:
-    if (file.content_type or "").lower() != "application/pdf" and not (file.filename or "").lower().endswith(".pdf"):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "PDF 파일만 인덱싱할 수 있습니다.")
-    return _forward_file("/v1/catalog/index", file, "카탈로그 이미지 인덱싱에 실패했습니다.")
+    document = _require_accessible_document(db, document_id, current_user, access_scope)
+    if document.created_by_user_id != current_user.id and not access_scope.all_sites:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "문서를 찾을 수 없습니다.")
+    version = db.scalar(
+        select(DocumentVersion)
+        .where(DocumentVersion.document_id == document.id)
+        .order_by(DocumentVersion.version_number.desc())
+        .limit(1)
+    )
+    if version is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "인덱싱할 문서 버전이 없습니다.")
+    try:
+        with Path(version.storage_path).open("rb") as source:
+            content = source.read(settings.document_max_upload_bytes + 1)
+    except OSError as error:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "저장된 PDF를 읽지 못했습니다.") from error
+    if len(content) > settings.document_max_upload_bytes:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "저장된 PDF가 허용 크기를 초과합니다.")
+    if not content.startswith(PDF_MAGIC):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "저장된 PDF 헤더가 올바르지 않습니다.")
+
+    payload = _forward_content(
+        "/v1/catalog/index",
+        filename=version.original_filename,
+        content=content,
+        content_type="application/pdf",
+        fallback="카탈로그 이미지 인덱싱에 실패했습니다.",
+    )
+    catalog_id = str(payload.pop("catalog_id", ""))
+    if not catalog_id:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "비전 서비스가 카탈로그 ID를 반환하지 않았습니다.")
+    document.metadata_json = {**(document.metadata_json or {}), CATALOG_METADATA_KEY: catalog_id}
+    db.add(document)
+    db.commit()
+    return {"document_id": str(document.id), **payload}
+
+
+def _parse_document_ids(value: str) -> list[UUID]:
+    try:
+        raw_ids = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "document_ids는 JSON 배열이어야 합니다.") from error
+    if not isinstance(raw_ids, list) or len(raw_ids) > 20:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "document_ids는 최대 20개까지 허용됩니다.")
+    try:
+        return list(dict.fromkeys(UUID(str(value)) for value in raw_ids))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "문서 ID 형식이 올바르지 않습니다.") from error
 
 
 @router.post("/catalog/match")
 def match_catalog(
-    _current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_document_read)],
+    access_scope: Annotated[RetrievalAccessScope, Depends(get_retrieval_access_scope)],
+    db: Annotated[Session, Depends(get_db)],
     file: UploadFile = File(...),
-    catalog_ids: str = Form("[]"),
+    document_ids: str = Form("[]"),
 ) -> dict[str, object]:
-    return _forward_file(
+    selected_ids = _parse_document_ids(document_ids)
+    catalog_to_document: dict[str, str] = {}
+    for document_id in selected_ids:
+        document = _require_accessible_document(db, document_id, current_user, access_scope)
+        catalog_id = str((document.metadata_json or {}).get(CATALOG_METADATA_KEY) or "")
+        if not catalog_id:
+            raise HTTPException(status.HTTP_409_CONFLICT, "선택한 문서의 이미지 인덱스가 준비되지 않았습니다.")
+        catalog_to_document[catalog_id] = str(document.id)
+
+    content = _read_upload(file, limit=settings.vision_image_max_upload_bytes, expected="image")
+    payload = _forward_content(
         "/v1/catalog/match",
-        file,
-        "카탈로그 이미지 비교에 실패했습니다.",
-        data={"catalog_ids": catalog_ids},
+        filename=file.filename or "field-image.bin",
+        content=content,
+        content_type=file.content_type or "application/octet-stream",
+        fallback="카탈로그 이미지 비교에 실패했습니다.",
+        data={"catalog_ids": json.dumps(list(catalog_to_document))},
     )
+    safe_candidates = []
+    candidates = payload.get("catalog_candidates")
+    if isinstance(candidates, list):
+        for raw_candidate in candidates:
+            if not isinstance(raw_candidate, dict):
+                continue
+            catalog_id = str(raw_candidate.get("catalog_id") or "")
+            document_id = catalog_to_document.get(catalog_id)
+            if document_id is None:
+                continue
+            safe_candidate = {key: value for key, value in raw_candidate.items() if key != "catalog_id"}
+            safe_candidate["document_id"] = document_id
+            safe_candidates.append(safe_candidate)
+    payload["catalog_candidates"] = safe_candidates
+    return payload
 
 
 @router.post("/catalog/analyze")
@@ -74,32 +259,11 @@ def analyze_catalog(
     _current_user: Annotated[User, Depends(get_current_user)],
     file: UploadFile = File(...),
 ) -> dict[str, object]:
-    return _forward_file("/v1/catalog/analyze", file, "로컬 이미지 분석에 실패했습니다.")
-
-
-def _forward_file(
-    path: str,
-    file: UploadFile,
-    fallback: str,
-    data: dict[str, str] | None = None,
-) -> dict[str, object]:
-    try:
-        with Client(timeout=900.0) as client:
-            response = client.post(
-                f"{settings.vision_service_url.rstrip('/')}{path}",
-                files={
-                    "file": (
-                        file.filename or "upload.bin",
-                        file.file,
-                        file.content_type or "application/octet-stream",
-                    )
-                },
-                data=data,
-            )
-        if response.is_error:
-            raise HTTPException(response.status_code, _detail(response, fallback))
-        return response.json()
-    except HTTPException:
-        raise
-    except (HTTPError, OSError, ValueError) as error:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "로컬 비전 서비스에 연결할 수 없습니다.") from error
+    content = _read_upload(file, limit=settings.vision_image_max_upload_bytes, expected="image")
+    return _forward_content(
+        "/v1/catalog/analyze",
+        filename=file.filename or "field-image.bin",
+        content=content,
+        content_type=file.content_type or "application/octet-stream",
+        fallback="로컬 이미지 분석에 실패했습니다.",
+    )

@@ -63,6 +63,7 @@ def load_document(document: dict[str, Any], chunks: list[dict[str, Any]]) -> str
                 external_id=document["external_id"],
                 title=document["title"],
                 source_type=document["source_type"],
+                document_type_code=document["document_type_code"],
                 publisher=document.get("publisher"),
                 source_url=document.get("source_url"),
                 revision=document.get("revision"),
@@ -77,7 +78,11 @@ def load_document(document: dict[str, Any], chunks: list[dict[str, Any]]) -> str
             row = existing
             row.title = document["title"]
             row.source_type = document["source_type"]
+            row.document_type_code = document["document_type_code"]
             row.publisher = document.get("publisher")
+            row.source_url = document.get("source_url")
+            row.revision = document.get("revision")
+            row.published_at = document.get("published_at")
             row.access_level = document["access_level"]
             row.file_sha256 = document.get("file_sha256")
             row.metadata_json = document["metadata"]

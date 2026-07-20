@@ -53,8 +53,8 @@ DB 테이블과 관계는 [docs/database.md](docs/database.md), 전처리 결과
 `_test`로 끝나는 격리 DB에서만 실행합니다. 상세 준비와 재실행 명령은
 [ai/README.md](ai/README.md)의 **BGE-M3 임베딩 실험**을 참고하세요.
 
-채팅 화면에서 실제 BGE-M3 검색과 문서 출처를 사용하려면 임베딩 준비 후
-RAG Compose 구성을 함께 실행합니다.
+채팅 화면에서 실제 BGE-M3 검색과 문서 출처를 사용하려면 공통 Compose의
+`rag`와 `worker`를 함께 실행합니다.
 
 검색할 문서 종류는 코드에 고정하지 않고 `.env`의 쉼표 구분 설정으로 선택합니다.
 
@@ -70,18 +70,22 @@ docker compose `
   --env-file .env `
   -f docker-compose.yml `
   -f docker-compose.dev.yml `
-  -f docker-compose.rag.yml `
   up -d --build
 ```
 
+RAG API는 Docker 내부의 `http://rag:8010`에서 backend만 접근하며 호스트에는
+포트를 공개하지 않습니다. `docker-compose.rag.yml`은 예전 실행 명령과의 호환을
+위해 timeout 설정만 남긴 선택 오버레이입니다.
+
 RAG 서비스가 실행되지 않거나 검색 DB가 준비되지 않은 경우에도 채팅 API는 작업
 키워드에 맞는 공통 안전수칙을 반환하며, 화면에 근거 검색이 연결되지 않았다는
-경고를 표시합니다. 화면에서 선택한 매뉴얼은 아직 파일 업로드·전처리 대상이
-아니므로 DB에 적재·임베딩된 검색 근거와 구분됩니다.
+경고를 표시합니다. 화면의 매뉴얼 선택은 업로드·처리·승인이 끝난 문서와 버전의
+UUID를 전달할 때만 검색 범위를 제한합니다.
 
-`OPENAI_API_KEY`가 설정되어 있으면 채팅은 **BGE-M3·pgvector 검색 → 검색 근거와
-작업정보를 OpenAI 모델에 전달 → 답변과 검색 출처를 함께 표시**하는 순서로
-동작합니다. 키가 없거나 OpenAI 요청이 실패하면 검색 서비스의 기본 안전 안내로
+`ALLOW_EXTERNAL_LLM=true`이고 provider 인증 정보가 설정되어 있으면 채팅은
+**BGE-M3·pgvector 검색 → 공개 검색 근거와 작업정보를 OpenAI 호환 모델에 전달
+→ 답변과 검색 출처를 함께 표시**하는 순서로 동작합니다. 외부 호출이 꺼져 있거나
+요청이 실패하면 검색 서비스의 기본 안전 안내로
 자동 전환하므로 RAG 근거는 유지됩니다. 현재 OpenAI 연동은 Qwen3 적용 전 실험용이며,
 모델 호출부는 `backend/app/services/ai.py`에 분리되어 있습니다.
 
@@ -450,15 +454,9 @@ docker compose `
 다른 GPU 프로그램을 함께 실행하지 않는 것을 권장합니다. 이후 요청은 프로세스에
 로드된 모델을 재사용합니다.
 
-```powershell
-Invoke-RestMethod http://localhost:8020/health/live
-
-$form = @{ file = Get-Item "C:\path\catalog-page.png" }
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://localhost:8020/v1/catalog/analyze `
-  -Form $form
-```
+비전 컨테이너는 호스트 포트를 열지 않으며 Docker 내부 네트워크에서 백엔드만
+접근합니다. 브라우저와 외부 도구는 로그인 후 발급받은 Bearer 토큰으로
+`http://localhost:8000/api/v1/vision/...` 백엔드 API만 호출해야 합니다.
 
 모델 다운로드가 끝난 뒤 인터넷 차단 환경에서는 `.env`를 다음처럼 바꾸고 서비스를
 재시작합니다.
@@ -477,13 +475,19 @@ OCR만 필요한 저사양 현장 장비에서는 `.env`의 `VISION_ENABLE_QWEN=
 PaddleOCR-VL만 CPU에서 실행됩니다. 이미지 의미 분석이 필요하면 기본값 `true`를
 사용합니다.
 
-매뉴얼 첨부 UI는 `POST /api/v1/vision/catalog/index`, 사진 첨부 UI는
-`POST /api/v1/vision/catalog/match`를 호출합니다. PDF의 제품 이미지를 추출해 로컬
+매뉴얼 첨부 UI는 문서 업로드 후 반환된 `document_id`로
+`POST /api/v1/vision/catalog/index`를 호출하고, 사진 첨부 UI는 접근 가능한
+`document_ids`와 함께 `POST /api/v1/vision/catalog/match`를 호출합니다. 원본 PDF를
+인덱싱 API에 다시 보내거나 내부 `catalog_id`를 브라우저에 저장하지 않습니다. 백엔드는
+문서 소유자·역할·사업장 권한을 확인한 뒤 PDF의 제품 이미지를 추출해 로컬
 임베딩으로 후보를 좁히고 Qwen3-VL이 지도·인증서·로고·다른 부품을 다시 걸러냅니다.
 후보는 같은 모델이나 규격의 확정 근거가 아니며, 신뢰 임계값을 넘지 못하면 표시하지
 않습니다. 분석된
-JSON은 채팅의 로컬 이미지 분석 문맥으로 전달되므로, 향후 최종 답변 모델을
-Qwen3.5-27B로 교체해도 이 비전 서비스는 그대로 사용할 수 있습니다.
+JSON은 현재 브라우저 탭의 메모리에서만 채팅의 로컬 이미지 분석 문맥으로 사용하며
+OCR·후보·내부 인덱스 ID는 `localStorage`에 저장하지 않습니다. 이미지 분석 문맥이
+포함된 요청은 외부 LLM 답변 생성을 건너뛰어 현장 이미지 정보가 외부로 전송되지
+않습니다. 향후 사내 Qwen 계열 모델로 교체해도 이 비전 서비스는 그대로 사용할 수
+있습니다.
 
 ## API
 
@@ -493,6 +497,11 @@ Qwen3.5-27B로 교체해도 이 비전 서비스는 그대로 사용할 수 있�
 | `POST` | `/api/v1/auth/login` | 사원번호·비밀번호 확인, 실패 횟수 및 15분 잠금 처리, 세션 토큰 발급 |
 | `POST` | `/api/v1/auth/logout` | 현재 세션 토큰 무효화(회수) |
 | `POST` | `/api/v1/documents/upload` | PDF 업로드(인증 필요), `document_versions`/`document_processing_jobs` 생성 후 워커가 비동기 처리 |
+| `POST` | `/api/v1/documents/{document_id}/versions/{version_id}/approve` | `document.approve` 권한으로 검토 완료 버전을 활성화하고 기존 버전을 superseded 처리 |
+| `POST` | `/api/v1/vision/catalog/index` | `document.upload` 권한과 소유권을 확인해 저장된 PDF의 로컬 이미지 인덱스 생성 |
+| `POST` | `/api/v1/vision/catalog/match` | `document.read` 권한 범위의 문서만 현장 사진과 로컬 비교 |
+| `GET` | `/api/v1/vision/catalog/image/{document_id}/{page}/{image_index}` | 문서 접근 권한 확인 후 후보 이미지 반환(`private, no-store`) |
+| `POST` | `/api/v1/chat` | 익명은 공용 문서만, 로그인 사용자는 서버가 계산한 역할·사업장 범위로 RAG 검색 |
 | `POST` | `/api/v1/speech/synthesize` | Supertonic 기반 한국어 안전 안내 WAV 생성 |
 | `POST` | `/api/v1/assessments/preview` | DB 저장 없는 기존 규칙 기반 미리보기 |
 | `POST` | `/api/v1/assessments` | 평가·위험요인·체크리스트·감사 이벤트 트랜잭션 저장 |
@@ -532,7 +541,7 @@ DB 통합 테스트는 실수로 운영 DB를 수정하지 않도록 DB 이름�
 
 SafeMaint는 고객사별로 완전히 분리해 설치하는 single-tenant 온프레미스 시스템입니다. 각 고객사는 동일한 이미지와 스키마를 사용하지만 PostgreSQL, 원본 PDF, 임베딩, 계정, 감사기록은 각 고객사 서버의 Docker volume에만 저장됩니다. 중앙 관리 환경에는 고객사 문서·질문·응답·임베딩을 수집하거나 전송하는 코드 경로가 없습니다.
 
-실행 서비스는 `frontend`, `backend`, `rag`, `worker`, `db`입니다. `migrate`와 `seed`는 성공 후 종료되는 일회성 서비스입니다. 운영 Compose에서는 DB와 RAG 포트를 호스트에 공개하지 않으며 개발 오버레이를 사용할 때만 각각 `127.0.0.1`에 공개합니다.
+실행 서비스는 `frontend`, `backend`, `rag`, `worker`, `db`입니다. `migrate`와 `seed`는 성공 후 종료되는 일회성 서비스입니다. 운영 Compose에서는 DB와 RAG 포트를 호스트에 공개하지 않습니다. 개발 오버레이도 DB만 `127.0.0.1`에 공개하고 RAG는 계속 Docker 내부에서만 접근합니다.
 
 영구 데이터:
 
@@ -543,9 +552,9 @@ SafeMaint는 고객사별로 완전히 분리해 설치하는 single-tenant 온�
 
 백업 시에는 DB와 `safemaint_documents`를 같은 복구 시점으로 함께 보호해야 합니다. 스크립트는 `docker compose down -v`나 `docker volume rm`을 실행하지 않습니다.
 
-### 권한 데이터 기반과 팀원 담당 연계
+### 인증·문서 권한
 
-DB에는 사용자 → 역할 → 권한을 표현하는 `permissions`, `role_permissions`, `user_roles`, `user_sites` 구조와 seed가 준비되어 있습니다. 다만 로그인 토큰 발급, 현재 사용자 dependency, PDF 업로드 API 연결은 팀원이 담당하기로 정했기 때문에 이 변경에서는 구현하거나 공개하지 않습니다. 기존 로그인 응답만으로 보호 API를 만들거나 프런트가 보낸 역할 문자열을 신뢰해서는 안 됩니다.
+DB의 `permissions`, `role_permissions`, `user_roles`, `user_sites`를 기준으로 백엔드가 권한을 계산합니다. 로그인 세션의 Bearer 토큰만 신뢰하며 클라이언트가 보낸 역할명, `site_id`, `allow_company` 값으로 권한을 올리지 않습니다.
 
 | 역할 | 주요 문서 권한 |
 |---|---|
@@ -554,24 +563,26 @@ DB에는 사용자 → 역할 → 권한을 표현하는 `permissions`, `role_pe
 | `document_manager` | 위 권한 + 승인, 삭제, 복구, 감사 조회 |
 | `admin` | 모든 권한, 역할 관리, 공용 패키지 가져오기·롤백 |
 
-권한 코드는 `document.read`, `document.upload`, `document.update`, `document.replace`, `document.approve`, `document.delete`, `document.restore`, `role.manage`, `audit.read`, `public_package.import`입니다. 팀원 인증 작업이 합쳐질 때 백엔드가 DB 권한과 `site_id`를 조회해 `RetrievalAccessScope`를 구성해야 합니다. 현재 채팅 경로는 인증 범위를 임의로 추측하지 않고 public-only 검색 범위를 사용합니다.
+권한 코드는 `document.read`, `document.upload`, `document.update`, `document.replace`, `document.approve`, `document.delete`, `document.restore`, `role.manage`, `audit.read`, `public_package.import`입니다. 익명 채팅은 항상 public-only입니다. `document.read`가 있는 일반 사용자는 활성 `UserSite.site_id`만 회사 문서 범위로 받고, `document_manager`와 `admin`은 모든 사업장을 조회할 수 있습니다. 별도 정책이 없는 `private` 문서는 어느 경우에도 허용하지 않습니다. `selected_document_ids`와 `selected_document_version_ids`는 이 범위를 더 좁히는 교집합 필터이며 권한 상승 수단이 아닙니다.
 
 ### 고객사 PDF 처리 흐름
 
-이 변경은 문서 유형·버전·처리 작업·승인 상태를 저장할 DB 기반과 로컬 worker를 제공합니다. PDF 업로드 라우트와 인증 연결은 팀원 담당 범위이므로 `/api/v1/documents` API와 프런트 업로드 호출은 등록하지 않았습니다. 화면의 PDF 선택은 현재 파일명 미리보기일 뿐 서버 업로드가 아닙니다.
+인증된 `document.upload` 사용자는 `/api/v1/documents/upload`로 회사 문서를 등록합니다. 일반 업로드 API는 회사 범위 문서 유형과 `restricted`/`private` 접근 수준만 허용하므로 `public_guide` 또는 `public` 문서로 위장 등록할 수 없습니다. 업로드는 원본 파일, SHA-256, 새 `DocumentVersion`, `DocumentProcessingJob`을 만들며 같은 모델의 재업로드는 새 버전 번호를 부여합니다.
 
 ```text
 pending → processing → review_required → active
                     └→ failed 또는 ocr_required
 ```
 
-worker가 고객사 서버 안에서 PyMuPDF로 텍스트를 추출하고 BGE-M3 임베딩을 생성합니다. 텍스트가 없는 스캔 PDF는 내용을 꾸며내지 않고 `ocr_required`로 표시합니다. 검색 SQL은 승인된 현재 버전만 대상으로 하고 실패 버전과 삭제 문서를 제외하도록 준비되어 있습니다. 실제 업로드·검토·승인 전환 API는 팀원 인증 작업과 함께 연결해야 합니다.
+worker가 고객사 서버 안에서 PyMuPDF로 텍스트를 추출하고 BGE-M3 1024차원 임베딩을 생성합니다. 텍스트가 없는 스캔 PDF는 내용을 꾸며내지 않고 `ocr_required`로 표시합니다. 처리된 문서는 `review_required`에서 대기하며 `document.approve` 권한 사용자가 승인 API를 호출해야 `active/current_version`이 됩니다. 승인은 row lock과 단일 트랜잭션으로 실행되고 이전 활성 버전을 `superseded`로 바꾸며 감사 이벤트를 남깁니다. 검색은 승인된 현재 버전만 대상으로 합니다.
 
 문서 유형은 `public_incident`, `public_law`, `public_guide`, `public_media`, `company_policy`, `equipment_manual`, `component_manual`입니다. 향후 고객사 업로드 API는 회사 문서 유형만 허용하고 공용 유형은 서명된 패키지로만 설치해야 합니다.
 
 ### 서명된 공용 RAG 패키지
 
 패키지는 안전한 ZIP 안에 canonical JSON인 `manifest.json`, `documents.jsonl`, `chunks.jsonl`, `signature.ed25519`만 포함합니다. pickle은 사용하지 않습니다. manifest에는 패키지·스키마 버전, 모델, 차원, 출처 유형, 문서/청크 수, 파일별 SHA-256, 이전 버전 정보가 들어갑니다.
+
+`safemaint_api_data`에는 국내재해·사고사망 및 안전보건법령 스마트검색 수집기와 공용 패키지 생성기가 있습니다. 각 하위 프로젝트의 `output/`은 로컬 생성 데이터이므로 Git에 포함되지 않습니다. 공용 패키지 생성기는 별도 `rag_documents`/`rag_chunks` 테이블이나 직접 적재 SQL을 만들지 않고, 기존 Alembic `documents`/`document_chunks` 형식과 아래 Ed25519 검증 CLI를 사용합니다. 자세한 입력 규격과 빌드 명령은 `safemaint_api_data/safemaint_public_rag_package/README.md`를 참고하세요.
 
 중앙 생성 환경에서 Ed25519 키를 별도 비밀 저장소에 보관하고 다음 CLI를 사용합니다.
 
@@ -632,9 +643,9 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 ### 현재 구현 범위와 남은 항목
 
-구현됨: DB 기반 RBAC 데이터 구조와 seed, 문서 유형·버전·처리 상태 기반, 로컬 텍스트 추출·임베딩 worker, 승인된 현재 버전 검색 조건, 출처의 문서 유형·파일명·페이지·버전·유사도, 서명 패키지 생성·검증·가져오기·롤백 CLI, 감사 데이터 구조, 외부 LLM 기본 차단, TTS 유지.
+구현됨: DB 기반 RBAC와 세션 토큰, 인증된 PDF 업로드 API(F-01), 문서 유형·버전·처리 상태, 로컬 텍스트 추출·BGE-M3 임베딩 worker, 트랜잭션 기반 승인 API, 승인된 현재 버전 검색, 인증 사용자의 역할·사업장 검색 범위, 출처의 문서 유형·파일명·페이지·섹션·버전·점수, 서명 패키지 CLI, 감사 데이터, 외부 LLM 기본 차단, TTS.
 
-팀원 담당으로 제외됨: 로그인 토큰 발급, 현재 사용자 dependency, PDF 업로드 API(F01), 해당 API의 프런트 연결과 인증 기반 문서 관리 API. 이 항목이 합쳐지기 전에는 회사 문서 업로드·승인 화면이 완성된 것으로 간주하지 않습니다.
+프런트엔드의 문서 업로드·승인 관리 화면은 이번 E2E 범위에 포함하지 않았습니다. HTTP API와 백엔드 보안 흐름까지 자동 검증합니다.
 
 별도 운영 작업 필요: 고객사 HTTPS 인증서/reverse proxy, Ed25519 키 수명주기와 오프라인 전달 절차, 실제 백업·PITR 자동화, 스캔 PDF용 검증된 로컬 OCR 엔진, 악성 PDF 안티바이러스/CDR, 로그 보존·모니터링 정책. 이 항목들은 동작하는 것처럼 화면에 표시하지 않습니다.
 
@@ -654,7 +665,7 @@ OPENAI_MAX_OUTPUT_TOKENS=1200
 
 Qwen3가 OpenAI 호환 API로 준비되면 애플리케이션 코드를 수정하지 않고 `LLM_BASE_URL`, `LLM_ANALYZER_MODEL`, `LLM_ANSWER_MODEL`만 변경합니다. 모델 분석 JSON이 잘못되거나 시간 초과가 발생하면 입력값 기반 검색어로 대체합니다. 검색 근거가 없으면 모델이 답을 추측하지 않고 “근거 없음” 응답을 반환합니다. 회사 범위 문서가 결과에 포함된 경우에는 외부 모델 답변 생성을 항상 차단합니다.
 
-인증 dependency가 아직 연결되지 않은 요청의 검색 범위는 항상 공개 문서뿐입니다. 화면에서 선택한 매뉴얼은 파일명이 아니라 아래 UUID 필드로 전달해야 합니다.
+익명 요청의 검색 범위는 항상 공개 문서뿐입니다. 로그인 요청은 세션 사용자와 DB 권한·사업장 배정을 기준으로 서버가 범위를 생성합니다. 화면에서 선택한 매뉴얼은 파일명이 아니라 아래 UUID 필드로 전달해야 합니다.
 
 ```json
 {
@@ -665,7 +676,7 @@ Qwen3가 OpenAI 호환 API로 준비되면 애플리케이션 코드를 수정�
 }
 ```
 
-기존 `registered_manuals` 값이 UUID이면 단계적으로 호환되지만, 파일명 문자열은 검색 권한이나 범위로 사용하지 않습니다. 인증 담당자의 현재 사용자·사업장 권한 연결이 합쳐질 때만 `allow_company` 범위를 서버가 생성해야 하며 클라이언트가 임의로 회사 문서 권한을 부여해서는 안 됩니다.
+기존 `registered_manuals` 값이 UUID이면 단계적으로 호환되지만, 파일명 문자열은 검색 권한이나 범위로 사용하지 않습니다. 클라이언트가 보낸 `allow_company`, 역할명 또는 사업장 값은 신뢰하지 않습니다.
 
 문서 worker는 팀의 `ai/preprocessing/pdf_pipeline.py`를 공통 처리 경로로 사용합니다. 텍스트 PDF는 페이지·섹션·제조사·제품군·모델 메타데이터와 결정적 청크 ID/해시를 저장합니다. 이미지 전용 PDF는 OCR이 준비되지 않은 경우 `ocr_required`, 내용이 없는 PDF는 `failed`로 구분합니다. 중단된 `processing` 작업은 제한 횟수 내 재시도하고 최종 실패 사유와 감사 이벤트를 남깁니다.
 
@@ -687,3 +698,37 @@ docker run --rm safemaint-backend:test-suite
 docker build --target test -t safemaint-rag:test-suite -f .\ai\Dockerfile.rag .
 docker run --rm safemaint-rag:test-suite
 ```
+
+## 가짜 PDF RAG·LLM E2E 검증
+
+실제 회사 문서를 사용하지 않고 PyMuPDF가 실행 중 생성하는 ASCII 테스트 PDF로 다음 흐름을 검증합니다.
+
+```text
+PDF 업로드 → Worker 전처리·청킹 → BGE-M3 임베딩 → pgvector 저장
+→ 문서 승인 → 하이브리드 검색 → 근거 답변과 파일명·페이지·섹션 출처
+```
+
+PowerShell 실행 정책이 허용된 터미널에서는 프로젝트 루트에서 다음 한 줄을 실행합니다.
+
+```powershell
+.\scripts\run-pdf-rag-e2e.ps1
+```
+
+스크립트 실행이 정책으로 차단되면 시스템 설정을 바꾸지 않고 이번 프로세스에만 우회 정책을 적용할 수 있습니다.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\run-pdf-rag-e2e.ps1
+```
+
+스크립트는 매 실행마다 이름이 `_test`로 끝나는 DB와 고유한 테스트 전용 DB·문서 volume을 사용하고 비밀번호를 메모리에서 생성합니다. 개발·운영 DB와 문서 volume은 사용하거나 삭제하지 않으며 테스트 종료 시 서비스만 내립니다. 모델 cache만 기존 `safemaint_model_cache`를 재사용할 수 있습니다. 실패 시 DB, migration, seed, backend, RAG, worker 로그를 출력합니다.
+
+기본 실행은 실제 BGE-M3까지 검증하고 외부 LLM 호출은 건너뜁니다. 공개 가짜 PDF만 GPT-4o-mini에 보내는 선택 테스트는 키를 소스나 로그에 남기지 않고 다음처럼 명시적으로 실행합니다.
+
+```powershell
+$env:OPENAI_API_KEY = "발급받은_테스트용_키"
+.\scripts\run-pdf-rag-e2e.ps1 -RunExternalLlm
+Remove-Item Env:OPENAI_API_KEY
+```
+
+키가 없으면 외부 LLM 항목만 `SKIP`되고 업로드, 권한, Worker, 임베딩, 승인, 검색, 회사 문서 외부 전송 차단 테스트는 계속 실행됩니다. 회사 범위 근거가 검색되면 외부 provider를 호출하지 않고 로컬 템플릿으로 답하며 출처는 그대로 유지합니다. 세부 검증 결과는 [PDF RAG·LLM E2E 보고서](reports/pdf_rag_llm_e2e_report.md)에 기록합니다.

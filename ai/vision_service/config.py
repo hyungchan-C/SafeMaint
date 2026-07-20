@@ -19,6 +19,11 @@ class Settings:
     max_new_tokens: int = int(getenv("VISION_MAX_NEW_TOKENS", "192"))
     catalog_index_dir: str = getenv("VISION_CATALOG_INDEX_DIR", "/tmp/safemaint-catalogs")
     catalog_match_threshold: float = float(getenv("VISION_CATALOG_MATCH_THRESHOLD", "0.55"))
+    image_max_upload_bytes: int = int(getenv("VISION_IMAGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+    pdf_max_upload_bytes: int = int(getenv("VISION_PDF_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+    image_max_pixels: int = int(getenv("VISION_IMAGE_MAX_PIXELS", "40000000"))
+    pdf_max_pages: int = int(getenv("VISION_PDF_MAX_PAGES", "500"))
+    catalog_max_images: int = int(getenv("VISION_CATALOG_MAX_IMAGES", "5000"))
 
 
 settings = Settings()

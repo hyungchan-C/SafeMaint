@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps
 from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 
 from vision_service.schemas import CatalogCandidate, CatalogIndexResponse
 
@@ -65,10 +66,21 @@ def _feature(image: Image.Image) -> np.ndarray:
 
 
 class CatalogImageMatcher:
-    def __init__(self, root: str, threshold: float) -> None:
+    def __init__(
+        self,
+        root: str,
+        threshold: float,
+        *,
+        max_pages: int = 500,
+        max_images: int = 5000,
+        max_image_pixels: int = 40_000_000,
+    ) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.threshold = threshold
+        self.max_pages = max_pages
+        self.max_images = max_images
+        self.max_image_pixels = max_image_pixels
         self.embedder = _SemanticEmbedder()
 
     def index_pdf(self, pdf_path: Path, filename: str) -> CatalogIndexResponse:
@@ -80,11 +92,19 @@ class CatalogImageMatcher:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             return CatalogIndexResponse(**manifest["summary"])
 
+        try:
+            reader = PdfReader(BytesIO(data))
+        except (PdfReadError, ValueError, OSError) as error:
+            raise ValueError("손상되었거나 지원하지 않는 PDF입니다.") from error
+        if len(reader.pages) > self.max_pages:
+            raise ValueError(f"PDF 페이지 수는 {self.max_pages}개를 넘을 수 없습니다.")
         target.mkdir(parents=True, exist_ok=True)
-        reader = PdfReader(BytesIO(data))
         entries: list[dict[str, object]] = []
         warnings: list[str] = []
         for page_number, page in enumerate(reader.pages, start=1):
+            if len(entries) >= self.max_images:
+                warnings.append(f"이미지는 최대 {self.max_images}개까지만 인덱싱했습니다.")
+                break
             page_text = " ".join((page.extract_text() or "").split())[:1600]
             try:
                 page_images = list(page.images)
@@ -93,7 +113,11 @@ class CatalogImageMatcher:
                 continue
             for image_index, embedded in enumerate(page_images, start=1):
                 try:
-                    image = Image.open(BytesIO(embedded.data)).convert("RGB")
+                    source_image = Image.open(BytesIO(embedded.data))
+                    if source_image.width * source_image.height > self.max_image_pixels:
+                        warnings.append(f"{page_number}페이지의 과도하게 큰 이미지를 건너뛰었습니다.")
+                        continue
+                    image = source_image.convert("RGB")
                     if image.width < 64 or image.height < 64:
                         continue
                     image_name = f"p{page_number:04d}-i{image_index:03d}.jpg"
@@ -119,7 +143,10 @@ class CatalogImageMatcher:
         return CatalogIndexResponse(**summary)
 
     def match(self, image_path: Path, catalog_ids: list[str], limit: int = 8) -> list[CatalogCandidate]:
-        query = self.embedder.encode(Image.open(image_path))
+        query_image = Image.open(image_path)
+        if query_image.width * query_image.height > self.max_image_pixels:
+            raise ValueError(f"이미지 픽셀 수는 {self.max_image_pixels}개를 넘을 수 없습니다.")
+        query = self.embedder.encode(query_image)
         scored: list[CatalogCandidate] = []
         for catalog_id in catalog_ids:
             manifest_path = self.root / catalog_id / "manifest.json"
@@ -127,7 +154,7 @@ class CatalogImageMatcher:
                 continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             filename = manifest["summary"]["filename"]
-            for entry in manifest["entries"]:
+            for entry in manifest["entries"][: self.max_images]:
                 candidate = np.load(self.root / catalog_id / entry["feature"], allow_pickle=False)
                 if candidate.shape != query.shape:
                     # Ignore indexes made by an older descriptor version. Re-uploading the
@@ -156,5 +183,9 @@ class CatalogImageMatcher:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         for entry in manifest["entries"]:
             if int(entry["page"]) == page and int(entry["image_index"]) == image_index:
-                return self.root / catalog_id / str(entry["image"])
+                catalog_root = (self.root / catalog_id).resolve()
+                candidate = (catalog_root / str(entry["image"])).resolve()
+                if candidate == catalog_root or catalog_root not in candidate.parents:
+                    return None
+                return candidate
         return None

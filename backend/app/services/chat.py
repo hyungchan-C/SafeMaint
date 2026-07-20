@@ -26,10 +26,13 @@ ANALYZER_FALLBACK_WARNING = (
     "상황 분석 모델을 사용할 수 없어 입력값 기반 검색어로 안전하게 대체했습니다."
 )
 LLM_FALLBACK_WARNING = (
-    "GPT-4o-mini 답변 생성에 실패해 검색 서비스의 근거 기반 기본 안내를 표시합니다."
+    "외부 LLM 답변 생성에 실패해 검색 서비스의 근거 기반 기본 안내를 표시합니다."
 )
 COMPANY_LLM_WARNING = (
-    "회사 문서 내용은 외부 GPT-4o-mini로 전송하지 않았습니다."
+    "회사 문서 내용은 외부 LLM으로 전송하지 않았습니다."
+)
+LOCAL_VISION_LLM_WARNING = (
+    "로컬 이미지 분석 내용은 외부 LLM으로 전송하지 않았습니다."
 )
 
 
@@ -58,7 +61,10 @@ class ChatService:
         request: ChatRequest,
         access_scope: RetrievalAccessScope | None = None,
     ) -> ChatResponse:
-        analyzed_request, analyzer_fell_back = await self._analyze(request)
+        analyzed_request, analyzer_fell_back = await self._analyze(
+            request,
+            allow_external=not bool(access_scope and access_scope.allow_company),
+        )
         retrieval_response = await self._retrieve(analyzed_request, access_scope)
         if analyzer_fell_back and self.openai_enabled:
             retrieval_response = retrieval_response.model_copy(
@@ -71,6 +77,17 @@ class ChatService:
 
         if not retrieval_response.sources or not self.openai_enabled:
             return retrieval_response
+
+        # visual_summary is produced locally but is still supplied by the client.
+        # Never forward OCR, labels, or image-derived text to an external provider.
+        if analyzed_request.context.visual_summary:
+            return retrieval_response.model_copy(
+                update={
+                    "warning": self._append_warning(
+                        retrieval_response.warning, LOCAL_VISION_LLM_WARNING
+                    )
+                }
+            )
 
         # This is intentionally unconditional: no company evidence is sent to
         # an external provider, even if a legacy environment flag says otherwise.
@@ -109,11 +126,20 @@ class ChatService:
             }
         )
 
-    async def _analyze(self, request: ChatRequest) -> tuple[ChatRequest, bool]:
+    async def _analyze(
+        self,
+        request: ChatRequest,
+        *,
+        allow_external: bool = True,
+    ) -> tuple[ChatRequest, bool]:
         if request.analysis is not None:
             return request, False
         fallback = self._fallback_analysis(request)
-        if not self.openai_enabled or not hasattr(self.ai_service, "analyze"):
+        if (
+            not allow_external
+            or not self.openai_enabled
+            or not hasattr(self.ai_service, "analyze")
+        ):
             return request.model_copy(update={"analysis": fallback}), False
         try:
             analysis = await asyncio.to_thread(
