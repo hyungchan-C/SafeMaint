@@ -2,6 +2,7 @@ alembic>=1.18,<2.0
 argon2-cffi>=25.1,<26.0
 fastapi>=0.136,<1.0
 cryptography>=45,<47
+faster-whisper>=1.0,<2.0
 httpx>=0.28,<1.0
 openai>=2.0,<3.0
 pgvector>=0.4,<1.0

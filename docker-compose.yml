@@ -30,6 +30,10 @@ x-backend-service: &backend-service
     TTS_VOICE: ${TTS_VOICE:-F1}
     TTS_LANGUAGE: ${TTS_LANGUAGE:-ko}
     TTS_STEPS: ${TTS_STEPS:-8}
+    STT_MODEL: ${STT_MODEL:-small}
+    STT_LANGUAGE: ${STT_LANGUAGE:-ko}
+    STT_DEVICE: ${STT_DEVICE:-cpu}
+    STT_COMPUTE_TYPE: ${STT_COMPUTE_TYPE:-int8}
     HF_HOME: /root/.cache/huggingface
     XDG_CACHE_HOME: /root/.cache
   volumes:
