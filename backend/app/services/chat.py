@@ -15,6 +15,7 @@ from app.schemas.chat import (
     RetrievalAccessScope,
 )
 from app.services.ai import AIConfigurationError, AIService
+from app.services.qwen import QwenClient
 from app.services.safety_guidance import format_safety_answer
 
 
@@ -34,6 +35,12 @@ COMPANY_LLM_WARNING = (
 LOCAL_VISION_LLM_WARNING = (
     "로컬 이미지 분석 내용은 외부 LLM으로 전송하지 않았습니다."
 )
+QWEN_UNAVAILABLE_WARNING = (
+    "Qwen answer generation is unavailable; using the retrieved evidence template."
+)
+QWEN_COMPANY_CONTEXT_WARNING = (
+    "Qwen company-context sharing is disabled; using the retrieved evidence template."
+)
 
 
 class ChatService:
@@ -44,6 +51,9 @@ class ChatService:
         transport: httpx.AsyncBaseTransport | None = None,
         ai_service: AIService | None = None,
         openai_enabled: bool | None = None,
+        qwen_client: QwenClient | None = None,
+        qwen_enabled: bool | None = None,
+        qwen_allow_company_context: bool | None = None,
     ) -> None:
         self.service_url = (service_url or "").rstrip("/")
         self.timeout_seconds = timeout_seconds or settings.rag_request_timeout_seconds
@@ -55,18 +65,47 @@ class ChatService:
             if openai_enabled is None
             else openai_enabled
         )
+        self.qwen_enabled = (
+            settings.qwen_enabled and bool(settings.qwen_service_url)
+            if qwen_enabled is None
+            else qwen_enabled
+        )
+        self.qwen_client = (
+            qwen_client
+            if qwen_client is not None
+            else (QwenClient() if self.qwen_enabled else None)
+        )
+        self.qwen_allow_company_context = (
+            settings.qwen_allow_company_context
+            if qwen_allow_company_context is None
+            else qwen_allow_company_context
+        )
 
     async def answer(
         self,
         request: ChatRequest,
         access_scope: RetrievalAccessScope | None = None,
     ) -> ChatResponse:
+        use_qwen = self.qwen_enabled and self.qwen_client is not None
         analyzed_request, analyzer_fell_back = await self._analyze(
             request,
-            allow_external=not bool(access_scope and access_scope.allow_company),
+            allow_external=(
+                not use_qwen
+                and not bool(access_scope and access_scope.allow_company)
+            ),
         )
+        if use_qwen:
+            qwen_analysis = await self.qwen_client.classify(analyzed_request)
+            if qwen_analysis is not None:
+                analyzed_request = analyzed_request.model_copy(
+                    update={
+                        "analysis": self._merge_qwen_analysis(
+                            analyzed_request.analysis, qwen_analysis
+                        )
+                    }
+                )
         retrieval_response = await self._retrieve(analyzed_request, access_scope)
-        if analyzer_fell_back and self.openai_enabled:
+        if analyzer_fell_back and self.openai_enabled and not use_qwen:
             retrieval_response = retrieval_response.model_copy(
                 update={
                     "warning": self._append_warning(
@@ -74,6 +113,9 @@ class ChatService:
                     )
                 }
             )
+
+        if use_qwen:
+            return await self._answer_with_qwen(analyzed_request, retrieval_response)
 
         if not retrieval_response.sources or not self.openai_enabled:
             return retrieval_response
@@ -123,6 +165,44 @@ class ChatService:
                 "answer": answer,
                 "generation_mode": "openai",
                 "model": settings.llm_answer_model,
+            }
+        )
+
+    async def _answer_with_qwen(
+        self,
+        request: ChatRequest,
+        retrieval_response: ChatResponse,
+    ) -> ChatResponse:
+        if not retrieval_response.sources or self.qwen_client is None:
+            return retrieval_response
+        if (
+            not self.qwen_allow_company_context
+            and any(
+                source.document_scope == "company"
+                for source in retrieval_response.sources
+            )
+        ):
+            return retrieval_response.model_copy(
+                update={
+                    "warning": self._append_warning(
+                        retrieval_response.warning, QWEN_COMPANY_CONTEXT_WARNING
+                    )
+                }
+            )
+        qwen_answer = await self.qwen_client.answer(request, retrieval_response)
+        if qwen_answer is None:
+            return retrieval_response.model_copy(
+                update={
+                    "warning": self._append_warning(
+                        retrieval_response.warning, QWEN_UNAVAILABLE_WARNING
+                    )
+                }
+            )
+        return retrieval_response.model_copy(
+            update={
+                "answer": qwen_answer.answer,
+                "generation_mode": "qwen",
+                "model": qwen_answer.model or "qwen",
             }
         )
 
@@ -223,6 +303,17 @@ class ChatService:
             energy_sources=[context.energy_source] if context.energy_source else [],
             search_keywords=keywords,
         )
+
+    @staticmethod
+    def _merge_qwen_analysis(
+        fallback: QueryAnalysis | None,
+        qwen_analysis: QueryAnalysis,
+    ) -> QueryAnalysis:
+        base = fallback or QueryAnalysis()
+        occurrence_type = (qwen_analysis.occurrence_type or "").strip()
+        if not occurrence_type:
+            return base
+        return base.model_copy(update={"occurrence_type": occurrence_type})
 
     @staticmethod
     def _build_grounded_context(

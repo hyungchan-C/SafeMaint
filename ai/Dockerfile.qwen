@@ -1,0 +1,17 @@
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/models \
+    TRANSFORMERS_CACHE=/models
+
+WORKDIR /app
+
+COPY ai/qwen_service/requirements.txt ./requirements-qwen.txt
+RUN python -m pip install --no-cache-dir -r requirements-qwen.txt
+
+COPY ai/qwen_service ./qwen_service
+
+EXPOSE 8020
+
+CMD ["python", "-m", "uvicorn", "qwen_service.main:app", "--host", "0.0.0.0", "--port", "8020"]
