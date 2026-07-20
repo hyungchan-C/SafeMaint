@@ -289,12 +289,16 @@ def extract_sections_with_pymupdf(pdf_path: str, header_min_size: float = 8.8) -
 
 
 def extract_sections(pdf_path: str) -> list[dict]:
-    """docling 추출을 우선 시도하고, 라이브러리 자체 문제로 실패하면 PyMuPDF 폰트 휴리스틱으로 재시도."""
+    """docling 추출을 우선 시도하고, 라이브러리 문제로 실패하거나 섹션을 하나도 못 뽑으면 PyMuPDF 폰트 휴리스틱으로 재시도."""
     try:
-        return extract_sections_with_docling(pdf_path)
+        sections = extract_sections_with_docling(pdf_path)
     except Exception as exc:
         print(f"[경고] {pdf_path}: docling 변환 실패({exc}). PyMuPDF 폴백으로 재시도합니다.")
         return extract_sections_with_pymupdf(pdf_path)
+    if not sections:
+        print(f"[경고] {pdf_path}: docling이 섹션을 하나도 추출하지 못했습니다. PyMuPDF 폴백으로 재시도합니다.")
+        return extract_sections_with_pymupdf(pdf_path)
+    return sections
 
 
 # ---------- 2. 노이즈 제거 ----------
