@@ -153,7 +153,9 @@ def match_catalog(
                 models=[settings.embedding_model],
                 catalog_candidates=candidates[:3],
             )
-        response = analyzer.analyze(path, file.filename or path.name)
+        # Field photos need object recognition first. PaddleOCR-VL is a document parser
+        # and can take many minutes on CPU, so keep it for explicit catalog analysis only.
+        response = analyzer.analyze(path, file.filename or path.name, include_ocr=False)
         candidate_pairs = [(candidate, matcher.image_path(candidate)) for candidate in candidates]
         candidate_pairs = [(candidate, image) for candidate, image in candidate_pairs if image is not None]
         verified = analyzer.rerank_catalog_candidates(

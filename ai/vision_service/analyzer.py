@@ -135,7 +135,11 @@ class CatalogAnalyzer:
         messages = [{
             "role": "user",
             "content": [
-                {"type": "image", "image": str(image_path)},
+                {
+                    "type": "image",
+                    "image": str(image_path),
+                    "max_pixels": self.settings.qwen_max_pixels,
+                },
                 {"type": "text", "text": CATALOG_PROMPT},
             ],
         }]
@@ -161,8 +165,16 @@ class CatalogAnalyzer:
         from qwen_vl_utils import process_vision_info
 
         model, processor = self._load_qwen()
-        content: list[dict[str, str]] = [{"type": "image", "image": str(field_image)}]
-        content.extend({"type": "image", "image": str(path)} for path in candidate_paths)
+        content: list[dict[str, Any]] = [{
+            "type": "image",
+            "image": str(field_image),
+            "max_pixels": self.settings.qwen_max_pixels,
+        }]
+        content.extend({
+            "type": "image",
+            "image": str(path),
+            "max_pixels": self.settings.qwen_max_pixels,
+        } for path in candidate_paths)
         content.append({
             "type": "text",
             "text": (
@@ -258,13 +270,20 @@ class CatalogAnalyzer:
         results = self._load_paddle().predict(str(image_path))
         return "\n\n".join(self._paddle_markdown(result) for result in results)
 
-    def analyze(self, image_path: Path, filename: str, catalog_candidates: list[Any] | None = None) -> CatalogAnalysisResponse:
+    def analyze(
+        self,
+        image_path: Path,
+        filename: str,
+        catalog_candidates: list[Any] | None = None,
+        *,
+        include_ocr: bool = True,
+    ) -> CatalogAnalysisResponse:
         warnings: list[str] = []
         models: list[str] = []
         markdown: str | None = None
         visual: str | None = None
 
-        if self.settings.enable_paddle:
+        if self.settings.enable_paddle and include_ocr:
             try:
                 markdown = self._analyze_with_paddle(image_path)
                 models.append(self.settings.paddle_model)

@@ -35,6 +35,21 @@ def test_analyzer_can_run_with_models_disabled() -> None:
     assert response.warnings
 
 
+def test_analyzer_can_skip_document_ocr_for_field_photo(monkeypatch) -> None:
+    analyzer = CatalogAnalyzer(
+        Settings(enable_paddle=True, enable_qwen=False, device="cpu")
+    )
+    monkeypatch.setattr(
+        analyzer,
+        "_analyze_with_paddle",
+        lambda _path: (_ for _ in ()).throw(AssertionError("document OCR called")),
+    )
+
+    response = analyzer.analyze(Path("field.jpg"), "field.jpg", include_ocr=False)
+
+    assert response.filename == "field.jpg"
+
+
 def test_image_only_layout_does_not_count_as_verified_ocr_text() -> None:
     extracted = '{"res":{"parsing_res_list":[{"block_label":"image","block_content":""}]}}'
 
