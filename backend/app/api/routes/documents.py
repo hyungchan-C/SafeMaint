@@ -8,7 +8,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_document_approve, require_document_upload
+from app.api.deps import (
+    require_document_approve,
+    require_document_read,
+    require_document_upload,
+)
 from app.core.config import settings
 from app.db.models import (
     Document,
@@ -18,7 +22,11 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
-from app.schemas.documents import ApproveDocumentResponse, UploadDocumentResponse
+from app.schemas.documents import (
+    ApproveDocumentResponse,
+    UploadDocumentResponse,
+    UserDocumentSummary,
+)
 from app.services.document_approval import (
     DocumentApprovalConflictError,
     DocumentApprovalNotFoundError,
@@ -40,6 +48,43 @@ def _normalized_form_value(value: str, *, field: str, max_length: int) -> str:
             detail=f"{field}은(는) 1자 이상 {max_length}자 이하여야 합니다.",
         )
     return normalized
+
+
+@router.get("/mine", response_model=list[UserDocumentSummary])
+def list_my_documents(
+    current_user: Annotated[User, Depends(require_document_read)],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[UserDocumentSummary]:
+    """Return the latest non-deleted version of each document uploaded by the user."""
+
+    rows = db.execute(
+        select(Document, DocumentVersion)
+        .join(DocumentVersion, DocumentVersion.document_id == Document.id)
+        .where(
+            DocumentVersion.uploaded_by_user_id == current_user.id,
+            Document.deleted_at.is_(None),
+            Document.lifecycle_status != "deleted",
+            DocumentVersion.status != "deleted",
+        )
+        .order_by(Document.updated_at.desc(), DocumentVersion.version_number.desc())
+    ).all()
+    summaries: list[UserDocumentSummary] = []
+    seen_document_ids: set[UUID] = set()
+    for document, version in rows:
+        if document.id in seen_document_ids:
+            continue
+        seen_document_ids.add(document.id)
+        summaries.append(
+            UserDocumentSummary(
+                document_id=document.id,
+                document_version_id=version.id,
+                original_filename=version.original_filename,
+                version_number=version.version_number,
+                status=version.status,
+                is_active=version.is_active,
+            )
+        )
+    return summaries
 
 
 @router.post(

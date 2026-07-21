@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, status
 
 from rag_service.config import settings
 from rag_service.retrieval import PgvectorRetriever
-from rag_service.schemas import ChatResponse, InternalChatRequest
+from rag_service.schemas import ChatResponse, ChatSource, InternalChatRequest
 from safety_guidance import format_safety_answer
 
 
@@ -17,11 +17,25 @@ app = FastAPI(
 )
 retriever = PgvectorRetriever(settings)
 
-NO_EVIDENCE_ANSWER = (
-    "질문과 일치하는 검증 가능한 문서 근거를 찾지 못했습니다. "
-    "설비명·부품명·모델명과 작업 내용을 더 구체적으로 입력하거나 승인된 매뉴얼을 선택해 주세요. "
-    "근거를 확인하기 전에는 작업 승인 여부를 판단하지 마세요."
-)
+def _grounded_excerpt_answer(sources: list[ChatSource]) -> str:
+    lines = ["선택한 매뉴얼에서 질문과 관련된 다음 근거를 찾았습니다."]
+    for index, source in enumerate(sources[:3], start=1):
+        location_parts = []
+        if source.document_version is not None:
+            location_parts.append(f"버전 {source.document_version}")
+        if source.page_start is not None:
+            page_label = f"{source.page_start}쪽"
+            if source.page_end and source.page_end != source.page_start:
+                page_label = f"{source.page_start}-{source.page_end}쪽"
+            location_parts.append(page_label)
+        location = f" ({', '.join(location_parts)})" if location_parts else ""
+        excerpt = " ".join(source.excerpt.split())
+        lines.append(f"{index}. {source.title}{location}\n{excerpt}")
+    lines.append(
+        "정확한 작업 절차와 설정값은 위 인용 내용 및 해당 페이지 원문을 확인하고, "
+        "현장 안전관리자의 최종 확인 후 적용하세요."
+    )
+    return "\n\n".join(lines)
 
 
 @app.get("/health/live")
@@ -88,12 +102,9 @@ async def chat(payload: InternalChatRequest) -> ChatResponse:
 
     return ChatResponse(
         answer=(
-            format_safety_answer(
-                context_text,
-                source_titles=[source.title for source in sources],
-            )
+            _grounded_excerpt_answer(sources)
             if sources
-            else NO_EVIDENCE_ANSWER
+            else format_safety_answer(context_text)
         ),
         sources=sources,
         retrieval_mode="hybrid",

@@ -48,6 +48,7 @@ class ChatRequest(BaseModel):
 
 
 class RetrievalAccessScope(BaseModel):
+    requester_user_id: UUID | None = None
     site_ids: list[str] = Field(default_factory=list)
     all_sites: bool = False
     allow_private: bool = False
@@ -75,6 +76,12 @@ class ChatSource(BaseModel):
     reranker_score: float = Field(default=0.0, ge=0.0)
 
 
+class AccidentClassification(BaseModel):
+    label: str
+    model: str
+    adapter: str
+
+
 class ChatResponse(BaseModel):
     answer: str
     sources: list[ChatSource] = Field(default_factory=list)
@@ -82,3 +89,4 @@ class ChatResponse(BaseModel):
     generation_mode: Literal["openai", "template", "qwen"] = "template"
     model: str | None = None
     warning: str | None = None
+    accident_classification: AccidentClassification | None = None

@@ -2,9 +2,15 @@
 .env
 **/__pycache__/
 **/*.py[cod]
+**/.pytest_cache/
+.venv*/
 ai/.model-cache/
 ai/.venv*/
 frontend/.next/
 frontend/node_modules/
+outputs/
 reports/
+tmp/
 전처리된데이터/
+local_assets/
+safemaint_api_data/

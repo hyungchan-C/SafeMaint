@@ -115,6 +115,7 @@ def get_retrieval_access_scope(
         ]
 
     return RetrievalAccessScope(
+        requester_user_id=current_user.id,
         site_ids=site_ids,
         all_sites=all_sites,
         allow_company=True,

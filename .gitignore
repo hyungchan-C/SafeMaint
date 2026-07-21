@@ -42,6 +42,8 @@ docker-compose.override.yml
 /전처리된데이터/
 /models/
 /uploads/
+/local_assets/
+/tmp/
 /backups/
 *.backup
 *.dump
