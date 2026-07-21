@@ -659,11 +659,27 @@ a {
 
 /* 현장형 UI 확장 */
 .quick-toolbar { align-items: center; background: white; border: 1px solid var(--line); border-radius: 14px; display: flex; flex-wrap: wrap; gap: 10px; margin: 18px auto; max-width: 1500px; padding: 12px 14px; }
-.quick-toolbar button, .toolbar-upload { align-items: center; background: #f7fafb; border: 1px solid #cfdde3; border-radius: 10px; color: var(--navy); cursor: pointer; display: inline-flex; font-weight: 700; gap: 7px; min-height: 40px; padding: 9px 13px; }
+.quick-toolbar button, .toolbar-upload, .quick-toolbar select { align-items: center; background: #f7fafb; border: 1px solid #cfdde3; border-radius: 10px; color: var(--navy); cursor: pointer; display: inline-flex; font-weight: 700; gap: 7px; min-height: 40px; padding: 9px 13px; }
 .quick-toolbar button:hover, .toolbar-upload:hover { background: #eaf4f5; border-color: var(--teal); color: #075f59; }
 .interface-icon { display: block; flex: 0 0 auto; height: 20px; width: 20px; }
 .quick-toolbar > span { color: var(--muted); font-size: 12px; margin-left: auto; }
 .toolbar-upload input, .file-icon input { display: none; }
+.gps-drawer { border-radius: 14px; border-top: 2px solid #132b3b; margin: 0 auto 18px; max-width: 1500px; overflow: hidden; }
+.gps-drawer summary { display: flex; align-items: center; gap: 10px; }
+.gps-map-panel, .gps-result-panel { margin: 18px auto; max-width: 1500px; }
+.gps-map-panel:first-child { margin-top: 0; }
+.gps-nearby-item { margin-bottom: 20px; }
+.gps-nearby-item + .gps-nearby-item { border-top: 1px solid var(--line); padding-top: 16px; }
+.gps-map { background: #eef4f6; border: 1px solid var(--line); border-radius: 12px; cursor: crosshair; margin: 4px auto 0; position: relative; overflow: hidden; }
+.gps-map-dot { position: absolute; width: 10px; height: 10px; border-radius: 50%; background: var(--navy); transform: translate(-50%, -50%); }
+.gps-map-radius { position: absolute; border: 1px dashed #9fb6c0; border-radius: 50%; background: rgba(22, 139, 128, 0.06); transform: translate(-50%, -50%); pointer-events: none; }
+.gps-map-label { position: absolute; font-size: 11px; color: var(--muted); white-space: nowrap; transform: translate(-50%, 8px); pointer-events: none; }
+.gps-manual-input { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 16px; }
+.gps-manual-fields { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.gps-manual-fields label { align-items: center; color: #4e626f; display: flex; font-size: 12px; font-weight: 700; gap: 6px; }
+.gps-manual-fields input { border: 1px solid #ccd9df; border-radius: 8px; padding: 8px 10px; width: 120px; }
+.gps-manual-fields button { background: #f7fafb; border: 1px solid #cfdde3; border-radius: 8px; color: var(--navy); cursor: pointer; font-weight: 700; padding: 8px 12px; }
+.gps-map-marker { position: absolute; font-size: 22px; transform: translate(-50%, -100%); pointer-events: none; }
 .field-overview-grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1.3fr) minmax(290px, .7fr); margin: 0 auto 18px; max-width: 1500px; }
 .risk-overview-card { align-items: center; background: white; border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 280px; padding: 25px; text-align: center; }
 .risk-overview-card.risk-high { border-top: 6px solid #c53f3f; }

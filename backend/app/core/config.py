@@ -59,6 +59,12 @@ class Settings:
         getenv("LLM_ANALYZER_MAX_OUTPUT_TOKENS", "500")
     )
     allow_external_llm: bool = _bool_env("ALLOW_EXTERNAL_LLM", False)
+    qwen_enabled: bool = _bool_env("QWEN_ENABLED", False)
+    qwen_provider: str = getenv("QWEN_PROVIDER", "local")
+    qwen_service_url: str | None = getenv("QWEN_SERVICE_URL", "http://qwen:8020") or None
+    qwen_api_key: str = getenv("QWEN_API_KEY", "")
+    qwen_timeout_seconds: float = float(getenv("QWEN_TIMEOUT_SECONDS", "300"))
+    qwen_allow_company_context: bool = _bool_env("QWEN_ALLOW_COMPANY_CONTEXT", False)
     document_storage_dir: str = getenv("DOCUMENT_STORAGE_DIR", "/data/documents")
     document_max_upload_bytes: int = int(
         getenv("DOCUMENT_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))
@@ -78,6 +84,7 @@ class Settings:
     stt_language: str = getenv("STT_LANGUAGE", "ko")
     stt_device: str = getenv("STT_DEVICE", "cpu")
     stt_compute_type: str = getenv("STT_COMPUTE_TYPE", "int8")
+    gps_proximity_radius_m: float = float(getenv("GPS_PROXIMITY_RADIUS_M", "30"))
 
 
 settings = Settings()

@@ -226,24 +226,11 @@ class CatalogAnalyzer:
         if accepted:
             return sorted(accepted, key=lambda item: item.similarity, reverse=True)[:3]
 
-        # The VLM can be overly conservative on small catalog thumbnails. Preserve only
-        # strong semantic-search hits as explicitly unverified exploration candidates.
-        fallback: list[CatalogCandidate] = []
-        for candidate in candidates:
-            if candidate.similarity < 0.65:
-                continue
-            category = candidate.visual_category or (
-                f"{fallback_category}와 외형이 유사한 제품"
-                if fallback_category
-                else "현장 사진과 외형이 유사한 제품"
-            )
-            fallback.append(candidate.model_copy(update={
-                "visual_category": category,
-                "visual_features": candidate.visual_features or ["로컬 이미지 임베딩에서 외형 유사도가 높게 계산됨"],
-                "confidence": "낮음",
-                "note": "Qwen3-VL 재검토에서 확정되지 않은 탐색 후보입니다. 동일 제품·모델·규격으로 사용할 수 없습니다.",
-            }))
-        return fallback[:3]
+        # Embedding similarity alone is not sufficient to prove that the object type
+        # matches (for example, bearings and screws can share a circular silhouette).
+        # If the local VLM does not accept a candidate, showing none is safer than
+        # filling the UI with misleading low-confidence cards.
+        return []
 
     def _load_paddle(self) -> Any:
         if self._paddle_pipeline is None:

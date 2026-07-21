@@ -11,6 +11,7 @@ from app.schemas.chat import (
     RetrievalAccessScope,
 )
 from app.services.chat import ChatService, get_chat_service
+from app.services.qwen import QwenGeneratedAnswer
 
 
 def test_chat_service_returns_task_specific_fallback() -> None:
@@ -33,7 +34,34 @@ def test_chat_service_returns_task_specific_fallback() -> None:
     assert response.sources == []
     assert "베어링 교체" in response.answer
     assert "LOTO" in response.answer
+    assert "TBM" in response.answer
     assert response.warning
+
+
+def test_chat_service_returns_tbm_checklist_without_manual_pdf() -> None:
+    service = ChatService(service_url=None, openai_enabled=False)
+    response = asyncio.run(
+        service.answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "컨베이어 벨트 부품 교체할 거야. TBM 체크리스트 만들어줘.",
+                    "context": {
+                        "equipment_name": "컨베이어 CV-203",
+                        "component_name": "벨트",
+                        "task_type": "부품 교체",
+                        "energy_source": "전기",
+                    },
+                }
+            )
+        )
+    )
+
+    assert response.retrieval_mode == "safety-fallback"
+    assert "컨베이어 부품 교체 작업" in response.answer
+    assert "TBM 체크리스트" in response.answer
+    assert "[ ]" in response.answer
+    assert "제조사 PDF/매뉴얼" in response.answer
+    assert "작업 승인이 아닙니다" in response.answer
 
 
 def test_chat_service_accepts_grounded_rag_response() -> None:
@@ -265,6 +293,119 @@ def test_company_evidence_is_never_sent_to_external_model() -> None:
     assert response.generation_mode == "template"
     assert response.answer == "Local grounded template answer"
     assert "회사 문서" in (response.warning or "")
+
+
+def test_chat_service_uses_qwen_classification_and_answer() -> None:
+    class FakeQwenClient:
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            assert request.analysis is not None
+            assert "bearing" in request.analysis.search_keywords
+            return QueryAnalysis(occurrence_type="caught-in")
+
+        async def answer(
+            self,
+            request: ChatRequest,
+            retrieval_response: ChatResponse,
+        ) -> QwenGeneratedAnswer:
+            assert request.analysis is not None
+            assert request.analysis.occurrence_type == "caught-in"
+            assert retrieval_response.sources
+            return QwenGeneratedAnswer("Qwen grounded answer [1]", "qwen-test")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["analysis"]["occurrence_type"] == "caught-in"
+        return httpx.Response(
+            200,
+            json={
+                "answer": "Local grounded template answer",
+                "sources": [
+                    {
+                        "document_id": "public-doc",
+                        "chunk_id": "public-chunk",
+                        "title": "Public safety guide",
+                        "source_type": "public_guide",
+                        "document_scope": "public",
+                        "excerpt": "Lock out the equipment before maintenance.",
+                        "similarity": 0.8,
+                    }
+                ],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+            qwen_client=FakeQwenClient(),  # type: ignore[arg-type]
+            qwen_enabled=True,
+            qwen_allow_company_context=True,
+        ).answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "conveyor bearing replacement",
+                    "context": {"component_name": "bearing"},
+                }
+            )
+        )
+    )
+
+    assert response.generation_mode == "qwen"
+    assert response.model == "qwen-test"
+    assert response.answer == "Qwen grounded answer [1]"
+
+
+def test_qwen_company_context_requires_explicit_allowance() -> None:
+    class MustNotSendCompanyEvidenceToQwen:
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            return QueryAnalysis(occurrence_type="caught-in")
+
+        async def answer(
+            self,
+            request: ChatRequest,
+            retrieval_response: ChatResponse,
+        ) -> QwenGeneratedAnswer:
+            raise AssertionError("Company evidence must not be sent to Qwen")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answer": "Local grounded template answer",
+                "sources": [
+                    {
+                        "document_id": "company-doc",
+                        "chunk_id": "company-chunk",
+                        "title": "Company manual",
+                        "source_type": "equipment_manual",
+                        "document_scope": "company",
+                        "excerpt": "Private maintenance instructions",
+                        "similarity": 0.8,
+                    }
+                ],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+            qwen_client=MustNotSendCompanyEvidenceToQwen(),  # type: ignore[arg-type]
+            qwen_enabled=True,
+            qwen_allow_company_context=False,
+        ).answer(
+            ChatRequest(question="bearing replacement"),
+            RetrievalAccessScope(allow_company=True, all_sites=True),
+        )
+    )
+
+    assert response.generation_mode == "template"
+    assert response.answer == "Local grounded template answer"
+    assert "Qwen company-context sharing is disabled" in (response.warning or "")
 
 
 def test_local_vision_summary_is_never_sent_to_external_answer_model() -> None:

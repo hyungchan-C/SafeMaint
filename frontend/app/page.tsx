@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssessmentResponse } from "@/types/assessment";
 import type { CatalogCandidate, ChatMessage, ChatResponse } from "@/types/chat";
+import type { GpsCheckResponse, VirtualEquipment } from "@/types/gps";
 import { getApiBaseUrl } from "@/lib/api";
 
 type PageMode = "login" | "workspace" | "history";
@@ -54,6 +55,24 @@ const initialForm = {
 
 const levelLabel = { low: "낮음", medium: "보통", high: "높음" } as const;
 const ppeItems = ["안전모", "보호장갑", "보안경", "안전화"] as const;
+
+// 위경도 ↔ 미터 변환(근사). 위경도 1도당 거리는 위도에 따라 달라지므로
+// 경도는 현재 위도의 코사인으로 보정한다. 좁은 지역(수백m 이내) 가정.
+const METERS_PER_DEG_LAT = 111_320;
+function metersPerDegLon(latDeg: number) {
+  return METERS_PER_DEG_LAT * Math.cos((latDeg * Math.PI) / 180);
+}
+
+const GPS_MAP_SIZE_PX = 320;
+const GPS_MAP_SCALE_PX_PER_M = 2;
+const GPS_EQUIPMENT_RADIUS_M = 30;
+
+function metersOffsetFromCenter(center: { lat: number; lon: number }, lat: number, lon: number) {
+  return {
+    x: (lon - center.lon) * metersPerDegLon(center.lat),
+    y: (center.lat - lat) * METERS_PER_DEG_LAT,
+  };
+}
 
 const STORAGE_KEYS = {
   users: "safemaint.users",
@@ -351,8 +370,22 @@ function WorkspaceScreen({
   const [visionStatus, setVisionStatus] = useState("");
   const [visionElapsedMs, setVisionElapsedMs] = useState<number | null>(null);
   const [catalogCandidates, setCatalogCandidates] = useState<CatalogCandidate[]>([]);
+  const [visualCategories, setVisualCategories] = useState<string[]>([]);
+  const [visualFeatures, setVisualFeatures] = useState<string[]>([]);
   const [ppeChecks, setPpeChecks] = useState<Record<string, boolean>>({});
   const [locationStatus, setLocationStatus] = useState("위치 미확인");
+  const [gpsOrigin, setGpsOrigin] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [gpsLivePosition, setGpsLivePosition] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [calibratedEquipment, setCalibratedEquipment] = useState<VirtualEquipment[]>([]);
+  const [gpsResult, setGpsResult] = useState<GpsCheckResponse | null>(null);
+  const [isGpsChecking, setIsGpsChecking] = useState(false);
+  const [gpsSource, setGpsSource] = useState<"default" | "real">("default");
+  const [gpsPermissionDenied, setGpsPermissionDenied] = useState(false);
+  const [manualLatitude, setManualLatitude] = useState("37.5665");
+  const [manualLongitude, setManualLongitude] = useState("126.9780");
+  const gpsWatchIdRef = useRef<number | null>(null);
+  const gpsOriginRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  const gpsOriginLockedRef = useRef(false);
   const [activeTab, setActiveTab] = useState<"summary" | "accidents" | "evidence" | "tbm">("summary");
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -400,6 +433,51 @@ function WorkspaceScreen({
     if (typeof window !== "undefined") writeStorage(STORAGE_KEYS.settings, { volume, fontSize, autoSpeak });
   }, [volume, fontSize, autoSpeak]);
 
+  useEffect(() => {
+    // 실제 GPS 권한/응답을 기다리지 않고, 기본 좌표로 즉시 한 번 확인해 화면에
+    // "자동으로 위치가 잡혀 있는" 상태를 바로 보여준다. 실제 위치 추적이 성공하면
+    // 아래 효과가 이어서 이 값을 진짜 위치로 갱신하고, 화면에 어느 쪽인지 표시한다.
+    recalibrateManualLocation(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) return;
+
+    // getCurrentPosition을 한 번만 부르고 성공했을 때만 watchPosition을 시작하면,
+    // 이 최초 시도가 실패하는 PC에서는 이후 실제로 위치가 잡혀도(예: 개발자도구
+    // Sensors로 위치를 바꾸는 경우 포함) 영원히 감지되지 않는다. 그래서 처음부터
+    // watchPosition 하나로 계속 감시하면서, 오는 업데이트를 그때그때 반영한다.
+    // gpsOriginRef는 "지금 기준점이 무엇인가"를 항상 최신으로 들고 있어서, 수동으로
+    // 위치를 다시 잡은 뒤에도 이어지는 실제 위치 변화가 그 기준점 대비로 계속 반영된다.
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        setGpsPermissionDenied(false);
+        const current = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+        if (!gpsOriginLockedRef.current) {
+          gpsOriginLockedRef.current = true;
+          gpsOriginRef.current = current;
+          setGpsOrigin(current);
+          void loadCalibratedEquipment(current);
+        }
+        // 기준점(설비 배치)을 옮기는 것과 별개로, 이 결과가 "실제 위치"에서 온
+        // 것이라는 표시는 실제 위치 업데이트가 올 때마다 매번 갱신한다.
+        setGpsSource("real");
+        setGpsLivePosition(current);
+        void checkLocation(current.latitude, current.longitude, gpsOriginRef.current ?? current);
+      },
+      (watchError) => {
+        // 권한 차단은 조용히 넘기면 사용자가 원인을 알 수 없으므로 명확히 표시한다.
+        // 그 외(시간 초과·신호 약화 등)는 흔한 일이므로 마지막 상태를 그대로 유지한다.
+        if (watchError.code === watchError.PERMISSION_DENIED) setGpsPermissionDenied(true);
+      },
+      { enableHighAccuracy: false, maximumAge: 10_000, timeout: 20_000 },
+    );
+    gpsWatchIdRef.current = watchId;
+
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, []);
+
   useEffect(() => () => {
     const source = audioSourceRef.current;
     if (source) {
@@ -428,6 +506,8 @@ function WorkspaceScreen({
     onLogout();
     throw new Error("로그인 세션이 만료되었습니다. 다시 로그인해 주세요.");
   }
+
+  const gpsMapCenter = gpsOrigin ? { lat: gpsOrigin.latitude, lon: gpsOrigin.longitude } : null;
 
   function saveHistory(questionText: string, summary: string, riskLabel: string) {
     const current = readStorage<HistoryItem[]>(STORAGE_KEYS.history, []);
@@ -497,8 +577,8 @@ function WorkspaceScreen({
             energy_source: form.energy_source || null,
             task_description: form.description || null,
             visual_summary: visionSummary || null,
-            visual_categories: catalogCandidates.map((item) => item.visual_category).filter((value): value is string => Boolean(value)),
-            visual_features: catalogCandidates.flatMap((item) => item.visual_features || []),
+            visual_categories: visualCategories,
+            visual_features: visualFeatures,
             registered_manuals: manuals,
             selected_document_ids: selectedDocumentIds,
           },
@@ -603,6 +683,8 @@ function WorkspaceScreen({
     setVisionStatus("로컬 이미지 분석 중...");
     setVisionElapsedMs(null);
     setCatalogCandidates([]);
+    setVisualCategories([]);
+    setVisualFeatures([]);
     const requestId = ++visionRequestIdRef.current;
     type VisionPayload = {
       raw_visual_description?: string;
@@ -629,17 +711,21 @@ function WorkspaceScreen({
     const applyPayload = (payload: VisionPayload | null, precise: boolean) => {
       if (visionRequestIdRef.current !== requestId) return;
       const candidates = payload?.catalog_candidates ?? [];
+      if (candidates.length) {
+        setVisualCategories(candidates.map((item) => item.visual_category).filter((value): value is string => Boolean(value)));
+        setVisualFeatures(candidates.flatMap((item) => item.visual_features || []));
+      }
+      if (!precise) {
+        setVisionStatus("빠른 형상 분석 완료 · 정밀 후보 검증 진행 중...");
+        return;
+      }
       setCatalogCandidates(candidates);
       setVisionSummary([
         candidates.length ? `카탈로그 외형 유사 후보(동일 제품 확정 아님):\n${candidates.map((item, index) => `${index + 1}. ${item.visual_category || "종류 확인 불가"}, ${item.filename} ${item.page}페이지, 유사도 ${(item.similarity * 100).toFixed(1)}%, 특징 ${item.visual_features?.join(", ") || "확인 불가"}`).join("\n")}` : "신뢰 임계값을 넘는 카탈로그 후보 없음",
         payload?.extracted_markdown ? `로컬 OCR 확인 내용:\n${payload.extracted_markdown}` : "",
         payload?.raw_visual_description ? `로컬 비전 참고 설명(각인·규격 확정 근거 아님):\n${payload.raw_visual_description}` : "",
       ].filter(Boolean).join("\n\n"));
-      setVisionStatus(
-        precise
-          ? (payload?.warnings?.length ? `정밀 분석 완료 · ${payload.warnings.join(" · ")}` : "정밀 분석 완료")
-          : "빠른 후보 검색 완료 · 정밀 분석 진행 중...",
-      );
+      setVisionStatus(payload?.warnings?.length ? `정밀 분석 완료 · ${payload.warnings.join(" · ")}` : "정밀 분석 완료");
     };
     try {
       const fastPayload = await requestAnalysis("fast");
@@ -659,17 +745,94 @@ function WorkspaceScreen({
     }
   }
 
-  function requestLocation() {
-    if (!navigator.geolocation) {
-      setLocationStatus("위치 기능 미지원");
-      return;
+  async function loadCalibratedEquipment(origin: { latitude: number; longitude: number }) {
+    try {
+      const params = new URLSearchParams({
+        origin_latitude: String(origin.latitude),
+        origin_longitude: String(origin.longitude),
+      });
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/gps/equipment?${params.toString()}`);
+      if (!response.ok) return;
+      setCalibratedEquipment((await response.json()) as VirtualEquipment[]);
+    } catch {
+      // 지도 표시용 목록을 못 불러와도 위치 추적 자체는 계속 진행
     }
-    setLocationStatus("위치 확인 중...");
-    navigator.geolocation.getCurrentPosition(
-      (position) => setLocationStatus(`위치 확인됨 · ${position.coords.latitude.toFixed(4)}, ${position.coords.longitude.toFixed(4)}`),
-      () => setLocationStatus("위치 권한이 필요합니다"),
-      { enableHighAccuracy: false, timeout: 7000 },
-    );
+  }
+
+  async function checkLocation(
+    latitude: number,
+    longitude: number,
+    origin: { latitude: number; longitude: number },
+  ) {
+    setIsGpsChecking(true);
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/gps/check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          latitude,
+          longitude,
+          radius_m: 5000,
+          origin_latitude: origin.latitude,
+          origin_longitude: origin.longitude,
+        }),
+      });
+      if (!response.ok) throw new Error("위치 확인에 실패했습니다.");
+      const payload = (await response.json()) as GpsCheckResponse;
+      setGpsResult(payload);
+      const inRange = payload.nearby.filter((item) => item.distance_m <= GPS_EQUIPMENT_RADIUS_M);
+      setLocationStatus(
+        inRange.length > 0
+          ? `위치 추적 중 · ${inRange.map((item) => item.equipment_name).join(", ")} 근처`
+          : "위치 추적 중 · 근처에 설비 없음",
+      );
+    } catch (requestError) {
+      setLocationStatus(requestError instanceof Error ? requestError.message : "위치 확인 중 오류가 발생했습니다.");
+    } finally {
+      setIsGpsChecking(false);
+    }
+  }
+
+  function parseManualCoordinates(): { latitude: number; longitude: number } | null {
+    const latitude = Number(manualLatitude);
+    const longitude = Number(manualLongitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      setLocationStatus("위도/경도를 올바르게 입력해 주세요");
+      return null;
+    }
+    return { latitude, longitude };
+  }
+
+  // lockOrigin=true(기본값)는 사용자가 명시적으로 기준점을 다시 잡는 경우로,
+  // 이후 실제 GPS가 잡혀도 이 기준점을 몰래 덮어쓰지 않도록 잠근다.
+  // mount 시 자동 기본값 설정만 lockOrigin=false로 호출해, 실제 GPS가 처음
+  // 잡히면 그쪽으로 자동 승격될 수 있게 열어둔다.
+  function recalibrateManualLocation(lockOrigin = true) {
+    const point = parseManualCoordinates();
+    if (!point) return;
+    gpsOriginRef.current = point;
+    if (lockOrigin) gpsOriginLockedRef.current = true;
+    setGpsOrigin(point);
+    setGpsLivePosition(point);
+    setGpsSource("default");
+    void loadCalibratedEquipment(point);
+    void checkLocation(point.latitude, point.longitude, point);
+  }
+
+  function checkManualLocation() {
+    const point = parseManualCoordinates();
+    if (!point) return;
+    if (!gpsOriginRef.current) {
+      gpsOriginRef.current = point;
+      gpsOriginLockedRef.current = true;
+      setGpsOrigin(point);
+      void loadCalibratedEquipment(point);
+    }
+    // 수동 입력으로 확인한 결과이므로, 직전에 실제 위치로 표시돼 있었더라도
+    // 지금 보여주는 결과의 출처는 "기본 테스트 좌표"로 명확히 되돌린다.
+    setGpsSource("default");
+    setGpsLivePosition(point);
+    void checkLocation(point.latitude, point.longitude, gpsOriginRef.current);
   }
 
   function stopSpeech() {
@@ -810,7 +973,6 @@ function WorkspaceScreen({
       </header>
 
       <section className="quick-toolbar" aria-label="현장 빠른 기능">
-        <button type="button" onClick={requestLocation}><InterfaceIcon name="location" />현재 위치</button>
         <label className="toolbar-upload"><InterfaceIcon name="image" />현장 사진<input type="file" accept="image/*" onChange={(event) => void analyzePhoto(event.target.files?.[0])} /></label>
         <button type="button" onClick={toggleVoiceInput} disabled={isTranscribing}>
           <InterfaceIcon name={isRecording ? "stop" : "microphone"} />{isRecording ? "녹음 중지" : isTranscribing ? "인식 중..." : "음성 입력"}
@@ -819,6 +981,131 @@ function WorkspaceScreen({
         <button type="button" onClick={onHistory}><InterfaceIcon name="history" />결과 기록</button>
         <span>{locationStatus}</span>
       </section>
+
+      <details className="assessment-drawer gps-drawer">
+        <summary>
+          📍 가상 GPS 자동 위치 추적 열기
+          <span className={isGpsChecking ? "status-pill active" : "status-pill"}>{locationStatus}</span>
+          <span className="panel-tag muted">{gpsSource === "real" ? "실제 위치 사용 중" : "기본 테스트 좌표 사용 중"}</span>
+        </summary>
+        <section className="panel gps-map-panel" aria-label="가상 GPS 자동 위치 추적">
+        <p className="muted-copy">
+          브라우저가 실제 위치를 확인하면 자동으로 그 위치 기준으로 전환되고, 실패하면 기본 테스트 좌표를 사용합니다.
+          아래 위경도 값을 바꿔서 "이동"을 시뮬레이션할 수도 있습니다(수동으로 확인하면 실제 위치 대신 그 값이 기준이 됩니다).
+          (점선 원은 설비별 근접 판정 반경 {GPS_EQUIPMENT_RADIUS_M}m)
+        </p>
+        {gpsPermissionDenied && (
+          <p className="error-message">
+            이 브라우저에서 위치 권한이 차단되어 있어 실제 위치로 전환될 수 없습니다.
+            주소창 왼쪽의 자물쇠(사이트 정보) 아이콘 → 위치 권한을 "허용"으로 바꾼 뒤 새로고침해 주세요.
+          </p>
+        )}
+        {gpsMapCenter ? (
+          <div className="gps-map" style={{ width: GPS_MAP_SIZE_PX, height: GPS_MAP_SIZE_PX }}>
+            {calibratedEquipment.map((eq) => {
+              const offset = metersOffsetFromCenter(gpsMapCenter, eq.latitude, eq.longitude);
+              const x = GPS_MAP_SIZE_PX / 2 + offset.x * GPS_MAP_SCALE_PX_PER_M;
+              const y = GPS_MAP_SIZE_PX / 2 + offset.y * GPS_MAP_SCALE_PX_PER_M;
+              const diameterPx = GPS_EQUIPMENT_RADIUS_M * GPS_MAP_SCALE_PX_PER_M * 2;
+              return (
+                <div key={eq.equipment_code}>
+                  <span className="gps-map-radius" style={{ left: x, top: y, width: diameterPx, height: diameterPx }} />
+                  <span className="gps-map-dot" style={{ left: x, top: y }} title={eq.equipment_name} />
+                  <span className="gps-map-label" style={{ left: x, top: y }}>{eq.equipment_name}</span>
+                </div>
+              );
+            })}
+            {gpsLivePosition && (() => {
+              const offset = metersOffsetFromCenter(gpsMapCenter, gpsLivePosition.latitude, gpsLivePosition.longitude);
+              return (
+                <span
+                  className="gps-map-marker"
+                  style={{
+                    left: GPS_MAP_SIZE_PX / 2 + offset.x * GPS_MAP_SCALE_PX_PER_M,
+                    top: GPS_MAP_SIZE_PX / 2 + offset.y * GPS_MAP_SCALE_PX_PER_M,
+                  }}
+                >📍</span>
+              );
+            })()}
+          </div>
+        ) : (
+          <p className="muted-copy">위치 권한을 허용하면 지도가 표시됩니다.</p>
+        )}
+        <div className="gps-manual-input">
+          <p className="muted-copy">기본 좌표로 이미 자동 확인되어 있습니다. 다른 위치를 테스트하려면 값을 바꿔서 확인해 보세요.</p>
+          <div className="gps-manual-fields">
+            <label>
+              위도
+              <input
+                value={manualLatitude}
+                onChange={(event) => setManualLatitude(event.target.value)}
+                inputMode="decimal"
+              />
+            </label>
+            <label>
+              경도
+              <input
+                value={manualLongitude}
+                onChange={(event) => setManualLongitude(event.target.value)}
+                inputMode="decimal"
+              />
+            </label>
+            <button type="button" onClick={checkManualLocation} disabled={isGpsChecking}>
+              이 위치로 확인
+            </button>
+            <button type="button" onClick={() => recalibrateManualLocation()} disabled={isGpsChecking}>
+              이 위치로 다시 보정
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {gpsResult && (() => {
+        const inRangeItems = gpsResult.nearby.filter((item) => item.distance_m <= GPS_EQUIPMENT_RADIUS_M);
+        const nearbyOutOfRange = gpsResult.nearby.filter((item) => item.distance_m > GPS_EQUIPMENT_RADIUS_M);
+        return (
+          <section className="panel gps-result-panel" aria-live="polite">
+            <div className="panel-heading compact-heading">
+              <div><span className="section-number">GPS</span><h2>가상 GPS 안전 체크</h2></div>
+              <span className="panel-tag">{inRangeItems.length > 0 ? `${inRangeItems.length}건 감지` : "감지된 설비 없음"}</span>
+            </div>
+            {inRangeItems.length === 0 ? (
+              <p className="muted-copy">반경 {GPS_EQUIPMENT_RADIUS_M}m 이내에 설비가 없습니다.</p>
+            ) : (
+              inRangeItems.map((item) => (
+                <div className="gps-nearby-item" key={item.equipment_code}>
+                  <div className="notice">{item.site_name} · {item.equipment_name} 앞 ({item.distance_m}m)</div>
+                  <div className="hazard-list">
+                    {item.hazards.map((hazard) => (
+                      <article className={`hazard-card ${hazard.risk_level}`} key={hazard.name}>
+                        <div className="hazard-title">
+                          <div><span>{hazard.accident_type}</span><h3>{hazard.name}</h3></div>
+                          <strong>{levelLabel[hazard.risk_level]} · {hazard.score}점</strong>
+                        </div>
+                        <ul>{hazard.safety_actions.map((action) => <li key={action}>{action}</li>)}</ul>
+                      </article>
+                    ))}
+                  </div>
+                  <div className="checklist">
+                    <h3>체크리스트</h3>
+                    {item.checklist.map((entry) => (
+                      <label key={entry}><input type="checkbox" /><span>{entry}</span></label>
+                    ))}
+                  </div>
+                </div>
+              ))
+            )}
+            {nearbyOutOfRange.length > 0 && (
+              <p className="muted-copy">
+                {nearbyOutOfRange
+                  .map((item) => `${item.equipment_name}까지 ${Math.round(item.distance_m)}m`)
+                  .join(" · ")}
+              </p>
+            )}
+          </section>
+        );
+      })()}
+      </details>
 
       <section className="field-overview-grid">
         <article className={`risk-overview-card risk-${highestRisk}`}>
