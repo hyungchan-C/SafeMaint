@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "dev-common.ps1")
 
 $composeArguments = $null
+$env:COMPOSE_IGNORE_ORPHANS = "true"
 
 function Invoke-SafeMaintDbQuery {
     param(
@@ -71,13 +72,31 @@ try {
     if ($alembicVersion.Count -ne 1) {
         throw "Alembic 현재 버전을 확인할 수 없습니다."
     }
-    if ($alembicVersion[0] -ne "0006_worker_resilience") {
-        throw "Alembic이 최신 버전이 아닙니다: $($alembicVersion[0])"
+    $headResult = Invoke-SafeMaintNativeCapture -Command {
+        & docker @composeArguments exec -T backend python -m alembic -c alembic.ini heads
+    }
+    if ($headResult.ExitCode -ne 0) {
+        throw "Alembic 코드 head를 확인하지 못했습니다: $($headResult.CombinedOutput -join ' ')"
+    }
+    $alembicHeads = @(
+        foreach ($line in $headResult.StandardOutput) {
+            $match = [regex]::Match(([string]$line).Trim(), '^(\S+)\s+\(head\)$')
+            if ($match.Success) {
+                $match.Groups[1].Value
+            }
+        }
+    )
+    if ($alembicHeads.Count -ne 1) {
+        throw "Alembic head가 하나가 아닙니다: $($alembicHeads -join ', ')"
+    }
+    if ($alembicVersion[0] -ne $alembicHeads[0]) {
+        throw "Alembic이 최신 버전이 아닙니다: DB=$($alembicVersion[0]), code=$($alembicHeads[0])"
     }
 
     Write-Host "[5/7] 주요 테이블 확인"
     $expectedTables = @(
         "alembic_version",
+        "auth_sessions",
         "reference_codes",
         "roles",
         "permissions",
@@ -104,7 +123,7 @@ try {
 SELECT tablename
 FROM pg_tables
 WHERE schemaname = 'public'
-  AND tablename IN ('alembic_version', 'reference_codes', 'roles', 'permissions', 'role_permissions', 'sites', 'user_roles', 'user_sites', 'users', 'equipment', 'components', 'assessments', 'assessment_hazards', 'checklist_items', 'documents', 'document_chunks', 'document_types', 'document_versions', 'document_processing_jobs', 'public_rag_packages', 'assessment_evidence', 'audit_events')
+  AND tablename IN ('alembic_version', 'auth_sessions', 'reference_codes', 'roles', 'permissions', 'role_permissions', 'sites', 'user_roles', 'user_sites', 'users', 'equipment', 'components', 'assessments', 'assessment_hazards', 'checklist_items', 'documents', 'document_chunks', 'document_types', 'document_versions', 'document_processing_jobs', 'public_rag_packages', 'assessment_evidence', 'audit_events')
 ORDER BY tablename;
 "@
     $actualTables = @(Invoke-SafeMaintDbQuery -Sql $tableSql)

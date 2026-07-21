@@ -84,6 +84,11 @@ class OpenAICompatibleProvider:
         json_schema = schema.model_json_schema()
         json_schema["additionalProperties"] = False
         json_schema["required"] = list(json_schema.get("properties", {}))
+        local_options = (
+            {"reasoning_effort": settings.llm_reasoning_effort}
+            if settings.llm_is_local
+            else {}
+        )
         completion = self.client.chat.completions.create(
             model=model,
             messages=[
@@ -99,6 +104,7 @@ class OpenAICompatibleProvider:
                 },
             },
             max_tokens=max_output_tokens,
+            **local_options,
         )
         content = completion.choices[0].message.content or ""
         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
@@ -115,6 +121,11 @@ class OpenAICompatibleProvider:
         user_input: str,
         max_output_tokens: int,
     ) -> str:
+        local_options = (
+            {"reasoning_effort": settings.llm_reasoning_effort}
+            if settings.llm_is_local
+            else {}
+        )
         completion = self.client.chat.completions.create(
             model=model,
             messages=[
@@ -123,6 +134,7 @@ class OpenAICompatibleProvider:
             ],
             max_tokens=max_output_tokens,
             temperature=0,
+            **local_options,
         )
         return (completion.choices[0].message.content or "").strip()
 
@@ -134,8 +146,12 @@ class AIService:
     def _provider(self) -> ModelProvider:
         if self.provider is not None:
             return self.provider
-        if not settings.allow_external_llm:
+        if not settings.allow_external_llm and not settings.llm_is_local:
             raise AIConfigurationError("External LLM use is disabled by policy.")
+        if settings.llm_is_local and not settings.local_llm_url_is_trusted():
+            raise AIConfigurationError(
+                "Local LLM scope requires LLM_BASE_URL to use a trusted local host."
+            )
         if not settings.openai_api_key and not settings.llm_base_url:
             raise AIConfigurationError(
                 "OPENAI_API_KEY or an OpenAI-compatible LLM_BASE_URL is required."

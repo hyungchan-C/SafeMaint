@@ -87,6 +87,15 @@ type WorkspaceSnapshot = {
   selectedDocumentIds: string[];
 };
 
+type UserDocumentSummary = {
+  document_id: string;
+  document_version_id: string;
+  original_filename: string;
+  version_number: number;
+  status: string;
+  is_active: boolean;
+};
+
 function readStorage<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
   try {
@@ -414,6 +423,42 @@ function WorkspaceScreen({
   }, [manuals, selectedDocumentIds, username, workspaceRestored]);
 
   useEffect(() => {
+    if (!workspaceRestored || manuals.length > 0 || selectedDocumentIds.length === 0) return;
+    setSelectedDocumentIds([]);
+  }, [manuals.length, selectedDocumentIds.length, workspaceRestored]);
+
+  useEffect(() => {
+    if (!workspaceRestored || !username) return;
+    const token = getAccessToken();
+    if (!token) return;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const response = await fetch(`${getApiBaseUrl()}/api/v1/documents/mine`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) return;
+        const documents = await response.json() as UserDocumentSummary[];
+        if (cancelled) return;
+        setManuals(documents.map((document) => document.original_filename));
+        setSelectedDocumentIds(documents.map((document) => document.document_id));
+        if (documents.some((document) => document.status === "pending" || document.status === "processing")) {
+          setManualStatus("등록된 매뉴얼을 처리하는 중입니다. 완료 후 자동으로 검색됩니다.");
+        } else if (documents.length > 0) {
+          setManualStatus("DB에서 매뉴얼을 불러왔습니다 · 등록한 사용자가 바로 질문할 수 있습니다.");
+        }
+      } catch {
+        // Keep the local snapshot when the backend is temporarily unavailable.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [username, workspaceRestored]);
+
+  useEffect(() => {
     if (typeof window !== "undefined") writeStorage(STORAGE_KEYS.settings, { volume, fontSize, autoSpeak });
   }, [volume, fontSize, autoSpeak]);
 
@@ -555,7 +600,6 @@ function WorkspaceScreen({
             energy_source: form.energy_source || null,
             task_description: form.description || null,
             visual_summary: visionSummary || null,
-            registered_manuals: manuals,
             selected_document_ids: selectedDocumentIds,
           },
         }),
@@ -574,6 +618,7 @@ function WorkspaceScreen({
           generationMode: payload.generation_mode,
           model: payload.model,
           warning: payload.warning,
+          accidentClassification: payload.accident_classification,
           catalogCandidates: candidatesForAnswer,
         },
       ]);
@@ -604,8 +649,12 @@ function WorkspaceScreen({
     if (!files) return;
     const token = getAccessToken();
     setManualStatus("문서를 등록하고 로컬 이미지 인덱스를 생성하는 중...");
-    try {
-      for (const file of Array.from(files)) {
+    let uploadedCount = 0;
+    const uploadFailures: string[] = [];
+    const visionPending: string[] = [];
+
+    for (const file of Array.from(files)) {
+      try {
         const uploadBody = new FormData();
         uploadBody.append("file", file);
         uploadBody.append("product_type", form.component_name || "미분류 설비");
@@ -620,21 +669,38 @@ function WorkspaceScreen({
         const uploadPayload = await uploadResponse.json().catch(() => null) as { document_id?: string; detail?: string } | null;
         if (!uploadResponse.ok || !uploadPayload?.document_id) throw new Error(uploadPayload?.detail || `${file.name} 문서 등록 실패`);
 
-        const indexBody = new FormData();
-        indexBody.append("document_id", uploadPayload.document_id);
-        const indexResponse = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/index`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: indexBody,
-        });
-        const indexPayload = await indexResponse.json().catch(() => null) as { document_id?: string; detail?: string } | null;
-        if (!indexResponse.ok || indexPayload?.document_id !== uploadPayload.document_id) throw new Error(indexPayload?.detail || `${file.name} 이미지 인덱싱 실패`);
+        uploadedCount += 1;
         setManuals((current) => Array.from(new Set([...current, file.name])));
         setSelectedDocumentIds((current) => Array.from(new Set([...current, uploadPayload.document_id!])));
+
+        const indexBody = new FormData();
+        indexBody.append("document_id", uploadPayload.document_id);
+        try {
+          const indexResponse = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/index`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}` },
+            body: indexBody,
+          });
+          const indexPayload = await indexResponse.json().catch(() => null) as { document_id?: string; detail?: string } | null;
+          if (!indexResponse.ok || indexPayload?.document_id !== uploadPayload.document_id) {
+            visionPending.push(file.name);
+          }
+        } catch {
+          visionPending.push(file.name);
+        }
+      } catch (requestError) {
+        uploadFailures.push(requestError instanceof Error ? requestError.message : `${file.name} 문서 등록 실패`);
       }
-      setManualStatus("문서 등록 완료 · 승인 및 RAG 처리 후 검색 근거로 사용됩니다.");
-    } catch (requestError) {
-      setManualStatus(requestError instanceof Error ? requestError.message : "문서 등록 실패");
+    }
+
+    if (uploadedCount > 0 && uploadFailures.length === 0 && visionPending.length === 0) {
+      setManualStatus("문서 등록 완료 · RAG 처리 후 업로드한 사용자가 바로 질문할 수 있습니다.");
+    } else if (uploadedCount > 0 && uploadFailures.length === 0) {
+      setManualStatus("문서 등록 완료 · 로컬 비전 서비스가 꺼져 있어 이미지 인덱싱만 대기 중입니다.");
+    } else if (uploadedCount > 0) {
+      setManualStatus(`${uploadedCount}개 문서 등록 완료 · 일부 실패: ${uploadFailures.join(" · ")}`);
+    } else {
+      setManualStatus(uploadFailures.join(" · ") || "문서 등록 실패");
     }
   }
 
@@ -896,7 +962,13 @@ function WorkspaceScreen({
             <label>글자 크기<select value={fontSize} onChange={(event) => setFontSize(event.target.value as FontSize)}><option value="small">작게</option><option value="medium">보통</option><option value="large">크게</option></select></label>
             <label>💬 채팅 답변 자동 음성 출력<input type="checkbox" checked={autoSpeak} onChange={(event) => setAutoSpeak(event.target.checked)} /></label>
             <button onClick={() => setMessages([])}>🧹 대화 초기화</button>
-            <button onClick={() => setManuals([])}>📚 매뉴얼 목록 초기화</button>
+            <button onClick={() => {
+              setManuals([]);
+              setSelectedDocumentIds([]);
+              setCatalogCandidates([]);
+              setVisionSummary("");
+              setManualStatus("매뉴얼 선택을 초기화했습니다.");
+            }}>📚 매뉴얼 목록 초기화</button>
             <button className="logout-button" onClick={onLogout}>🚪 로그아웃</button>
           </aside>
         </details>
@@ -1063,7 +1135,12 @@ function WorkspaceScreen({
       <section className="manual-row upgraded-manual-row">
         <label className="file-card">📄 작업 설비 매뉴얼 추가<input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
         <div><strong>{manuals.length ? `${manuals.length}개 매뉴얼 등록됨` : "등록된 매뉴얼 없음"}</strong><span>{manualStatus || (sitePhotoName ? `현장 사진: ${sitePhotoName} · ${visionStatus}` : "현장 사진 없음")}</span></div>
-        <div className="document-chip-list">{manuals.map((name) => <span key={name}>📄 {name}<button type="button" aria-label={`${name} 삭제`} onClick={() => setManuals((current) => current.filter((item) => item !== name))}>×</button></span>)}</div>
+        <div className="document-chip-list">{manuals.map((name, index) => <span key={name}>📄 {name}<button type="button" aria-label={`${name} 삭제`} onClick={() => {
+          setManuals((current) => current.filter((_, itemIndex) => itemIndex !== index));
+          setSelectedDocumentIds((current) => current.filter((_, itemIndex) => itemIndex !== index));
+          setCatalogCandidates([]);
+          setVisionSummary("");
+        }}>×</button></span>)}</div>
       </section>
 
       <section className="chat-stage upgraded-chat">
@@ -1077,8 +1154,15 @@ function WorkspaceScreen({
               {message.role === "ai" && message.retrievalMode && (
                 <span className={`retrieval-badge ${message.retrievalMode}`}>
                   {message.generationMode === "openai" && `${message.model ?? "OpenAI"} + `}
-                  {message.retrievalMode === "bge-m3" ? "BGE-M3 근거 검색" : "공통 안전수칙"}
+                  {message.sources?.length ? "BGE-M3 매뉴얼 근거 검색" : "공통 안전수칙"}
                 </span>
+              )}
+              {message.accidentClassification && (
+                <div className="team-qwen-result">
+                  <span>팀 Qwen LoRA 예측</span>
+                  <strong>{message.accidentClassification.label}</strong>
+                  <small>{message.accidentClassification.model} · {message.accidentClassification.adapter} · 실험용 분류</small>
+                </div>
               )}
               <p className="chat-answer-text">{message.text}</p>
               {message.catalogCandidates && message.catalogCandidates.length > 0 && (

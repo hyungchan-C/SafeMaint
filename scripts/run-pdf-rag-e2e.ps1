@@ -33,6 +33,20 @@ function Invoke-Compose {
     }
 }
 
+function Get-AvailableLoopbackPort {
+    $listener = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback,
+        0
+    )
+    try {
+        $listener.Start()
+        return ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    }
+    finally {
+        $listener.Stop()
+    }
+}
+
 try {
     Set-Location $repoRoot
     docker version --format "{{.Server.Version}}" | Out-Null
@@ -52,7 +66,10 @@ try {
     $env:POSTGRES_VOLUME_NAME = "safemaint_e2e_postgres_$runId"
     $env:DOCUMENT_VOLUME_NAME = "safemaint_e2e_documents_$runId"
     $env:PACKAGE_VOLUME_NAME = "safemaint_e2e_packages_$runId"
-    $env:BACKEND_PORT = "18000"
+    # The E2E client reaches the backend through the Compose network, so the
+    # host port is only needed to satisfy the shared development definition.
+    # Pick a free loopback port to avoid disrupting another local test stack.
+    $env:BACKEND_PORT = [string](Get-AvailableLoopbackPort)
     $env:RUN_RAG_E2E = "1"
     $env:ALLOW_TEST_DB_MUTATION = "1"
     $env:E2E_USER_PASSWORD = "E2E-$([guid]::NewGuid().ToString('N'))-Aa1!"

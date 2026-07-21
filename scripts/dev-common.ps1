@@ -8,6 +8,36 @@ function Get-SafeMaintRepoRoot {
     return $script:SafeMaintRepoRoot
 }
 
+function Invoke-SafeMaintNativeCapture {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Command
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 turns native stderr progress messages into
+        # ErrorRecord objects. Capture them without treating them as failures;
+        # the native exit code remains the source of truth.
+        $ErrorActionPreference = "Continue"
+        $output = @(& $Command 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        StandardOutput = @(
+            $output | Where-Object {
+                $_ -isnot [System.Management.Automation.ErrorRecord]
+            }
+        )
+        CombinedOutput = $output
+    }
+}
+
 function Resolve-SafeMaintEnvPath {
     param(
         [Parameter(Mandatory = $true)]
