@@ -12,8 +12,8 @@ export interface ChatSource {
 export interface ChatResponse {
   answer: string;
   sources: ChatSource[];
-  retrieval_mode: "bge-m3" | "safety-fallback";
-  generation_mode: "openai" | "template";
+  retrieval_mode: "bge-m3" | "hybrid" | "safety-fallback";
+  generation_mode: "openai" | "template" | "qwen";
   model: string | null;
   warning: string | null;
 }

@@ -18,6 +18,12 @@ x-backend-service: &backend-service
     OPENAI_TIMEOUT_SECONDS: ${OPENAI_TIMEOUT_SECONDS:-30}
     OPENAI_MAX_OUTPUT_TOKENS: ${OPENAI_MAX_OUTPUT_TOKENS:-1200}
     ALLOW_EXTERNAL_LLM: ${ALLOW_EXTERNAL_LLM:-false}
+    QWEN_ENABLED: ${QWEN_ENABLED:-false}
+    QWEN_PROVIDER: ${QWEN_PROVIDER:-local}
+    QWEN_SERVICE_URL: ${QWEN_SERVICE_URL:-http://qwen:8020}
+    QWEN_API_KEY: ${QWEN_API_KEY:-}
+    QWEN_TIMEOUT_SECONDS: ${QWEN_TIMEOUT_SECONDS:-300}
+    QWEN_ALLOW_COMPANY_CONTEXT: ${QWEN_ALLOW_COMPANY_CONTEXT:-false}
     DOCUMENT_STORAGE_DIR: /data/documents
     DOCUMENT_MAX_UPLOAD_BYTES: ${DOCUMENT_MAX_UPLOAD_BYTES:-26214400}
     PACKAGE_STORAGE_DIR: /data/packages
@@ -153,6 +159,39 @@ services:
     depends_on:
       seed:
         condition: service_completed_successfully
+
+  qwen:
+    image: safemaint-qwen:0.1.0
+    build:
+      context: .
+      dockerfile: ai/Dockerfile.qwen
+    profiles: ["qwen-local"]
+    restart: unless-stopped
+    environment:
+      QWEN_BASE_MODEL: ${QWEN_BASE_MODEL:-Qwen/Qwen3.5-9B}
+      QWEN_LORA_ADAPTER: ${QWEN_LORA_ADAPTER:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      QWEN_DEVICE: ${QWEN_DEVICE:-cuda}
+      QWEN_LOAD_IN_4BIT: ${QWEN_LOAD_IN_4BIT:-true}
+      QWEN_MAX_NEW_TOKENS: ${QWEN_MAX_NEW_TOKENS:-768}
+      QWEN_CLASSIFY_MAX_NEW_TOKENS: ${QWEN_CLASSIFY_MAX_NEW_TOKENS:-96}
+      HF_HOME: /models
+      TRANSFORMERS_CACHE: /models
+    volumes:
+      - safemaint_model_cache:/models
+    ports:
+      - "${QWEN_BIND_ADDRESS:-127.0.0.1}:${QWEN_PORT:-8020}:8020"
+    gpus: all
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8020/health/live', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   frontend:
     image: safemaint-frontend:0.2.0

@@ -77,6 +77,6 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[ChatSource] = Field(default_factory=list)
     retrieval_mode: Literal["bge-m3", "hybrid", "safety-fallback"]
-    generation_mode: Literal["openai", "template"] = "template"
+    generation_mode: Literal["openai", "template", "qwen"] = "template"
     model: str | None = None
     warning: str | None = None
