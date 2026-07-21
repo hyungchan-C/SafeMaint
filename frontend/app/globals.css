@@ -679,6 +679,7 @@ a {
 .gps-manual-fields input { border: 1px solid #ccd9df; border-radius: 8px; padding: 8px 10px; width: 120px; }
 .gps-manual-fields button { background: #f7fafb; border: 1px solid #cfdde3; border-radius: 8px; color: var(--navy); cursor: pointer; font-weight: 700; padding: 8px 12px; }
 .gps-map-marker { position: absolute; font-size: 22px; transform: translate(-50%, -100%); pointer-events: none; }
+.gps-map-marker-clamped { filter: grayscale(40%); opacity: 0.75; }
 .field-overview-grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1.3fr) minmax(290px, .7fr); margin: 0 auto 18px; max-width: 1500px; }
 .risk-overview-card { align-items: center; background: white; border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 280px; padding: 25px; text-align: center; }
 .risk-overview-card.risk-high { border-top: 6px solid #c53f3f; }
