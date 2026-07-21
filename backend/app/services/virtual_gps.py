@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from math import asin, cos, radians, sin, sqrt
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from app.core.config import settings
+from app.db.models import Equipment, Site
 from app.schemas.assessment import AssessmentRequest, HazardItem
 from app.services.risk_engine import RiskEngine
 
@@ -22,9 +27,10 @@ class VirtualEquipmentLocation:
     longitude: float
 
 
-# 실제 GPS 연동 전까지 사용하는 테스트용 목데이터.
-# DB의 Equipment 테이블(팀원 담당)과는 별개이며, 실연동 시 좌표 컬럼으로 이관 예정.
-VIRTUAL_EQUIPMENT_LOCATIONS: tuple[VirtualEquipmentLocation, ...] = (
+# seed.py가 Equipment/Site DB 테이블에 그대로 채워 넣는 표준 시나리오 4건.
+# 실사용 데이터는 load_virtual_equipment_locations()로 DB에서 읽어오며, 이 상수는
+# seed 소스이자 순수 함수(resolve_locations/find_nearby_equipment)의 테스트 픽스처로만 쓰인다.
+SAMPLE_EQUIPMENT_LOCATIONS: tuple[VirtualEquipmentLocation, ...] = (
     VirtualEquipmentLocation(
         equipment_code="CONV-203",
         site_name="A공장",
@@ -72,8 +78,8 @@ VIRTUAL_EQUIPMENT_LOCATIONS: tuple[VirtualEquipmentLocation, ...] = (
 # 실사용자가 실제 GPS로 걸어다니며 테스트할 수 있도록, 이 원점을 사용자의
 # 실제 최초 위치로 옮기면(캘리브레이션) 전체 설비가 그 자리 그대로 함께 이동한다.
 CANONICAL_ORIGIN = (
-    VIRTUAL_EQUIPMENT_LOCATIONS[0].latitude,
-    VIRTUAL_EQUIPMENT_LOCATIONS[0].longitude,
+    SAMPLE_EQUIPMENT_LOCATIONS[0].latitude,
+    SAMPLE_EQUIPMENT_LOCATIONS[0].longitude,
 )
 
 METERS_PER_DEG_LAT = 111_320.0
@@ -84,16 +90,17 @@ def _meters_per_deg_lon(lat_deg: float) -> float:
 
 
 def resolve_locations(
+    locations: Sequence[VirtualEquipmentLocation],
     origin: tuple[float, float] | None = None,
 ) -> tuple[VirtualEquipmentLocation, ...]:
     if origin is None:
-        return VIRTUAL_EQUIPMENT_LOCATIONS
+        return tuple(locations)
 
     origin_lat, origin_lon = origin
     canonical_lat, canonical_lon = CANONICAL_ORIGIN
 
     result = []
-    for location in VIRTUAL_EQUIPMENT_LOCATIONS:
+    for location in locations:
         # 표준 원점 대비 상대 위치를 미터 단위로 구한 뒤, 새 원점의 위도를 기준으로
         # 다시 위경도로 환산한다. 위도가 달라지면 경도 1도당 거리도 달라지므로,
         # 단순히 위경도 차이를 그대로 더하면 위도가 먼 지점으로 옮길 때 상대
@@ -127,13 +134,14 @@ class NearbyEquipment:
 def find_nearby_equipment(
     latitude: float,
     longitude: float,
+    locations: Sequence[VirtualEquipmentLocation],
     radius_m: float | None = None,
     origin: tuple[float, float] | None = None,
 ) -> list[NearbyEquipment]:
     effective_radius = radius_m if radius_m is not None else settings.gps_proximity_radius_m
 
     nearby: list[NearbyEquipment] = []
-    for location in resolve_locations(origin):
+    for location in resolve_locations(locations, origin):
         distance = haversine_distance_m(
             latitude, longitude, location.latitude, location.longitude
         )
@@ -142,6 +150,33 @@ def find_nearby_equipment(
 
     nearby.sort(key=lambda entry: entry.distance_m)
     return nearby
+
+
+def load_virtual_equipment_locations(db: Session) -> tuple[VirtualEquipmentLocation, ...]:
+    """좌표가 설정된 활성 설비를 Equipment/Site DB 테이블에서 읽어온다."""
+
+    rows = db.execute(
+        select(Equipment, Site.name)
+        .join(Site, Equipment.site_id == Site.id)
+        .where(
+            Equipment.latitude.is_not(None),
+            Equipment.longitude.is_not(None),
+            Equipment.is_active.is_(True),
+        )
+    ).all()
+    return tuple(
+        VirtualEquipmentLocation(
+            equipment_code=equipment.code,
+            site_name=site_name,
+            equipment_name=equipment.name,
+            equipment_type=equipment.equipment_type,
+            manufacturer=equipment.manufacturer,
+            model_number=equipment.model_number,
+            latitude=equipment.latitude,
+            longitude=equipment.longitude,
+        )
+        for equipment, site_name in rows
+    )
 
 
 _RISK_ENGINE = RiskEngine()

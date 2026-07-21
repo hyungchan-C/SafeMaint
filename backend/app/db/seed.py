@@ -7,12 +7,15 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     DocumentType,
+    Equipment,
     Permission,
     ReferenceCode,
     Role,
     RolePermission,
+    Site,
 )
 from app.db.session import SessionLocal
+from app.services.virtual_gps import SAMPLE_EQUIPMENT_LOCATIONS
 
 
 class ReferenceCodeSeed(TypedDict):
@@ -39,6 +42,22 @@ class DocumentTypeSeed(TypedDict):
     name: str
     scope: str
     is_exportable: bool
+
+
+class SiteSeed(TypedDict):
+    code: str
+    name: str
+
+
+class EquipmentSeed(TypedDict):
+    site_code: str
+    code: str
+    name: str
+    equipment_type: str
+    manufacturer: str | None
+    model_number: str | None
+    latitude: float
+    longitude: float
 
 
 REFERENCE_CODES: Sequence[ReferenceCodeSeed] = (
@@ -150,6 +169,30 @@ DOCUMENT_TYPES: Sequence[DocumentTypeSeed] = (
     {"code": "legacy_document", "name": "Legacy document", "scope": "company", "is_exportable": False},
 )
 
+# 가상 GPS 데모용 사업장 코드. 표시용 이름은 app.services.virtual_gps의
+# SAMPLE_EQUIPMENT_LOCATIONS에 있고, DB의 sites.code(필수·유일)만 여기서 부여한다.
+_SITE_NAME_TO_CODE = {"A공장": "SITE-A", "B공장": "SITE-B"}
+
+SITES: Sequence[SiteSeed] = tuple(
+    {"code": code, "name": name} for name, code in _SITE_NAME_TO_CODE.items()
+)
+
+# 가상 GPS 근접 판정용 설비 좌표. SAMPLE_EQUIPMENT_LOCATIONS를 단일 소스로 삼아
+# seed 데이터가 그 값과 어긋나지 않도록 한다.
+EQUIPMENT: Sequence[EquipmentSeed] = tuple(
+    {
+        "site_code": _SITE_NAME_TO_CODE[location.site_name],
+        "code": location.equipment_code,
+        "name": location.equipment_name,
+        "equipment_type": location.equipment_type,
+        "manufacturer": location.manufacturer,
+        "model_number": location.model_number,
+        "latitude": location.latitude,
+        "longitude": location.longitude,
+    }
+    for location in SAMPLE_EQUIPMENT_LOCATIONS
+)
+
 
 def seed_reference_data(session: Session) -> int:
     statement = insert(ReferenceCode).values(list(REFERENCE_CODES))
@@ -243,16 +286,70 @@ def seed_security_and_document_types(session: Session) -> tuple[int, int]:
     )
 
 
+def seed_sites_and_equipment(session: Session) -> tuple[int, int]:
+    site_statement = insert(Site).values(list(SITES))
+    site_statement = site_statement.on_conflict_do_update(
+        constraint="uq_sites_code",
+        set_={
+            "name": site_statement.excluded.name,
+            "is_active": True,
+            "updated_at": func.now(),
+        },
+    )
+    try:
+        site_result = session.execute(site_statement)
+        site_ids = dict(session.execute(select(Site.code, Site.id)).all())
+        equipment_rows = [
+            {
+                "site_id": site_ids[item["site_code"]],
+                "code": item["code"],
+                "name": item["name"],
+                "equipment_type": item["equipment_type"],
+                "manufacturer": item["manufacturer"],
+                "model_number": item["model_number"],
+                "latitude": item["latitude"],
+                "longitude": item["longitude"],
+            }
+            for item in EQUIPMENT
+            if item["site_code"] in site_ids
+        ]
+        equipment_statement = insert(Equipment).values(equipment_rows)
+        equipment_statement = equipment_statement.on_conflict_do_update(
+            constraint="uq_equipment_site_code",
+            set_={
+                "name": equipment_statement.excluded.name,
+                "equipment_type": equipment_statement.excluded.equipment_type,
+                "manufacturer": equipment_statement.excluded.manufacturer,
+                "model_number": equipment_statement.excluded.model_number,
+                "latitude": equipment_statement.excluded.latitude,
+                "longitude": equipment_statement.excluded.longitude,
+                "is_active": True,
+                "updated_at": func.now(),
+            },
+        )
+        equipment_result = session.execute(equipment_statement)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    return (
+        max(site_result.rowcount or 0, 0),
+        max(equipment_result.rowcount or 0, 0),
+    )
+
+
 def main() -> None:
     with SessionLocal() as session:
         reference_rows = seed_reference_data(session)
         role_rows = seed_roles(session)
         permission_rows, document_type_rows = seed_security_and_document_types(session)
+        site_rows, equipment_rows = seed_sites_and_equipment(session)
     print(
         "SafeMaint seed completed: "
         f"{reference_rows} reference rows, {role_rows} role rows, "
-        f"{permission_rows} permission rows, and {document_type_rows} "
-        "document type rows applied"
+        f"{permission_rows} permission rows, {document_type_rows} "
+        f"document type rows, {site_rows} site rows, and {equipment_rows} "
+        "equipment rows applied"
     )
 
 

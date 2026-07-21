@@ -4,7 +4,12 @@ import argparse
 import json
 
 from app.core.config import settings
-from app.services.virtual_gps import build_checklist, find_nearby_equipment
+from app.db.session import SessionLocal
+from app.services.virtual_gps import (
+    build_checklist,
+    find_nearby_equipment,
+    load_virtual_equipment_locations,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,7 +31,9 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    nearby = find_nearby_equipment(args.lat, args.lon, args.radius_m)
+    with SessionLocal() as db:
+        locations = load_virtual_equipment_locations(db)
+    nearby = find_nearby_equipment(args.lat, args.lon, locations, args.radius_m)
 
     entries = []
     for entry in nearby:

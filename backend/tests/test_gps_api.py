@@ -1,9 +1,21 @@
 import asyncio
+from os import getenv
 
+import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.engine import make_url
 
+from app.core.config import settings
+from app.db.session import SessionLocal
+from app.db.seed import seed_sites_and_equipment
 from app.main import app
-from app.services.virtual_gps import VIRTUAL_EQUIPMENT_LOCATIONS
+from app.services.virtual_gps import SAMPLE_EQUIPMENT_LOCATIONS
+
+
+pytestmark = pytest.mark.skipif(
+    getenv("RUN_DB_INTEGRATION") != "1" or getenv("ALLOW_TEST_DB_MUTATION") != "1",
+    reason="Run only against an explicitly enabled isolated test database.",
+)
 
 
 async def request(method: str, path: str, **kwargs: object):
@@ -12,20 +24,27 @@ async def request(method: str, path: str, **kwargs: object):
         return await client.request(method, path, **kwargs)
 
 
-def test_list_virtual_equipment_returns_mock_locations() -> None:
+@pytest.fixture(autouse=True)
+def _seeded_equipment() -> None:
+    assert (make_url(settings.database_url).database or "").endswith("_test")
+    with SessionLocal() as session:
+        seed_sites_and_equipment(session)
+
+
+def test_list_virtual_equipment_returns_seeded_locations() -> None:
     response = asyncio.run(request("GET", "/api/v1/gps/equipment"))
 
     assert response.status_code == 200
     body = response.json()
     assert {item["equipment_code"] for item in body} == {
-        location.equipment_code for location in VIRTUAL_EQUIPMENT_LOCATIONS
+        location.equipment_code for location in SAMPLE_EQUIPMENT_LOCATIONS
     }
 
 
 def test_check_location_returns_checklist_for_nearby_equipment() -> None:
     conveyor = next(
         location
-        for location in VIRTUAL_EQUIPMENT_LOCATIONS
+        for location in SAMPLE_EQUIPMENT_LOCATIONS
         if location.equipment_code == "CONV-203"
     )
 

@@ -102,7 +102,7 @@ def test_schema_extension_and_alembic_head() -> None:
         )
 
     assert extension_version
-    assert alembic_revision == "0007_add_auth_sessions"
+    assert alembic_revision == "0008_add_equipment_coordinates"
     assert "ck_assessment_hazards_likelihood_range" in constraints
     assert "ck_assessment_hazards_severity_range" in constraints
     assert "ck_assessments_status" in constraints

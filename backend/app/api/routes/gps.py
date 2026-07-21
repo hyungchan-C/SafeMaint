@@ -1,11 +1,16 @@
-from fastapi import APIRouter, Query
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import HTMLResponse
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.db.session import get_db
 from app.schemas.gps import GpsCheckRequest, GpsCheckResponse, NearbyEquipmentItem
 from app.services.virtual_gps import (
     build_checklist,
     find_nearby_equipment,
+    load_virtual_equipment_locations,
     resolve_locations,
 )
 
@@ -75,7 +80,10 @@ loadEquipment();
 
 
 @router.post("/check", response_model=GpsCheckResponse)
-def check_location(payload: GpsCheckRequest) -> GpsCheckResponse:
+def check_location(
+    payload: GpsCheckRequest,
+    db: Annotated[Session, Depends(get_db)],
+) -> GpsCheckResponse:
     """가상 GPS 좌표를 받아 근접한 설비의 안전 체크리스트를 반환합니다.
 
     origin_latitude/origin_longitude가 함께 전달되면, 실제 사용자의 최초 위치를
@@ -89,7 +97,8 @@ def check_location(payload: GpsCheckRequest) -> GpsCheckResponse:
         if payload.origin_latitude is not None and payload.origin_longitude is not None
         else None
     )
-    nearby = find_nearby_equipment(payload.latitude, payload.longitude, radius_m, origin)
+    locations = load_virtual_equipment_locations(db)
+    nearby = find_nearby_equipment(payload.latitude, payload.longitude, locations, radius_m, origin)
 
     items = []
     for entry in nearby:
@@ -123,10 +132,11 @@ def gps_test_page() -> HTMLResponse:
 
 @router.get("/equipment")
 def list_virtual_equipment(
+    db: Annotated[Session, Depends(get_db)],
     origin_latitude: float | None = Query(default=None, ge=-90, le=90),
     origin_longitude: float | None = Query(default=None, ge=-180, le=180),
 ) -> list[dict]:
-    """테스트용 가상 설비 좌표 목록.
+    """DB에 좌표가 등록된 설비 목록.
 
     origin_latitude/origin_longitude를 전달하면, 그 위치를 기준으로 옮겨진
     좌표(캘리브레이션 결과)를 반환한다.
@@ -137,6 +147,7 @@ def list_virtual_equipment(
         if origin_latitude is not None and origin_longitude is not None
         else None
     )
+    locations = load_virtual_equipment_locations(db)
     return [
         {
             "equipment_code": location.equipment_code,
@@ -146,5 +157,5 @@ def list_virtual_equipment(
             "latitude": location.latitude,
             "longitude": location.longitude,
         }
-        for location in resolve_locations(origin)
+        for location in resolve_locations(locations, origin)
     ]
