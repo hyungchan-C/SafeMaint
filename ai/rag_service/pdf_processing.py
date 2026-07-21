@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import fitz
 
-from preprocessing.pdf_pipeline import process_pdf
+from preprocessing.pdf_pipeline import DoclingRuntimeSettings, process_pdf
 
 
 PdfKind = Literal["text", "scanned", "empty"]
@@ -29,6 +29,7 @@ class ProcessedPdf:
     kind: PdfKind
     page_count: int
     chunks: tuple[ProcessedChunk, ...]
+    processing_metadata: dict[str, Any]
 
 
 def _inspect_pdf(path: Path) -> tuple[int, bool]:
@@ -46,12 +47,14 @@ def process_document_pdf(
     model_name: str = "",
     chunk_size: int = 1200,
     overlap: int = 150,
+    docling_settings: DoclingRuntimeSettings | None = None,
+    log_context: dict[str, Any] | None = None,
 ) -> ProcessedPdf:
     """Normalize the shared PDF pipeline output for database storage.
 
-    Docling remains optional. The shared pipeline falls back to PyMuPDF when
-    Docling is not installed; image-only files are explicitly classified so
-    the worker never invents text for a scanned manual.
+    Docling deployment errors are fatal by default. PyMuPDF fallback is only
+    used for document-specific conversion failures when explicitly allowed;
+    image-only files are classified so the worker never invents text.
     """
     path = Path(pdf_path).resolve()
     if not path.is_file():
@@ -59,7 +62,18 @@ def process_document_pdf(
 
     page_count, has_raster_images = _inspect_pdf(path)
     if page_count == 0:
-        return ProcessedPdf(kind="empty", page_count=0, chunks=())
+        return ProcessedPdf(
+            kind="empty",
+            page_count=0,
+            chunks=(),
+            processing_metadata={
+                "extractor": "none",
+                "extractor_version": None,
+                "fallback_used": False,
+                "fallback_reason": "PDF has zero pages.",
+                "ocr_used": False,
+            },
+        )
 
     pipeline_result = process_pdf(
         str(path),
@@ -68,7 +82,10 @@ def process_document_pdf(
         manufacturer=manufacturer,
         chunk_size=chunk_size,
         overlap=overlap,
+        docling_settings=docling_settings,
+        log_context=log_context,
     )
+    processing_metadata = dict(pipeline_result.get("processing_metadata") or {})
     normalized: list[ProcessedChunk] = []
     for raw_chunk in pipeline_result["chunks"]:
         content = str(raw_chunk.get("content", "")).strip()
@@ -108,9 +125,15 @@ def process_document_pdf(
         )
 
     if normalized:
-        return ProcessedPdf(kind="text", page_count=page_count, chunks=tuple(normalized))
+        return ProcessedPdf(
+            kind="text",
+            page_count=page_count,
+            chunks=tuple(normalized),
+            processing_metadata=processing_metadata,
+        )
     return ProcessedPdf(
         kind="scanned" if has_raster_images else "empty",
         page_count=page_count,
         chunks=(),
+        processing_metadata=processing_metadata,
     )

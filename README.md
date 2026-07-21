@@ -574,7 +574,70 @@ pending → processing → review_required → active
                     └→ failed 또는 ocr_required
 ```
 
-worker가 고객사 서버 안에서 PyMuPDF로 텍스트를 추출하고 BGE-M3 1024차원 임베딩을 생성합니다. 텍스트가 없는 스캔 PDF는 내용을 꾸며내지 않고 `ocr_required`로 표시합니다. 처리된 문서는 `review_required`에서 대기하며 `document.approve` 권한 사용자가 승인 API를 호출해야 `active/current_version`이 됩니다. 승인은 row lock과 단일 트랜잭션으로 실행되고 이전 활성 버전을 `superseded`로 바꾸며 감사 이벤트를 남깁니다. 검색은 승인된 현재 버전만 대상으로 합니다.
+worker가 고객사 서버 안에서 Docling을 우선 사용해 구조와 표를 추출하고 BGE-M3 1024차원 임베딩을 생성합니다. Docling 패키지나 필수 오프라인 모델이 없으면 worker는 배포 오류를 기록하고 시작하지 않습니다. Docling이 정상 설치됐지만 특정 PDF 변환만 실패하거나 결과가 비어 있을 때는 `DOCLING_ALLOW_PYMUPDF_FALLBACK=true`인 경우에만 PyMuPDF로 폴백합니다. 텍스트가 없는 스캔 PDF는 내용을 꾸며내지 않고 `ocr_required`로 표시합니다. 처리된 문서는 `review_required`에서 대기하며 `document.approve` 권한 사용자가 승인 API를 호출해야 `active/current_version`이 됩니다. 승인은 row lock과 단일 트랜잭션으로 실행되고 이전 활성 버전을 `superseded`로 바꾸며 감사 이벤트를 남깁니다. 검색은 승인된 현재 버전만 대상으로 합니다.
+
+#### Docling 처리 정책과 확인
+
+기본 PDF 제한은 200MiB, Docling 페이지 제한은 500쪽입니다. worker는 처리 중 heartbeat를 갱신하므로 큰 PDF가 기본 stale 시간 안에 끝나지 않더라도 다른 worker가 같은 작업을 중복 회수하지 않습니다. 실제 추출 결과는 `document_versions.processing_metadata`와 `DOCUMENT_PROCESSING_COMPLETED` 감사 이벤트에 저장됩니다.
+
+```json
+{
+  "extractor": "docling",
+  "extractor_version": "2.113.0",
+  "fallback_used": false,
+  "fallback_reason": null,
+  "ocr_used": false
+}
+```
+
+배포 오류와 문서 오류는 다음처럼 구분합니다.
+
+- Docling 패키지 누락: worker 시작 실패, PyMuPDF 폴백 금지
+- `DOCLING_OFFLINE=true`인데 artifacts 경로 누락·비어 있음: worker 시작 실패
+- 개별 PDF의 Docling 변환 오류: 설정이 허용하면 PyMuPDF 폴백
+- Docling 결과가 빈 섹션: 설정이 허용하면 PyMuPDF 폴백
+- 파일 크기·페이지 제한 초과: 명확한 제한 오류로 처리하고 폴백하지 않음
+
+개발 환경에서는 `DOCLING_ARTIFACTS_PATH`를 비워 두면 Docling의 기본 모델 준비 동작을 사용합니다. 인터넷이 차단된 고객사에 배포할 모델은 인터넷이 되는 준비 PC에서 Docker named volume에 내려받습니다.
+
+```powershell
+docker compose `
+  --env-file .env `
+  -f docker-compose.yml `
+  -f docker-compose.dev.yml `
+  run --rm --entrypoint docling-tools worker `
+  models download -o /models/docling
+```
+
+고객사 서버에는 준비된 `/models/docling` 디렉터리를 안전한 오프라인 매체로 전달하고 기존 `safemaint_model_cache` 볼륨의 같은 경로에 배치합니다. 이후 고객사 `.env`에는 다음 값을 사용합니다.
+
+```dotenv
+DOCLING_OFFLINE=true
+DOCLING_ARTIFACTS_PATH=/models/docling
+HF_HUB_OFFLINE=1
+```
+
+모델 파일은 크기가 크고 배포 산출물이므로 Git에 커밋하지 않습니다. 다운로드가 완료되기 전에 오프라인 모드로 전환하지 마세요.
+
+Docling 설치 후에도 과거에 PyMuPDF로 처리된 `document_chunks`는 자동으로 바뀌지 않습니다. 현재는 동일한 PDF를 새 문서 버전으로 다시 업로드하여 Docling으로 처리하고, 검토 후 새 버전을 승인하는 방법을 사용합니다. 승인되면 기존 활성 버전은 `superseded`가 됩니다. 대량 재처리 명령은 아직 제공하지 않으며 기존 청크를 SQL로 직접 덮어쓰거나 삭제하면 안 됩니다.
+
+DBeaver에서는 다음 SQL로 최근 처리 엔진과 폴백 여부를 확인할 수 있습니다.
+
+```sql
+SELECT
+    original_filename,
+    version_number,
+    status,
+    processing_metadata->>'extractor' AS extractor,
+    processing_metadata->>'extractor_version' AS extractor_version,
+    processing_metadata->>'fallback_used' AS fallback_used,
+    processing_metadata->>'ocr_used' AS ocr_used,
+    processing_metadata->>'fallback_reason' AS fallback_reason,
+    updated_at
+FROM document_versions
+ORDER BY updated_at DESC
+LIMIT 20;
+```
 
 문서 유형은 `public_incident`, `public_law`, `public_guide`, `public_media`, `company_policy`, `equipment_manual`, `component_manual`입니다. 향후 고객사 업로드 API는 회사 문서 유형만 허용하고 공용 유형은 서명된 패키지로만 설치해야 합니다.
 
@@ -643,7 +706,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 ### 현재 구현 범위와 남은 항목
 
-구현됨: DB 기반 RBAC와 세션 토큰, 인증된 PDF 업로드 API(F-01), 문서 유형·버전·처리 상태, 로컬 텍스트 추출·BGE-M3 임베딩 worker, 트랜잭션 기반 승인 API, 승인된 현재 버전 검색, 인증 사용자의 역할·사업장 검색 범위, 출처의 문서 유형·파일명·페이지·섹션·버전·점수, 서명 패키지 CLI, 감사 데이터, 외부 LLM 기본 차단, TTS.
+구현됨: DB 기반 RBAC와 세션 토큰, 인증된 PDF 업로드 API(F-01), 문서 유형·버전·처리 상태, Docling 우선 추출과 관찰 가능한 PyMuPDF 폴백, 로컬 BGE-M3 임베딩 worker, 트랜잭션 기반 승인 API, 승인된 현재 버전 검색, 인증 사용자의 역할·사업장 검색 범위, 출처의 문서 유형·파일명·페이지·섹션·버전·점수, 서명 패키지 CLI, 감사 데이터, 외부 LLM 기본 차단, TTS.
 
 프런트엔드의 문서 업로드·승인 관리 화면은 이번 E2E 범위에 포함하지 않았습니다. HTTP API와 백엔드 보안 흐름까지 자동 검증합니다.
 
@@ -775,7 +838,7 @@ Qwen3가 OpenAI 호환 API로 준비되면 애플리케이션 코드를 수정�
 ```dotenv
 DOCUMENT_WORKER_MAX_ATTEMPTS=3
 DOCUMENT_WORKER_RETRY_DELAY_SECONDS=10
-DOCUMENT_WORKER_STALE_AFTER_SECONDS=300
+DOCUMENT_WORKER_STALE_AFTER_SECONDS=1800
 RAG_CANDIDATE_K=30
 RAG_MAX_CHUNKS_PER_DOCUMENT=2
 RAG_MIN_KEYWORD_SCORE=0.08
