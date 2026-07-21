@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from os import getenv
+from urllib.parse import urlparse
 
 
 def _csv_env(name: str, default: str) -> tuple[str, ...]:
@@ -17,6 +18,14 @@ def _bool_env(name: str, default: bool = False) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"{name} must be a boolean value")
+
+
+def _choice_env(name: str, default: str, choices: set[str]) -> str:
+    value = getenv(name, default).strip().lower()
+    if value not in choices:
+        expected = ", ".join(sorted(choices))
+        raise ValueError(f"{name} must be one of: {expected}")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,11 +50,21 @@ class Settings:
     openai_api_key: str = getenv("OPENAI_API_KEY", "")
     openai_model: str = getenv("OPENAI_MODEL", "gpt-4o-mini")
     llm_base_url: str | None = getenv("LLM_BASE_URL") or None
+    llm_provider_scope: str = _choice_env(
+        "LLM_PROVIDER_SCOPE", "external", {"external", "local"}
+    )
+    llm_local_hosts: tuple[str, ...] = _csv_env(
+        "LLM_LOCAL_HOSTS",
+        "localhost,127.0.0.1,::1,host.docker.internal,ollama",
+    )
     llm_analyzer_model: str = getenv(
         "LLM_ANALYZER_MODEL", getenv("OPENAI_MODEL", "gpt-4o-mini")
     )
     llm_answer_model: str = getenv(
         "LLM_ANSWER_MODEL", getenv("OPENAI_MODEL", "gpt-4o-mini")
+    )
+    llm_reasoning_effort: str = _choice_env(
+        "LLM_REASONING_EFFORT", "none", {"none", "low", "medium", "high"}
     )
     vision_service_url: str = getenv("VISION_SERVICE_URL", "http://vision:8020")
     vision_image_max_upload_bytes: int = int(
@@ -65,6 +84,13 @@ class Settings:
     qwen_api_key: str = getenv("QWEN_API_KEY", "")
     qwen_timeout_seconds: float = float(getenv("QWEN_TIMEOUT_SECONDS", "300"))
     qwen_allow_company_context: bool = _bool_env("QWEN_ALLOW_COMPANY_CONTEXT", False)
+    qwen_classifier_enabled: bool = _bool_env(
+        "QWEN_CLASSIFIER_ENABLED", False
+    )
+    qwen_classifier_url: str | None = getenv("QWEN_CLASSIFIER_URL") or None
+    qwen_classifier_timeout_seconds: float = float(
+        getenv("QWEN_CLASSIFIER_TIMEOUT_SECONDS", "300")
+    )
     document_storage_dir: str = getenv("DOCUMENT_STORAGE_DIR", "/data/documents")
     document_max_upload_bytes: int = int(
         getenv("DOCUMENT_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))
@@ -85,6 +111,16 @@ class Settings:
     stt_device: str = getenv("STT_DEVICE", "cpu")
     stt_compute_type: str = getenv("STT_COMPUTE_TYPE", "int8")
     gps_proximity_radius_m: float = float(getenv("GPS_PROXIMITY_RADIUS_M", "30"))
+
+    @property
+    def llm_is_local(self) -> bool:
+        return self.llm_provider_scope == "local"
+
+    def local_llm_url_is_trusted(self) -> bool:
+        if not self.llm_base_url:
+            return False
+        hostname = (urlparse(self.llm_base_url).hostname or "").casefold()
+        return hostname in {host.casefold() for host in self.llm_local_hosts}
 
 
 settings = Settings()

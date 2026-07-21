@@ -9,10 +9,15 @@ from openai import OpenAIError
 
 from app.core.config import settings
 from app.schemas.chat import (
+    AccidentClassification,
     ChatRequest,
     ChatResponse,
     QueryAnalysis,
     RetrievalAccessScope,
+)
+from app.services.accident_classifier import (
+    AccidentClassifierClient,
+    AccidentClassifierError,
 )
 from app.services.ai import AIConfigurationError, AIService
 from app.services.qwen import QwenClient
@@ -41,6 +46,9 @@ QWEN_UNAVAILABLE_WARNING = (
 QWEN_COMPANY_CONTEXT_WARNING = (
     "Qwen company-context sharing is disabled; using the retrieved evidence template."
 )
+CLASSIFIER_FALLBACK_WARNING = (
+    "팀 Qwen 사고유형 분류기를 사용할 수 없어 기존 검색 분석으로 대체했습니다."
+)
 
 
 class ChatService:
@@ -54,13 +62,15 @@ class ChatService:
         qwen_client: QwenClient | None = None,
         qwen_enabled: bool | None = None,
         qwen_allow_company_context: bool | None = None,
+        classifier_client: AccidentClassifierClient | None = None,
+        classifier_enabled: bool | None = None,
     ) -> None:
         self.service_url = (service_url or "").rstrip("/")
         self.timeout_seconds = timeout_seconds or settings.rag_request_timeout_seconds
         self.transport = transport
         self.ai_service = ai_service or AIService()
         self.openai_enabled = (
-            settings.allow_external_llm
+            (settings.allow_external_llm or settings.llm_is_local)
             and bool(settings.openai_api_key or settings.llm_base_url)
             if openai_enabled is None
             else openai_enabled
@@ -80,6 +90,15 @@ class ChatService:
             if qwen_allow_company_context is None
             else qwen_allow_company_context
         )
+        self.classifier_client = classifier_client or AccidentClassifierClient(
+            settings.qwen_classifier_url
+        )
+        self.classifier_enabled = (
+            settings.qwen_classifier_enabled
+            and bool(settings.qwen_classifier_url)
+            if classifier_enabled is None
+            else classifier_enabled
+        )
 
     async def answer(
         self,
@@ -87,14 +106,22 @@ class ChatService:
         access_scope: RetrievalAccessScope | None = None,
     ) -> ChatResponse:
         use_qwen = self.qwen_enabled and self.qwen_client is not None
+        classification, classifier_fell_back = await self._classify(request)
         analyzed_request, analyzer_fell_back = await self._analyze(
             request,
             allow_external=(
                 not use_qwen
-                and not bool(access_scope and access_scope.allow_company)
+                and (
+                    settings.llm_is_local
+                    or not bool(access_scope and access_scope.allow_company)
+                )
             ),
         )
-        if use_qwen:
+        if classification is not None:
+            analyzed_request = self._apply_classification(
+                analyzed_request, classification
+            )
+        elif use_qwen:
             qwen_analysis = await self.qwen_client.classify(analyzed_request)
             if qwen_analysis is not None:
                 analyzed_request = analyzed_request.model_copy(
@@ -105,6 +132,18 @@ class ChatService:
                     }
                 )
         retrieval_response = await self._retrieve(analyzed_request, access_scope)
+        if classification is not None:
+            retrieval_response = retrieval_response.model_copy(
+                update={"accident_classification": classification}
+            )
+        if classifier_fell_back:
+            retrieval_response = retrieval_response.model_copy(
+                update={
+                    "warning": self._append_warning(
+                        retrieval_response.warning, CLASSIFIER_FALLBACK_WARNING
+                    )
+                }
+            )
         if analyzer_fell_back and self.openai_enabled and not use_qwen:
             retrieval_response = retrieval_response.model_copy(
                 update={
@@ -122,7 +161,7 @@ class ChatService:
 
         # visual_summary is produced locally but is still supplied by the client.
         # Never forward OCR, labels, or image-derived text to an external provider.
-        if analyzed_request.context.visual_summary:
+        if analyzed_request.context.visual_summary and not settings.llm_is_local:
             return retrieval_response.model_copy(
                 update={
                     "warning": self._append_warning(
@@ -133,7 +172,7 @@ class ChatService:
 
         # This is intentionally unconditional: no company evidence is sent to
         # an external provider, even if a legacy environment flag says otherwise.
-        if any(
+        if not settings.llm_is_local and any(
             source.document_scope == "company"
             for source in retrieval_response.sources
         ):
@@ -203,6 +242,37 @@ class ChatService:
                 "answer": qwen_answer.answer,
                 "generation_mode": "qwen",
                 "model": qwen_answer.model or "qwen",
+            }
+        )
+
+    async def _classify(
+        self,
+        request: ChatRequest,
+    ) -> tuple[AccidentClassification | None, bool]:
+        if not self.classifier_enabled:
+            return None, False
+        try:
+            return await self.classifier_client.classify(request), False
+        except AccidentClassifierError:
+            return None, True
+
+    @staticmethod
+    def _apply_classification(
+        request: ChatRequest,
+        classification: AccidentClassification,
+    ) -> ChatRequest:
+        analysis = request.analysis or QueryAnalysis()
+        keywords = list(
+            dict.fromkeys([classification.label, *analysis.search_keywords])
+        )[:30]
+        return request.model_copy(
+            update={
+                "analysis": analysis.model_copy(
+                    update={
+                        "occurrence_type": classification.label,
+                        "search_keywords": keywords,
+                    }
+                )
             }
         )
 
@@ -342,6 +412,11 @@ class ChatService:
             ),
         )
         lines = [f"{label}: {value}" for label, value in fields if value]
+        if request.analysis and request.analysis.occurrence_type:
+            lines.append(
+                "팀 Qwen LoRA 사고유형 예측(실험용): "
+                f"{request.analysis.occurrence_type}"
+            )
         lines.append("\n검증된 검색 근거:")
         for index, source in enumerate(response.sources, start=1):
             location = source.section or "section unknown"

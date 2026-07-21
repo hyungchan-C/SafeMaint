@@ -629,6 +629,10 @@ a {
 .retrieval-badge { border-radius: 999px; font-size: 11px; font-weight: 800; justify-self: start; padding: 3px 8px; }
 .retrieval-badge.bge-m3 { background: #d8ecff; color: #144d79; }
 .retrieval-badge.safety-fallback { background: #fff1c8; color: #775500; }
+.team-qwen-result { align-items: center; background: #f1ecff; border: 1px solid #d9cdfd; border-radius: 10px; display: grid; gap: 2px; grid-template-columns: auto 1fr; margin-top: 3px; padding: 8px 10px; }
+.team-qwen-result span { color: #60489d; font-size: 11px; font-weight: 800; }
+.team-qwen-result strong { color: #3c2773; font-size: 14px; justify-self: end; }
+.team-qwen-result small { color: #6c6088; font-size: 10px; grid-column: 1 / -1; }
 .chat-warning { background: #fff8e6; border-left: 3px solid #d49b00; color: #6a4b00; font-size: 12px; margin: 4px 0 0; padding: 8px 10px; }
 .chat-source-list { border-top: 1px solid #bfd9ca; display: grid; gap: 8px; margin-top: 7px; padding-top: 10px; }
 .chat-source-card { background: #fff; border: 1px solid #c9dcd1; border-radius: 9px; display: grid; gap: 6px; padding: 10px; }

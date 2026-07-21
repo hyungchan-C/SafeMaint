@@ -102,6 +102,7 @@ def test_retrieval_scope_is_public_only_for_anonymous_request() -> None:
     assert scope.allow_company is False
     assert scope.all_sites is False
     assert scope.site_ids == []
+    assert scope.requester_user_id is None
 
 
 def test_retrieval_scope_uses_active_site_assignments_for_worker() -> None:
@@ -115,6 +116,7 @@ def test_retrieval_scope_uses_active_site_assignments_for_worker() -> None:
     assert scope.all_sites is False
     assert scope.allow_private is False
     assert scope.site_ids == [str(site_id)]
+    assert scope.requester_user_id == user.id
 
 
 def test_document_manager_retrieval_scope_covers_all_company_sites() -> None:
@@ -126,3 +128,4 @@ def test_document_manager_retrieval_scope_covers_all_company_sites() -> None:
     assert scope.allow_company is True
     assert scope.all_sites is True
     assert scope.site_ids == []
+    assert scope.requester_user_id == user.id

@@ -196,7 +196,7 @@ class PgvectorRetriever:
     @staticmethod
     def _active_version_clause() -> str:
         return """
-          AND (
+          (
               (d.current_version_id IS NULL AND dc.document_version_id IS NULL)
               OR (
                   dc.document_version_id = d.current_version_id
@@ -230,7 +230,7 @@ class PgvectorRetriever:
               AND dt.is_active = true
               AND dt.scope = 'public'
               AND d.access_level = 'public'
-              {self._active_version_clause()}
+              AND {self._active_version_clause()}
               {scope_clause}
               AND dc.embedding_status = 'ready'
               AND dc.embedding IS NOT NULL
@@ -275,20 +275,39 @@ class PgvectorRetriever:
                 JOIN documents d ON d.id = dc.document_id
                 JOIN document_types dt ON dt.code = d.document_type_code
                 LEFT JOIN document_versions dv ON dv.id = dc.document_version_id
-                WHERE d.lifecycle_status = 'active'
-                  AND d.deleted_at IS NULL
+                WHERE d.deleted_at IS NULL
                   AND dt.is_active = true
-                  {self._active_version_clause()}
                   AND (
                       (
-                          dt.scope = 'public'
-                          AND d.access_level = 'public'
+                          d.lifecycle_status = 'active'
+                          AND {self._active_version_clause()}
+                          AND (
+                              (
+                                  dt.scope = 'public'
+                                  AND d.access_level = 'public'
+                              )
+                              OR (
+                                  %s
+                                  AND dt.scope = 'company'
+                                  AND (%s OR d.access_level <> 'private')
+                                  AND (%s OR d.site_id::text = ANY(%s))
+                              )
+                          )
                       )
                       OR (
-                          %s
+                          NOT %s
+                          AND d.id = ANY(%s::uuid[])
                           AND dt.scope = 'company'
-                          AND (%s OR d.access_level <> 'private')
-                          AND (%s OR d.site_id::text = ANY(%s))
+                          AND dc.document_version_id = dv.id
+                          AND dv.status = 'review_required'
+                          AND dv.uploaded_by_user_id = %s::uuid
+                          AND dv.version_number = (
+                              SELECT MAX(owner_version.version_number)
+                              FROM document_versions owner_version
+                              WHERE owner_version.document_id = d.id
+                                AND owner_version.status = 'review_required'
+                                AND owner_version.uploaded_by_user_id = %s::uuid
+                          )
                       )
                   )
                   AND (%s OR d.id = ANY(%s::uuid[]))
@@ -337,6 +356,10 @@ class PgvectorRetriever:
             request.access_scope.site_ids,
             include_all_documents,
             list(selected_documents),
+            request.access_scope.requester_user_id,
+            request.access_scope.requester_user_id,
+            include_all_documents,
+            list(selected_documents),
             include_all_versions,
             list(selected_versions),
             *scope_parameters,
@@ -363,6 +386,7 @@ class PgvectorRetriever:
     ) -> list[ChatSource]:
         query = self.build_search_query(request)
         query_terms = tokenize(query)
+        has_selected_documents = bool(request.context.effective_document_ids())
         topic_values = [
             request.context.equipment_name,
             request.context.manufacturer,
@@ -377,6 +401,15 @@ class PgvectorRetriever:
             for term in tokenize(" ".join(value for value in topic_values if value))
             if term not in GENERIC_QUERY_TERMS
         )
+        question_topic_terms = tuple(
+            term
+            for term in tokenize(request.question)
+            if term not in GENERIC_QUERY_TERMS
+        )
+        if has_selected_documents and question_topic_terms:
+            # A follow-up about an explicitly selected manual must be driven by
+            # the current question, not stale equipment fields left in the form.
+            topic_terms = question_topic_terms
         if not topic_terms:
             topic_terms = tuple(
                 term for term in query_terms if term not in GENERIC_QUERY_TERMS
@@ -397,7 +430,7 @@ class PgvectorRetriever:
                 if value
             )
             combined = f"{metadata_text} {content}".casefold()
-            if topic_terms and not any(
+            if not has_selected_documents and topic_terms and not any(
                 _term_matches(term, combined) for term in topic_terms
             ):
                 continue

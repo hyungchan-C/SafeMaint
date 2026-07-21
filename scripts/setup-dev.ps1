@@ -11,6 +11,11 @@ $ErrorActionPreference = "Stop"
 $composeArguments = $null
 $repoRoot = Get-SafeMaintRepoRoot
 
+# Optional profile services (for example vision or Qwen) can remain running
+# between development sessions. Compose should leave them untouched and should
+# not turn its harmless orphan warning into a terminating PowerShell error.
+$env:COMPOSE_IGNORE_ORPHANS = "true"
+
 function Import-SafeMaintPublicRagPackageIfNeeded {
     param(
         [Parameter(Mandatory = $true)]
@@ -19,23 +24,36 @@ function Import-SafeMaintPublicRagPackageIfNeeded {
         [string]$RepoRoot
     )
 
-    $statusOutput = & docker @ComposeArguments run --rm backend python -m app.commands.public_rag_package status 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $statusResult = Invoke-SafeMaintNativeCapture -Command {
+        & docker @ComposeArguments run --rm backend python -m app.commands.public_rag_package status
+    }
+    if ($statusResult.ExitCode -ne 0) {
         Write-Host "      public RAG 상태 확인 실패; 자동 import를 건너뜁니다." -ForegroundColor Yellow
-        Write-Host (($statusOutput | Out-String).Trim()) -ForegroundColor Yellow
+        Write-Host (($statusResult.CombinedOutput | Out-String).Trim()) -ForegroundColor Yellow
         return
     }
 
     $packages = @()
     try {
-        $packages = @($statusOutput | Out-String | ConvertFrom-Json)
+        $packages = @($statusResult.StandardOutput | Out-String | ConvertFrom-Json)
     }
     catch {
         Write-Host "      public RAG 상태 응답을 해석하지 못해 자동 import를 건너뜁니다." -ForegroundColor Yellow
         return
     }
 
-    if (@($packages | Where-Object { $_.status -eq "active" }).Count -gt 0) {
+    $activePackages = @(
+        foreach ($package in $packages) {
+            if (
+                $null -ne $package -and
+                $package.PSObject.Properties.Match("status").Count -gt 0 -and
+                $package.status -eq "active"
+            ) {
+                $package
+            }
+        }
+    )
+    if ($activePackages.Count -gt 0) {
         Write-Host "      active public RAG package가 이미 있어 import를 건너뜁니다."
         return
     }
@@ -57,15 +75,17 @@ function Import-SafeMaintPublicRagPackageIfNeeded {
     Write-Host "      public RAG package를 PostgreSQL에 import합니다."
     $volume = "${packageOutputDir}:/packages:ro"
     $packageName = $packagePath.Name
-    $importOutput = & docker @ComposeArguments run --rm --volume $volume backend `
-        python -m app.commands.public_rag_package import `
-        "/packages/$packageName" `
-        --public-key "/packages/public_rag_ed25519_public.pem" 2>&1
-    if ($LASTEXITCODE -eq 0) {
+    $importResult = Invoke-SafeMaintNativeCapture -Command {
+        & docker @ComposeArguments run --rm --volume $volume backend `
+            python -m app.commands.public_rag_package import `
+            "/packages/$packageName" `
+            --public-key "/packages/public_rag_ed25519_public.pem"
+    }
+    if ($importResult.ExitCode -eq 0) {
         Write-Host "      public RAG package import 완료"
         return
     }
-    $importText = ($importOutput | Out-String)
+    $importText = ($importResult.CombinedOutput | Out-String)
     if ($importText -match "already installed") {
         Write-Host "      public RAG package가 이미 설치되어 import를 건너뜁니다."
         return

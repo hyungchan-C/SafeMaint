@@ -16,6 +16,13 @@ export interface ChatResponse {
   generation_mode: "openai" | "template" | "qwen";
   model: string | null;
   warning: string | null;
+  accident_classification: AccidentClassification | null;
+}
+
+export interface AccidentClassification {
+  label: string;
+  model: string;
+  adapter: string;
 }
 
 export interface CatalogCandidate {
@@ -39,5 +46,6 @@ export interface ChatMessage {
   generationMode?: ChatResponse["generation_mode"];
   model?: string | null;
   warning?: string | null;
+  accidentClassification?: AccidentClassification | null;
   catalogCandidates?: CatalogCandidate[];
 }

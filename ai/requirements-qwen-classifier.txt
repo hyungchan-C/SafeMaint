@@ -1,0 +1,6 @@
+accelerate==1.14.0
+bitsandbytes==0.49.2
+fastapi>=0.136,<1.0
+peft==0.19.1
+transformers==5.14.1
+uvicorn[standard]>=0.49,<1.0

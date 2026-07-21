@@ -649,6 +649,98 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 별도 운영 작업 필요: 고객사 HTTPS 인증서/reverse proxy, Ed25519 키 수명주기와 오프라인 전달 절차, 실제 백업·PITR 자동화, 스캔 PDF용 검증된 로컬 OCR 엔진, 악성 PDF 안티바이러스/CDR, 로그 보존·모니터링 정책. 이 항목들은 동작하는 것처럼 화면에 표시하지 않습니다.
 
+## 팀 Qwen3.5-9B LoRA 로컬 실행
+
+팀 파인튜닝 모델은 일반 채팅 모델이 아니라 작업 설명을 14개 산업재해 발생형태로
+분류하는 LoRA다. 웹 질의는 다음 순서로 처리한다.
+
+```text
+작업 설명·질문
+→ Qwen/Qwen3.5-9B + 팀 best_adapter 사고유형 예측
+→ 예측값을 occurrence_type 및 검색 키워드에 반영
+→ BGE-M3 하이브리드 근거 검색
+→ 로컬 Ollama Qwen이 검색 근거만 사용해 최종 답변 작성
+```
+
+팀 LoRA 결과는 웹 답변 위에 `팀 Qwen LoRA 예측`으로 표시된다. 이 값은 실험용
+분류이며 작업 승인이나 위험성평가 확정값이 아니다.
+
+### 필요한 로컬 파일
+
+다음 파일은 모델 산출물이므로 Git에 저장하지 않는다. 팀원이 별도 전달받아 같은
+경로에 배치해야 한다.
+
+```text
+safemaint_api_data/
+└─ safemaint_qwen35_9b_finetuning_result/
+   └─ 01_finetuned_model/
+      ├─ model_manifest.json
+      ├─ load_and_predict.py
+      ├─ best_adapter/
+      │  ├─ adapter_config.json
+      │  └─ adapter_model.safetensors
+      └─ tokenizer/
+         └─ tokenizer.json ...
+```
+
+LoRA만으로는 실행할 수 없으므로 최초 실행 때 원본 `Qwen/Qwen3.5-9B`를 Hugging
+Face에서 Docker named volume으로 내려받는다. 이후에는 해당 volume을 재사용하며
+스크립트가 기존 모델 cache나 DB volume을 삭제하지 않는다.
+
+### 최초 실행
+
+Windows용 Ollama, Docker Desktop, NVIDIA 드라이버가 실행 중이어야 한다. RTX
+4070 Ti 12GB에서는 팀 9B 분류 모델과 9B 답변 모델을 동시에 올리기 빠듯하므로
+기본 답변 모델은 `qwen3.5:4b`로 사용한다.
+
+```powershell
+Set-Location "C:\Users\Chan\Desktop\3차프로젝트_코드"
+.\scripts\start-qwen-dev.ps1
+```
+
+스크립트는 Ollama `qwen3.5:4b` 준비, 팀 모델 파일 검사, GPU 분류 서비스 빌드,
+원본 모델 다운로드, 실제 LoRA 분류 요청, 백엔드와 프런트엔드 상태 확인을 수행한다.
+최초 다운로드 및 모델 로드는 오래 걸릴 수 있다. 완료 후 다음 주소에서 작업 설명을
+입력해 확인한다.
+
+```text
+http://localhost:3000
+```
+
+수동 실행은 다음 세 Compose 파일을 함께 사용한다.
+
+```powershell
+ollama pull qwen3.5:4b
+
+docker compose `
+  -f docker-compose.yml `
+  -f docker-compose.dev.yml `
+  -f docker-compose.qwen.yml `
+  up -d --build
+```
+
+모델 상태와 로그는 다음 명령으로 확인한다.
+
+```powershell
+docker compose `
+  -f docker-compose.yml `
+  -f docker-compose.dev.yml `
+  -f docker-compose.qwen.yml `
+  ps
+
+docker compose `
+  -f docker-compose.yml `
+  -f docker-compose.dev.yml `
+  -f docker-compose.qwen.yml `
+  logs -f qwen-classifier backend
+```
+
+`docker-compose.qwen.yml`은 Ollama를 `host.docker.internal:11434`로 연결하고
+`LLM_PROVIDER_SCOPE=local`을 강제한다. 이 모드에서는 `ALLOW_EXTERNAL_LLM=false`를
+유지하며, 로컬 호스트 목록에 없는 URL은 로컬 provider로 신뢰하지 않는다.
+`ollama run qwen3.5:9b`만 실행한 결과는 팀 LoRA 모델이 아니므로 팀 분류 검증으로
+간주하면 안 된다.
+
 ## 하이브리드 RAG와 임시 GPT-4o-mini 설정
 
 현재 질의 흐름은 `상황 분석 → 키워드·BGE-M3 후보 검색 → 주제 불일치 제거 → rerank → 근거 답변` 순서입니다. 상황 분석기와 답변 생성기는 같은 OpenAI 호환 provider 인터페이스를 사용합니다. 팀의 Qwen3 서버가 준비되기 전에는 다음처럼 GPT-4o-mini를 사용합니다.

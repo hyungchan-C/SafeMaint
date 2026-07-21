@@ -12,6 +12,7 @@ from app.schemas.chat import (
 )
 from app.services.chat import ChatService, get_chat_service
 from app.services.qwen import QwenGeneratedAnswer
+from app.services.accident_classifier import AccidentClassifierClient
 
 
 def test_chat_service_returns_task_specific_fallback() -> None:
@@ -97,6 +98,50 @@ def test_chat_service_accepts_grounded_rag_response() -> None:
 
     assert response.retrieval_mode == "bge-m3"
     assert response.sources[0].similarity == 0.71
+
+
+def test_team_qwen_classification_is_used_for_retrieval() -> None:
+    def classifier_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/classify"
+        return httpx.Response(
+            200,
+            json={
+                "label": "끼임",
+                "model": "Qwen/Qwen3.5-9B",
+                "adapter": "best_adapter",
+            },
+        )
+
+    def rag_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["analysis"]["occurrence_type"] == "끼임"
+        assert body["analysis"]["search_keywords"][0] == "끼임"
+        return httpx.Response(
+            200,
+            json={
+                "answer": "끼임 관련 검색 결과",
+                "sources": [],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    service = ChatService(
+        service_url="http://rag.test",
+        transport=httpx.MockTransport(rag_handler),
+        openai_enabled=False,
+        classifier_client=AccidentClassifierClient(
+            "http://classifier.test",
+            transport=httpx.MockTransport(classifier_handler),
+        ),
+        classifier_enabled=True,
+    )
+    response = asyncio.run(
+        service.answer(ChatRequest(question="컨베이어 롤러를 점검합니다"))
+    )
+
+    assert response.accident_classification is not None
+    assert response.accident_classification.label == "끼임"
+    assert response.accident_classification.adapter == "best_adapter"
 
 
 def test_chat_service_sends_retrieved_sources_to_openai() -> None:

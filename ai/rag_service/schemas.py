@@ -56,6 +56,7 @@ class ChatRequest(BaseModel):
 
 
 class AccessScope(BaseModel):
+    requester_user_id: UUID | None = None
     site_ids: list[str] = Field(default_factory=list)
     all_sites: bool = False
     allow_private: bool = False
