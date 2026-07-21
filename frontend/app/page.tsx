@@ -103,6 +103,18 @@ function refersToAttachedPhoto(question: string): boolean {
   return /(이건|이게|이것|이거|저건|저게|그건|그게|뭐야|무엇|어디에\s*쓰|용도|쓰이는|사용하는|어떤\s*(부품|제품)|비슷한|같은\s*(부품|제품)|후보)/i.test(question);
 }
 
+function formatElapsedTime(elapsedMs: number): string {
+  const totalSeconds = Math.max(1, Math.round(elapsedMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [
+    hours ? `${hours}시간` : "",
+    minutes ? `${minutes}분` : "",
+    `${seconds}초`,
+  ].filter(Boolean).join(" ");
+}
+
 export default function HomePage() {
   const [page, setPage] = useState<PageMode>("login");
   const [username, setUsername] = useState("");
@@ -337,6 +349,7 @@ function WorkspaceScreen({
   const [sitePhotoName, setSitePhotoName] = useState("");
   const [visionSummary, setVisionSummary] = useState("");
   const [visionStatus, setVisionStatus] = useState("");
+  const [visionElapsedMs, setVisionElapsedMs] = useState<number | null>(null);
   const [catalogCandidates, setCatalogCandidates] = useState<CatalogCandidate[]>([]);
   const [ppeChecks, setPpeChecks] = useState<Record<string, boolean>>({});
   const [locationStatus, setLocationStatus] = useState("위치 미확인");
@@ -578,6 +591,7 @@ function WorkspaceScreen({
 
   async function analyzePhoto(file: File | undefined) {
     if (!file) return;
+    const analysisStartedAt = performance.now();
     setIsVisionLoading(true);
     const token = getAccessToken();
     if (!token) {
@@ -587,6 +601,7 @@ function WorkspaceScreen({
     }
     setSitePhotoName(file.name);
     setVisionStatus("로컬 이미지 분석 중...");
+    setVisionElapsedMs(null);
     setCatalogCandidates([]);
     const requestId = ++visionRequestIdRef.current;
     type VisionPayload = {
@@ -632,6 +647,9 @@ function WorkspaceScreen({
       if (visionRequestIdRef.current === requestId) setIsVisionLoading(false);
       const deepPayload = await requestAnalysis("deep");
       applyPayload(deepPayload, true);
+      if (visionRequestIdRef.current === requestId) {
+        setVisionElapsedMs(performance.now() - analysisStartedAt);
+      }
     } catch (requestError) {
       if (visionRequestIdRef.current === requestId) {
         setVisionStatus(requestError instanceof Error ? requestError.message : "로컬 비전 서비스 연결 실패");
@@ -825,7 +843,14 @@ function WorkspaceScreen({
 
       <section className="manual-row upgraded-manual-row">
         <label className="file-card">📄 작업 설비 매뉴얼 추가<input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
-        <div><strong>{manuals.length ? `${manuals.length}개 매뉴얼 등록됨` : "등록된 매뉴얼 없음"}</strong><span>{manualStatus || (sitePhotoName ? `현장 사진: ${sitePhotoName} · ${visionStatus}` : "현장 사진 없음")}</span></div>
+        <div>
+          <strong>{manuals.length ? `${manuals.length}개 매뉴얼 등록됨` : "등록된 매뉴얼 없음"}</strong>
+          {manualStatus && <span>{manualStatus}</span>}
+          <span>{sitePhotoName ? `현장 사진: ${sitePhotoName} · ${visionStatus}` : "현장 사진 없음"}</span>
+          {visionElapsedMs !== null && visionStatus.startsWith("정밀 분석 완료") && (
+            <span className="vision-elapsed">분석 소요 시간: {formatElapsedTime(visionElapsedMs)}</span>
+          )}
+        </div>
         <div className="document-chip-list">{manuals.map((name) => <span key={name}>📄 {name}<button type="button" aria-label={`${name} 삭제`} onClick={() => setManuals((current) => current.filter((item) => item !== name))}>×</button></span>)}</div>
       </section>
 
