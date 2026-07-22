@@ -169,6 +169,8 @@ class QwenClient:
                 "selected_document_ids",
                 "selected_document_version_ids",
                 "visual_summary",
+                "visual_categories",
+                "visual_features",
             },
         )
 

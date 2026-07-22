@@ -213,12 +213,14 @@ class CatalogImageMatcher:
 
     def index_pdf(self, pdf_path: Path, filename: str) -> CatalogIndexResponse:
         data = pdf_path.read_bytes()
-        index_version = f"safemaint-matrix-v4:{self.embedding_model}".encode()
-        catalog_id = hashlib.sha256(data + index_version).hexdigest()[:20]
+        index_version = f"safemaint-matrix-v4:{self.embedding_model}"
+        catalog_id = hashlib.sha256(data + index_version.encode()).hexdigest()[:20]
         target = self.root / catalog_id
         manifest_path = target / "manifest.json"
         if manifest_path.exists():
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["summary"]["index_version"] = index_version
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
             return CatalogIndexResponse(**manifest["summary"])
 
         try:
@@ -262,7 +264,7 @@ class CatalogImageMatcher:
                 except Exception:
                     continue
         summary = {
-            "catalog_id": catalog_id, "filename": filename,
+            "catalog_id": catalog_id, "index_version": index_version, "filename": filename,
             "page_count": len(reader.pages), "image_count": len(entries),
             "warnings": warnings,
         }

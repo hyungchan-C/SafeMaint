@@ -50,3 +50,26 @@ def test_invalid_qwen_structured_json_keeps_legacy_answer() -> None:
     assert result.answer == "기존 문자열 답변"
     assert result.structured_answer is None
     assert result.checklist_items == ()
+
+
+def test_safe_context_excludes_document_scope_and_vision_observations() -> None:
+    request = ChatRequest.model_validate({
+        "question": "이 부품은 무엇인가요?",
+        "context": {
+            "site_name": "A공장",
+            "registered_manuals": ["manual.pdf"],
+            "selected_document_ids": ["11111111-1111-1111-1111-111111111111"],
+            "visual_summary": "사진 분석 원문",
+            "visual_categories": ["USB 플래시 메모리"],
+            "visual_features": ["16 GB 표기"],
+        },
+    })
+
+    context = QwenClient._safe_context(request)
+
+    assert context["site_name"] == "A공장"
+    assert "registered_manuals" not in context
+    assert "selected_document_ids" not in context
+    assert "visual_summary" not in context
+    assert "visual_categories" not in context
+    assert "visual_features" not in context

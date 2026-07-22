@@ -858,7 +858,6 @@ function WorkspaceScreen({
             visual_summary: visionSummary || null,
             visual_categories: visualCategories,
             visual_features: visualFeatures,
-            registered_manuals: manuals,
             selected_document_ids: selectedDocumentIds,
           },
         }),
@@ -1001,6 +1000,34 @@ function WorkspaceScreen({
       setManualStatus(`${uploadedCount}개 문서 등록 완료 · 일부 실패: ${uploadFailures.join(" · ")}`);
     } else {
       setManualStatus(uploadFailures.join(" · ") || "문서 등록 실패");
+    }
+  }
+
+  async function reindexManual(documentId: string, filename: string) {
+    const token = getAccessToken();
+    if (!token) {
+      onLogout();
+      return;
+    }
+    setManualStatus(`${filename} 비전 인덱스를 다시 생성하는 중...`);
+    const body = new FormData();
+    body.append("document_id", documentId);
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/index`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body,
+      });
+      requireActiveSession(response);
+      const payload = await response.json().catch(() => null) as { document_id?: string; detail?: string } | null;
+      if (!response.ok || payload?.document_id !== documentId) {
+        throw new Error(payload?.detail || `${filename} 비전 인덱스 재생성 실패`);
+      }
+      setCatalogCandidates([]);
+      setVisionSummary("");
+      setManualStatus(`${filename} 비전 인덱스를 최신 형식으로 다시 생성했습니다.`);
+    } catch (requestError) {
+      setManualStatus(requestError instanceof Error ? requestError.message : `${filename} 비전 인덱스 재생성 실패`);
     }
   }
 
@@ -1554,6 +1581,9 @@ function WorkspaceScreen({
                     setCatalogCandidates([]);
                     setVisionSummary("");
                   }}>{isSelected ? "선택됨" : "선택"}</button>
+                  <button type="button" aria-label={`${document.original_filename} 비전 인덱스 재생성`} onClick={() => void reindexManual(document.document_id, document.original_filename)}>
+                    비전 재인덱싱
+                  </button>
                 </article>;
               })
             : manuals.map((name, index) => <span key={`${name}-${index}`}>📄 {name}<button type="button" aria-label={`${name} 선택 해제`} onClick={() => {
