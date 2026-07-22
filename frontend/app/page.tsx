@@ -1133,7 +1133,7 @@ function WorkspaceScreen({
   }
 
   function stopSpeech() {
-    const hadSources = audioSourcesRef.current.length > 0;
+    const wasActive = audioSourcesRef.current.length > 0 || speechAbortRef.current !== null;
     speechAbortRef.current?.abort();
     speechAbortRef.current = null;
     for (const source of audioSourcesRef.current) {
@@ -1143,7 +1143,7 @@ function WorkspaceScreen({
     }
     audioSourcesRef.current = [];
     setIsSpeaking(false);
-    return hadSources;
+    return wasActive;
   }
 
   async function playSpeech(text: string) {
