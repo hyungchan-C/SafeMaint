@@ -24,6 +24,15 @@ class Settings:
     embedding_device: str = getenv("VISION_EMBEDDING_DEVICE", "cpu")
     catalog_index_dir: str = getenv("VISION_CATALOG_INDEX_DIR", "/tmp/safemaint-catalogs")
     catalog_match_threshold: float = float(getenv("VISION_CATALOG_MATCH_THRESHOLD", "0.55"))
+    adaptive_confidence_threshold: float = float(
+        getenv("VISION_ADAPTIVE_CONFIDENCE_THRESHOLD", "0.90")
+    )
+    adaptive_margin_threshold: float = float(
+        getenv("VISION_ADAPTIVE_MARGIN_THRESHOLD", "0.06")
+    )
+    fallback_candidate_threshold: float = float(
+        getenv("VISION_FALLBACK_CANDIDATE_THRESHOLD", "0.78")
+    )
     image_max_upload_bytes: int = int(getenv("VISION_IMAGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
     pdf_max_upload_bytes: int = int(getenv("VISION_PDF_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
     image_max_pixels: int = int(getenv("VISION_IMAGE_MAX_PIXELS", "40000000"))

@@ -264,6 +264,7 @@ class CatalogAnalyzer:
         catalog_candidates: list[Any] | None = None,
         *,
         include_ocr: bool = True,
+        include_qwen: bool = True,
     ) -> CatalogAnalysisResponse:
         warnings: list[str] = []
         models: list[str] = []
@@ -279,7 +280,7 @@ class CatalogAnalyzer:
                     f"PaddleOCR-VL 분석 실패: {type(exc).__name__}: {str(exc)[:200]}"
                 )
 
-        if self.settings.enable_qwen:
+        if self.settings.enable_qwen and include_qwen:
             try:
                 visual = self._analyze_with_qwen(image_path)
                 models.append(self.settings.qwen_model)

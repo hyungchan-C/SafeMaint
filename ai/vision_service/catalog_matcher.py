@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
@@ -13,6 +14,16 @@ from pypdf.errors import PdfReadError
 from vision_service.schemas import CatalogCandidate, CatalogIndexResponse
 
 
+@dataclass(frozen=True, slots=True)
+class CatalogMatchSignals:
+    candidates: list[CatalogCandidate]
+    has_visible_text: bool
+    top_similarity: float
+    similarity_margin: float
+    visual_category: str = ""
+    visual_features: tuple[str, ...] = ()
+
+
 class _SemanticEmbedder:
     def __init__(self, model_name: str, device: str, cache_dir: str) -> None:
         self.model_name = model_name
@@ -21,6 +32,7 @@ class _SemanticEmbedder:
         self._model = None
         self._processor = None
         self._text_vectors: np.ndarray | None = None
+        self._text_presence_vectors: np.ndarray | None = None
 
     def encode(self, image: Image.Image) -> np.ndarray:
         return self.encode_many([image])[0]
@@ -74,6 +86,7 @@ class _SemanticEmbedder:
             ("사진상 산업용 카메라", "렌즈 또는 렌즈 마운트가 있는 카메라 형상"),
             ("사진상 전기 커넥터", "전기 접속용 단자 또는 소켓 형상"),
             ("사진상 밸브", "유체 개폐용 몸체와 연결부 형상"),
+            ("사진상 USB 플래시 메모리", "USB 단자와 휴대용 저장장치 몸체가 보임"),
         )
         prompts = [
             "a close-up product photo of a hex head bolt",
@@ -89,6 +102,7 @@ class _SemanticEmbedder:
             "a close-up product photo of an industrial camera",
             "a close-up product photo of an electrical connector",
             "a close-up product photo of an industrial valve",
+            "a close-up product photo of a USB flash drive memory stick",
         ]
         assert self._model is not None and self._processor is not None
         if self._text_vectors is None:
@@ -104,6 +118,28 @@ class _SemanticEmbedder:
         scores = np.max(image_vectors @ self._text_vectors.T, axis=0)
         best = int(np.argmax(scores))
         return labels[best][0], [labels[best][1], "사진 형상만으로 분류한 추정 결과"]
+
+    def has_visible_text(self, image_vectors: np.ndarray) -> bool:
+        """Use the existing SigLIP vectors as a cheap gate before running OCR."""
+        import torch
+
+        assert self._model is not None and self._processor is not None
+        if self._text_presence_vectors is None:
+            prompts = (
+                "a close-up product photo with clearly visible printed or engraved letters and numbers",
+                "a close-up product photo without any visible letters, numbers, label, or engraving",
+            )
+            with torch.inference_mode():
+                inputs = self._processor(
+                    text=list(prompts), padding="max_length", return_tensors="pt"
+                )
+                inputs = {key: value.to(self.device) for key, value in inputs.items()}
+                vectors = self._model.get_text_features(**inputs)
+            text_vectors = vectors.float().cpu().numpy()
+            norms = np.linalg.norm(text_vectors, axis=1, keepdims=True)
+            self._text_presence_vectors = text_vectors / np.maximum(norms, 1e-12)
+        scores = np.max(image_vectors @ self._text_presence_vectors.T, axis=0)
+        return bool(scores[0] >= scores[1] + 0.02)
 
 
 def _feature(image: Image.Image) -> np.ndarray:
@@ -239,12 +275,15 @@ class CatalogImageMatcher:
         )
         return CatalogIndexResponse(**summary)
 
-    def match(self, image_path: Path, catalog_ids: list[str], limit: int = 8) -> list[CatalogCandidate]:
+    def match_with_signals(
+        self, image_path: Path, catalog_ids: list[str], limit: int = 8
+    ) -> CatalogMatchSignals:
         query_image = Image.open(image_path)
         if query_image.width * query_image.height > self.max_image_pixels:
             raise ValueError(f"이미지 픽셀 수는 {self.max_image_pixels}개를 넘을 수 없습니다.")
         queries = self.embedder.encode_many(self._query_views(query_image))
         visual_category, visual_features = self.embedder.classify(queries)
+        has_visible_text = self.embedder.has_visible_text(queries)
         scored: list[CatalogCandidate] = []
         for catalog_id in catalog_ids:
             manifest_path = self.root / catalog_id / "manifest.json"
@@ -291,7 +330,20 @@ class CatalogImageMatcher:
                     visual_features=visual_features,
                     page_excerpt=str(entry.get("page_text") or "") or None,
                 ))
-        return sorted(scored, key=lambda item: item.similarity, reverse=True)[:limit]
+        candidates = sorted(scored, key=lambda item: item.similarity, reverse=True)[:limit]
+        top_similarity = candidates[0].similarity if candidates else 0.0
+        second_similarity = candidates[1].similarity if len(candidates) > 1 else 0.0
+        return CatalogMatchSignals(
+            candidates=candidates,
+            has_visible_text=has_visible_text,
+            top_similarity=top_similarity,
+            similarity_margin=max(0.0, top_similarity - second_similarity),
+            visual_category=visual_category,
+            visual_features=tuple(visual_features),
+        )
+
+    def match(self, image_path: Path, catalog_ids: list[str], limit: int = 8) -> list[CatalogCandidate]:
+        return self.match_with_signals(image_path, catalog_ids, limit).candidates
 
     def image_path(self, candidate: CatalogCandidate) -> Path | None:
         return self.resolve_image(candidate.catalog_id, candidate.page, candidate.image_index)

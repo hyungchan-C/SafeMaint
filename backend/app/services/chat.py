@@ -131,6 +131,24 @@ class ChatService:
                         )
                     }
                 )
+
+        # Image-identification questions must use the latest local Vision result.
+        # Do this before RAG so an unrelated selected manual cannot replace the
+        # current photo with stale document evidence (for example, a bearing manual).
+        visual_answer = self._visual_answer(analyzed_request)
+        if visual_answer:
+            return ChatResponse(
+                answer=visual_answer,
+                sources=[],
+                retrieval_mode="safety-fallback",
+                generation_mode="template",
+                warning=(
+                    "사진에서 직접 관찰한 일반 형상과 로컬 분석 결과이며, "
+                    "정확한 제품·모델·규격을 확정한 결과가 아닙니다."
+                ),
+                accident_classification=classification,
+            )
+
         retrieval_response = await self._retrieve(analyzed_request, access_scope)
         if classification is not None:
             retrieval_response = retrieval_response.model_copy(
@@ -150,19 +168,6 @@ class ChatService:
                     "warning": self._append_warning(
                         retrieval_response.warning, ANALYZER_FALLBACK_WARNING
                     )
-                }
-            )
-
-        visual_answer = self._visual_answer(analyzed_request)
-        if visual_answer:
-            return retrieval_response.model_copy(
-                update={
-                    "answer": visual_answer,
-                    "generation_mode": "template",
-                    "warning": self._append_warning(
-                        retrieval_response.warning,
-                        "사진에서 직접 관찰한 일반 형상과 로컬 유사도 검색 결과이며, 정확한 제품·모델·규격을 확정한 결과가 아닙니다.",
-                    ),
                 }
             )
 
@@ -493,6 +498,8 @@ class ChatService:
                 usage = "상태나 물리량을 감지하는 용도"
             elif "카메라" in primary:
                 usage = "대상을 촬영하거나 검사하는 용도"
+            elif "usb" in primary.casefold() or "메모리" in primary:
+                usage = "파일과 데이터를 저장하고 USB 포트가 있는 장치 사이에서 옮기는 용도"
             lines.append(f"일반적으로는 {usage}에 사용됩니다.")
         lines.append(
             "다만 현재 결과는 사진 형상에 대한 추정이므로, 정확한 제품명·규격·적용 위치는 각인과 카탈로그 표의 일치 여부를 추가로 확인해야 합니다."

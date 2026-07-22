@@ -551,3 +551,32 @@ def test_visual_usage_question_returns_only_generic_usage() -> None:
 
     assert "부품을 서로 체결" in response.answer
     assert "규격" in response.answer
+
+
+def test_visual_question_does_not_retrieve_unrelated_selected_manual() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("RAG must not run for a locally analyzed photo question")
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+        ).answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "이 사진은 뭐야?",
+                    "context": {
+                        "visual_categories": ["USB 플래시 메모리"],
+                        "visual_features": ["USB 단자와 16 GB 표기가 보임"],
+                        "registered_manuals": ["NSK_ballbearing (1).pdf"],
+                    },
+                }
+            )
+        )
+    )
+
+    assert response.retrieval_mode == "safety-fallback"
+    assert response.sources == []
+    assert "USB 플래시 메모리" in response.answer
+    assert "베어링" not in response.answer

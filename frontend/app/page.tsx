@@ -128,7 +128,8 @@ function getAccessToken(): string {
 }
 
 function refersToAttachedPhoto(question: string): boolean {
-  return /(이건|이게|이것|이거|저건|저게|그건|그게|뭐야|무엇|어디에\s*쓰|용도|쓰이는|사용하는|어떤\s*(부품|제품)|비슷한|같은\s*(부품|제품)|후보)/i.test(question);
+  const normalized = question.replace(/\s+/g, "");
+  return /(이것|이거|이게|이건|저것|저거|그것|그거|사진|이미지|방금|첨부|보낸|찍은|뭐야|무엇|어디에쓰|용도|어떤(?:부품|제품)|비슷한(?:부품|제품)|후보)/i.test(normalized);
 }
 
 function formatElapsedTime(elapsedMs: number): string {
@@ -589,7 +590,22 @@ function WorkspaceScreen({
     event.preventDefault();
     const submittedQuestion = question.trim();
     if (!submittedQuestion || isChatLoading || isVisionLoading) return;
-    const candidatesForAnswer = refersToAttachedPhoto(submittedQuestion) ? catalogCandidates : [];
+    const isPhotoQuestion = refersToAttachedPhoto(submittedQuestion);
+    const candidatesForAnswer = isPhotoQuestion ? catalogCandidates : [];
+
+    if (isPhotoQuestion && sitePhotoName && visualCategories.length === 0) {
+      setQuestion("");
+      setMessages((current) => [
+        ...current,
+        { role: "user", text: submittedQuestion },
+        {
+          role: "ai",
+          text: "현재 사진에서 신뢰할 수 있는 제품 종류를 확인하지 못했습니다. 관련 없는 매뉴얼 검색 결과로 대체하지 않습니다. 대상을 더 가까이 촬영하거나 정면 사진을 다시 첨부해 주세요.",
+          warning: "사진 분류 결과 없음",
+        },
+      ]);
+      return;
+    }
 
     // Create the AudioContext synchronously within this user-gesture handler so
     // browsers don't block autoplay once the answer arrives after the awaits below.
@@ -748,22 +764,29 @@ function WorkspaceScreen({
     setSitePhotoName(file.name);
     setVisionStatus("로컬 이미지 분석 중...");
     setVisionElapsedMs(null);
+    setVisionSummary("");
     setCatalogCandidates([]);
     setVisualCategories([]);
     setVisualFeatures([]);
     const requestId = ++visionRequestIdRef.current;
     type VisionPayload = {
+      items?: Array<{
+        equipment_type?: string | null;
+        component_name?: string | null;
+        description?: string | null;
+        visible_conditions?: string[];
+      }>;
       raw_visual_description?: string;
       extracted_markdown?: string;
       catalog_candidates?: CatalogCandidate[];
       warnings?: string[];
       detail?: string;
     };
-    const requestAnalysis = async (analysisMode: "fast" | "deep") => {
+    const requestAnalysis = async () => {
       const body = new FormData();
       body.append("file", file);
       body.append("document_ids", JSON.stringify(selectedDocumentIds));
-      body.append("analysis_mode", analysisMode);
+      body.append("analysis_mode", "deep");
       const response = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/match`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
@@ -774,19 +797,23 @@ function WorkspaceScreen({
       if (!response.ok) throw new Error(payload?.detail || "이미지 분석 실패");
       return payload;
     };
-    const applyPayload = (payload: VisionPayload | null, precise: boolean) => {
+    const applyPayload = (payload: VisionPayload | null) => {
       if (visionRequestIdRef.current !== requestId) return;
       const candidates = payload?.catalog_candidates ?? [];
-      if (candidates.length) {
-        setVisualCategories(candidates.map((item) => item.visual_category).filter((value): value is string => Boolean(value)));
-        setVisualFeatures(candidates.flatMap((item) => item.visual_features || []));
-      }
-      if (!precise) {
-        setVisionStatus("빠른 형상 분석 완료 · 정밀 후보 검증 진행 중...");
-        return;
-      }
+      const items = payload?.items ?? [];
+      const categories = Array.from(new Set([
+        ...candidates.map((item) => item.visual_category),
+        ...items.flatMap((item) => [item.component_name, item.equipment_type]),
+      ].filter((value): value is string => Boolean(value?.trim()))));
+      const features = Array.from(new Set([
+        ...candidates.flatMap((item) => item.visual_features || []),
+        ...items.flatMap((item) => [item.description, ...(item.visible_conditions || [])]),
+      ].filter((value): value is string => Boolean(value?.trim()))));
+      setVisualCategories(categories);
+      setVisualFeatures(features);
       setCatalogCandidates(candidates);
       setVisionSummary([
+        items.length ? `로컬 VLM 관찰 결과:\n${items.map((item, index) => `${index + 1}. ${item.component_name || item.equipment_type || "종류 확인 불가"}${item.description ? ` · ${item.description}` : ""}`).join("\n")}` : "",
         candidates.length ? `카탈로그 외형 유사 후보(동일 제품 확정 아님):\n${candidates.map((item, index) => `${index + 1}. ${item.visual_category || "종류 확인 불가"}, ${item.filename} ${item.page}페이지, 유사도 ${(item.similarity * 100).toFixed(1)}%, 특징 ${item.visual_features?.join(", ") || "확인 불가"}`).join("\n")}` : "신뢰 임계값을 넘는 카탈로그 후보 없음",
         payload?.extracted_markdown ? `로컬 OCR 확인 내용:\n${payload.extracted_markdown}` : "",
         payload?.raw_visual_description ? `로컬 비전 참고 설명(각인·규격 확정 근거 아님):\n${payload.raw_visual_description}` : "",
@@ -794,11 +821,8 @@ function WorkspaceScreen({
       setVisionStatus(payload?.warnings?.length ? `정밀 분석 완료 · ${payload.warnings.join(" · ")}` : "정밀 분석 완료");
     };
     try {
-      const fastPayload = await requestAnalysis("fast");
-      applyPayload(fastPayload, false);
-      if (visionRequestIdRef.current === requestId) setIsVisionLoading(false);
-      const deepPayload = await requestAnalysis("deep");
-      applyPayload(deepPayload, true);
+      const payload = await requestAnalysis();
+      applyPayload(payload);
       if (visionRequestIdRef.current === requestId) {
         setVisionElapsedMs(performance.now() - analysisStartedAt);
       }
