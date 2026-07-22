@@ -42,6 +42,7 @@ x-backend-service: &backend-service
     TTS_VOICE: ${TTS_VOICE:-F1}
     TTS_LANGUAGE: ${TTS_LANGUAGE:-ko}
     TTS_STEPS: ${TTS_STEPS:-8}
+    TTS_NUM_THREADS: ${TTS_NUM_THREADS:-4}
     STT_MODEL: ${STT_MODEL:-small}
     STT_LANGUAGE: ${STT_LANGUAGE:-ko}
     STT_DEVICE: ${STT_DEVICE:-cpu}
