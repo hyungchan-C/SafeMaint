@@ -49,14 +49,14 @@ type HistoryItem = {
 };
 
 const initialForm = {
-  site_name: "A공장",
-  equipment_name: "컨베이어 CV-203",
+  site_name: "",
+  equipment_name: "",
   manufacturer: "",
-  model_number: "CV-203",
-  component_name: "벨트",
-  task_type: "이물질 제거",
-  energy_source: "전기",
-  description: "컨베이어를 정지한 뒤 벨트에 낀 이물질을 제거합니다.",
+  model_number: "",
+  component_name: "",
+  task_type: "",
+  energy_source: "",
+  description: "",
 };
 
 const levelLabel = { low: "낮음", medium: "보통", high: "높음" } as const;
@@ -441,6 +441,7 @@ function WorkspaceScreen({
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [form, setForm] = useState(initialForm);
+  const [chatWorkContext, setChatWorkContext] = useState<typeof initialForm | null>(null);
   const [result, setResult] = useState<AssessmentResponse | null>(null);
   const [savedAssessmentId, setSavedAssessmentId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -705,6 +706,7 @@ function WorkspaceScreen({
       }
       const payload = normalizeAssessmentResponse(await response.json() as AssessmentResponse);
       setResult(payload);
+      setChatWorkContext({ ...form });
       setSavedAssessmentId(null);
       setPendingChecklistItemIds(new Set());
       const highest = payload.hazards.some((hazard) => hazard.risk_level === "high") ? "높음" : payload.hazards.some((hazard) => hazard.risk_level === "medium") ? "보통" : "낮음";
@@ -837,14 +839,14 @@ function WorkspaceScreen({
         body: JSON.stringify({
           question: submittedQuestion,
           context: {
-            site_name: form.site_name,
-            equipment_name: form.equipment_name,
-            manufacturer: form.manufacturer || null,
-            model_number: form.model_number || null,
-            component_name: form.component_name || null,
-            task_type: form.task_type,
-            energy_source: form.energy_source || null,
-            task_description: form.description || null,
+            site_name: chatWorkContext?.site_name || null,
+            equipment_name: chatWorkContext?.equipment_name || null,
+            manufacturer: chatWorkContext?.manufacturer || null,
+            model_number: chatWorkContext?.model_number || null,
+            component_name: chatWorkContext?.component_name || null,
+            task_type: chatWorkContext?.task_type || null,
+            energy_source: chatWorkContext?.energy_source || null,
+            task_description: chatWorkContext?.description || null,
             visual_summary: visionSummary || null,
             visual_categories: visualCategories,
             visual_features: visualFeatures,
@@ -893,6 +895,7 @@ function WorkspaceScreen({
 
   function updateField(field: keyof typeof initialForm, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
+    setChatWorkContext(null);
   }
 
   async function addManuals(files: FileList | null) {
@@ -1229,7 +1232,7 @@ function WorkspaceScreen({
     const latestAnswer = [...messages].reverse().find((message) => message.role === "ai")?.text;
     const text = latestAnswer ?? (result
       ? `현재 분석된 위험요인은 ${result.hazards.length}건입니다. ${result.hazards.map((hazard) => `${hazard.name}. ${hazard.safety_actions.join(". ")}`).join(". ")}`
-      : `현재 작업은 ${form.equipment_name}의 ${form.task_type}입니다. 위험성평가를 실행한 뒤 음성 안전 안내를 들을 수 있습니다.`);
+      : "작업정보를 입력하고 위험성평가를 실행한 뒤 음성 안전 안내를 들을 수 있습니다.");
 
     await playSpeech(text);
   }
@@ -1509,7 +1512,8 @@ function WorkspaceScreen({
               {message.role === "ai" && message.retrievalMode && (
                 <span className={`retrieval-badge ${message.retrievalMode}`}>
                   {message.generationMode === "openai" && `${message.model ?? "OpenAI"} + `}
-                  {message.sources?.length ? "BGE-M3 매뉴얼 근거 검색" : "공통 안전수칙"}
+                  {message.generationMode === "qwen" && `${message.model ?? "Qwen"} + `}
+                  {message.sources?.length ? "BGE-M3 문서 근거 검색" : "검증 근거 없음"}
                 </span>
               )}
               {message.accidentClassification && (
@@ -1593,15 +1597,15 @@ function WorkspaceScreen({
             <div className="panel-heading"><div><span className="section-number">01</span><h2>작업정보 입력</h2></div><span className="panel-tag">필수</span></div>
             <form onSubmit={handleAssessment}>
               <div className="form-grid">
-                <Field label="사업장"><input value={form.site_name} onChange={(e) => updateField("site_name", e.target.value)} required /></Field>
-                <Field label="설비명"><input value={form.equipment_name} onChange={(e) => updateField("equipment_name", e.target.value)} required /></Field>
+                <Field label="사업장"><input value={form.site_name} onChange={(e) => updateField("site_name", e.target.value)} placeholder="사업장명을 입력하세요" required /></Field>
+                <Field label="설비명"><input value={form.equipment_name} onChange={(e) => updateField("equipment_name", e.target.value)} placeholder="설비명을 입력하세요" required /></Field>
                 <Field label="제조사"><input value={form.manufacturer} onChange={(e) => updateField("manufacturer", e.target.value)} placeholder="선택 입력" /></Field>
                 <Field label="모델·부품번호"><input value={form.model_number} onChange={(e) => updateField("model_number", e.target.value)} /></Field>
                 <Field label="부품"><input value={form.component_name} onChange={(e) => updateField("component_name", e.target.value)} /></Field>
-                <Field label="작업 종류"><input value={form.task_type} onChange={(e) => updateField("task_type", e.target.value)} required /></Field>
-                <Field label="주요 에너지원"><select value={form.energy_source} onChange={(e) => updateField("energy_source", e.target.value)}><option value="전기">전기</option><option value="기계">기계</option><option value="압력">압력</option><option value="열">열</option><option value="">미확인</option></select></Field>
+                <Field label="작업 종류"><input value={form.task_type} onChange={(e) => updateField("task_type", e.target.value)} placeholder="수행할 작업을 입력하세요" required /></Field>
+                <Field label="주요 에너지원"><select value={form.energy_source} onChange={(e) => updateField("energy_source", e.target.value)}><option value="">미확인</option><option value="전기">전기</option><option value="기계">기계</option><option value="압력">압력</option><option value="열">열</option></select></Field>
               </div>
-              <Field label="작업 설명"><textarea value={form.description} onChange={(e) => updateField("description", e.target.value)} minLength={5} rows={4} required /></Field>
+              <Field label="작업 설명"><textarea value={form.description} onChange={(e) => updateField("description", e.target.value)} placeholder="수행할 작업 범위와 현재 상태를 입력해 주세요." minLength={5} rows={4} required /></Field>
               {error && <p className="error-message">{error}</p>}
               <button className="primary-button" disabled={isLoading} type="submit">{isLoading ? "분석 중..." : "위험성평가 초안 만들기"}</button>
             </form>
@@ -1687,7 +1691,7 @@ function EvidencePanel({ result, manuals }: { result: AssessmentResponse; manual
 
 function SimilarAccidentPanel({ result }: { result: AssessmentResponse }) {
   const types = Array.from(new Set(result.hazards.map((hazard) => hazard.accident_type)));
-  return <div className="similar-accident-list">{types.map((type) => <article className="accident-card" key={type}><div><span>관련 사고유형</span><strong>{type} 사고</strong></div><p>현재 규칙 엔진이 감지한 사고유형입니다. 실제 유사 사고 원문과 유사도는 사고사례 검색 API 연결 후 표시됩니다.</p><ul><li>전원 차단 및 LOTO 확인</li><li>위험구역 통제와 관리자 확인</li></ul></article>)}</div>;
+  return <div className="similar-accident-list">{types.map((type) => <article className="accident-card" key={type}><div><span>규칙 기반 분류</span><strong>{type} 사고 가능성</strong></div><p>실제 유사 사고 근거가 연결되지 않았습니다. 사고사례 검색 결과가 확보되기 전에는 구체적인 예방 절차를 표시하지 않습니다.</p></article>)}</div>;
 }
 
 function SecureCandidateImage({ candidate, alt }: { candidate: CatalogCandidate; alt: string }) {

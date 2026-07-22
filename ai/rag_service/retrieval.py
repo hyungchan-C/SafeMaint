@@ -31,13 +31,28 @@ GENERIC_QUERY_TERMS = frozenset(
         "안전",
         "관련",
         "교체",
+        "교체법",
+        "교체작업",
         "청소",
+        "청소법",
         "점검",
         "정비",
+        "설치",
+        "설치법",
+        "설치시",
+        "주의사항",
+        "절차",
+        "알려줘",
+        "알려주세요",
+        "어디에",
+        "쓰는",
+        "거야",
         "해주세요",
         "하려고",
         "합니다",
         "어떻게",
+        "replacement",
+        "installation",
     }
 )
 
@@ -122,6 +137,20 @@ def lexical_score(query_terms: Sequence[str], text: str) -> float:
     return matched / len(query_terms)
 
 
+def topic_terms(value: str) -> tuple[str, ...]:
+    return tuple(term for term in tokenize(value) if term not in GENERIC_QUERY_TERMS)
+
+
+def topics_overlap(left: Sequence[str], right: Sequence[str]) -> bool:
+    if not left or not right:
+        return False
+    left_text = " ".join(left)
+    right_text = " ".join(right)
+    return any(_term_matches(term, right_text) for term in left) or any(
+        _term_matches(term, left_text) for term in right
+    )
+
+
 class BgeM3Embedder:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -178,7 +207,7 @@ class PgvectorRetriever:
 
     def build_search_query(self, request: ChatRequest) -> str:
         analysis_keywords = request.analysis.search_keywords if request.analysis else []
-        values: Sequence[str | None] = (
+        context_values: Sequence[str | None] = (
             request.context.equipment_name,
             request.context.manufacturer,
             request.context.model_number,
@@ -186,11 +215,43 @@ class PgvectorRetriever:
             request.context.task_type,
             request.context.energy_source,
             request.context.task_description,
-            request.analysis.occurrence_type if request.analysis else None,
-            request.analysis.work_type if request.analysis else None,
-            " ".join(analysis_keywords),
-            request.question,
         )
+        context_text = " ".join(
+            value.strip() for value in context_values if value and value.strip()
+        )
+        question_topics = topic_terms(request.question)
+        context_topics = topic_terms(context_text)
+        include_context = not question_topics or topics_overlap(
+            question_topics, context_topics
+        )
+        relevant_analysis_keywords = [
+            keyword
+            for keyword in analysis_keywords
+            if keyword.casefold() not in request.question.casefold()
+            and (
+                not question_topics
+                or topics_overlap(question_topics, topic_terms(keyword))
+            )
+        ]
+        occurrence_type = request.analysis.occurrence_type if request.analysis else None
+        include_occurrence_type = bool(
+            occurrence_type
+            and (
+                not question_topics
+                or topics_overlap(question_topics, topic_terms(occurrence_type))
+            )
+        )
+        values: list[str | None] = [request.question]
+        if include_context:
+            values.append(context_text)
+        if request.analysis:
+            values.extend(
+                (
+                    occurrence_type if include_occurrence_type else None,
+                    request.analysis.work_type if include_context else None,
+                    " ".join(relevant_analysis_keywords),
+                )
+            )
         return " ".join(value.strip() for value in values if value and value.strip())
 
     @staticmethod
@@ -387,31 +448,22 @@ class PgvectorRetriever:
         query = self.build_search_query(request)
         query_terms = tokenize(query)
         has_selected_documents = bool(request.context.effective_document_ids())
-        topic_values = [
+        context_topic_values = [
             request.context.equipment_name,
             request.context.manufacturer,
             request.context.model_number,
             request.context.component_name,
         ]
         if request.analysis:
-            topic_values.extend(request.analysis.equipment)
-            topic_values.extend(request.analysis.component)
-        topic_terms = tuple(
-            term
-            for term in tokenize(" ".join(value for value in topic_values if value))
-            if term not in GENERIC_QUERY_TERMS
+            context_topic_values.extend(request.analysis.equipment)
+            context_topic_values.extend(request.analysis.component)
+        context_topics = topic_terms(
+            " ".join(value for value in context_topic_values if value)
         )
-        question_topic_terms = tuple(
-            term
-            for term in tokenize(request.question)
-            if term not in GENERIC_QUERY_TERMS
-        )
-        if has_selected_documents and question_topic_terms:
-            # A follow-up about an explicitly selected manual must be driven by
-            # the current question, not stale equipment fields left in the form.
-            topic_terms = question_topic_terms
-        if not topic_terms:
-            topic_terms = tuple(
+        question_topics = topic_terms(request.question)
+        active_topic_terms = question_topics or context_topics
+        if not active_topic_terms:
+            active_topic_terms = tuple(
                 term for term in query_terms if term not in GENERIC_QUERY_TERMS
             )
 
@@ -430,8 +482,8 @@ class PgvectorRetriever:
                 if value
             )
             combined = f"{metadata_text} {content}".casefold()
-            if not has_selected_documents and topic_terms and not any(
-                _term_matches(term, combined) for term in topic_terms
+            if not has_selected_documents and active_topic_terms and not any(
+                _term_matches(term, combined) for term in active_topic_terms
             ):
                 continue
             keyword = lexical_score(query_terms, combined)
@@ -445,7 +497,9 @@ class PgvectorRetriever:
             if content_hash in seen_hashes:
                 continue
             seen_hashes.add(content_hash)
-            metadata_score = lexical_score(topic_terms, metadata_text.casefold())
+            metadata_score = lexical_score(
+                active_topic_terms, metadata_text.casefold()
+            )
             retrieval_score = max(0.0, similarity) * 0.7 + keyword * 0.3
             reranker_score = retrieval_score * 0.9 + metadata_score * 0.1
             ranked.append((reranker_score, row, keyword, retrieval_score))
