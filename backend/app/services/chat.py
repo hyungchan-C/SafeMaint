@@ -10,6 +10,7 @@ from openai import OpenAIError
 from app.core.config import settings
 from app.schemas.chat import (
     AccidentClassification,
+    AnswerType,
     ChatRequest,
     ChatResponse,
     QueryAnalysis,
@@ -20,11 +21,20 @@ from app.services.accident_classifier import (
     AccidentClassifierError,
 )
 from app.services.ai import AIConfigurationError, AIService
-from app.services.evidence_policy import (
-    RAG_UNAVAILABLE_WARNING,
-    format_no_evidence_answer,
-)
+from app.services.evidence_policy import RAG_UNAVAILABLE_WARNING
 from app.services.qwen import QwenClient
+from app.services.question_intent import classify_question_intent
+from app.services.structured_answers import (
+    clarification_answer,
+    clarification_details,
+    no_evidence_answer,
+    no_evidence_details,
+    source_based_fallback,
+    validated_checklist_items,
+    validated_structured_answer,
+)
+
+
 ANALYZER_FALLBACK_WARNING = (
     "상황 분석 모델을 사용할 수 없어 입력값 기반 검색어로 안전하게 대체했습니다."
 )
@@ -128,7 +138,25 @@ class ChatService:
                         )
                     }
                 )
+        answer_type = self._resolved_answer_type(analyzed_request)
+        if answer_type == "clarification_required":
+            return self._clarification_response(analyzed_request)
         retrieval_response = await self._retrieve(analyzed_request, access_scope)
+        if not retrieval_response.sources:
+            retrieval_response = self._no_evidence_response(
+                retrieval_response,
+                work_related=answer_type == "maintenance_guide",
+            )
+        else:
+            retrieval_response = retrieval_response.model_copy(
+                update={
+                    "answer_type": answer_type,
+                    "structured_answer": source_based_fallback(
+                        answer_type, retrieval_response.sources
+                    ),
+                    "checklist_items": [],
+                }
+            )
         if classification is not None:
             retrieval_response = retrieval_response.model_copy(
                 update={"accident_classification": classification}
@@ -234,11 +262,40 @@ class ChatService:
                     )
                 }
             )
+        allowed_source_ids = {source.chunk_id for source in retrieval_response.sources}
+        if qwen_answer.used_source_ids and not set(
+            qwen_answer.used_source_ids
+        ).issubset(allowed_source_ids):
+            return retrieval_response.model_copy(
+                update={
+                    "warning": self._append_warning(
+                        retrieval_response.warning,
+                        "Qwen이 검색되지 않은 출처를 참조해 구조화 결과를 사용하지 않았습니다.",
+                    )
+                }
+            )
+        structured_answer = validated_structured_answer(
+            qwen_answer.structured_answer,
+            expected_type=retrieval_response.answer_type or "no_evidence",
+            sources=retrieval_response.sources,
+        )
+        if structured_answer is None:
+            structured_answer = retrieval_response.structured_answer
+        checklist_items = (
+            validated_checklist_items(
+                qwen_answer.checklist_items,
+                sources=retrieval_response.sources,
+            )
+            if retrieval_response.answer_type == "maintenance_guide"
+            else []
+        )
         return retrieval_response.model_copy(
             update={
                 "answer": qwen_answer.answer,
                 "generation_mode": "qwen",
                 "model": qwen_answer.model or "qwen",
+                "structured_answer": structured_answer,
+                "checklist_items": checklist_items,
             }
         )
 
@@ -279,9 +336,13 @@ class ChatService:
         *,
         allow_external: bool = True,
     ) -> tuple[ChatRequest, bool]:
-        if request.analysis is not None:
-            return request, False
         fallback = self._fallback_analysis(request)
+        if request.analysis is not None:
+            return request.model_copy(
+                update={
+                    "analysis": self._merge_analysis(fallback, request.analysis)
+                }
+            ), False
         if (
             not allow_external
             or not self.openai_enabled
@@ -296,7 +357,9 @@ class ChatService:
             )
             if not isinstance(analysis, QueryAnalysis):
                 analysis = QueryAnalysis.model_validate(analysis)
-            return request.model_copy(update={"analysis": analysis}), False
+            return request.model_copy(
+                update={"analysis": self._merge_analysis(fallback, analysis)}
+            ), False
         except (AIConfigurationError, OpenAIError, RuntimeError, ValueError):
             return request.model_copy(update={"analysis": fallback}), True
 
@@ -349,7 +412,13 @@ class ChatService:
                 if len(token) >= 2
             )
         )[:30]
-        return QueryAnalysis(search_keywords=keywords)
+        intent = classify_question_intent(request)
+        return QueryAnalysis(
+            question_intent=intent.intent,
+            intent_confidence=intent.confidence,
+            clarification_question=intent.clarification_question,
+            search_keywords=keywords,
+        )
 
     @staticmethod
     def _merge_qwen_analysis(
@@ -357,10 +426,72 @@ class ChatService:
         qwen_analysis: QueryAnalysis,
     ) -> QueryAnalysis:
         base = fallback or QueryAnalysis()
+        updates: dict[str, object] = {}
+        if qwen_analysis.question_intent:
+            updates["question_intent"] = qwen_analysis.question_intent
+            updates["intent_confidence"] = qwen_analysis.intent_confidence
+            updates["clarification_question"] = qwen_analysis.clarification_question
         occurrence_type = (qwen_analysis.occurrence_type or "").strip()
-        if not occurrence_type:
-            return base
-        return base.model_copy(update={"occurrence_type": occurrence_type})
+        if occurrence_type:
+            updates["occurrence_type"] = occurrence_type
+        return base.model_copy(update=updates) if updates else base
+
+    @staticmethod
+    def _merge_analysis(
+        fallback: QueryAnalysis,
+        supplied: QueryAnalysis,
+    ) -> QueryAnalysis:
+        values = supplied.model_dump(mode="python")
+        if not supplied.question_intent:
+            values.update(
+                {
+                    "question_intent": fallback.question_intent,
+                    "intent_confidence": fallback.intent_confidence,
+                    "clarification_question": fallback.clarification_question,
+                }
+            )
+        if not supplied.search_keywords:
+            values["search_keywords"] = fallback.search_keywords
+        return QueryAnalysis.model_validate(values)
+
+    @staticmethod
+    def _resolved_answer_type(request: ChatRequest) -> AnswerType:
+        if request.analysis and request.analysis.question_intent:
+            return request.analysis.question_intent
+        return classify_question_intent(request).intent
+
+    @staticmethod
+    def _clarification_response(request: ChatRequest) -> ChatResponse:
+        question = (
+            request.analysis.clarification_question
+            if request.analysis
+            else None
+        )
+        details = clarification_details(question)
+        return ChatResponse(
+            answer=clarification_answer(details),
+            answer_type="clarification_required",
+            structured_answer=details,
+            clarification_question=details.question,
+            sources=[],
+            retrieval_mode="safety-fallback",
+        )
+
+    @staticmethod
+    def _no_evidence_response(
+        response: ChatResponse,
+        *,
+        work_related: bool,
+    ) -> ChatResponse:
+        details = no_evidence_details(work_related=work_related)
+        return response.model_copy(
+            update={
+                "answer": no_evidence_answer(work_related=work_related),
+                "answer_type": "no_evidence",
+                "structured_answer": details,
+                "checklist_items": [],
+            }
+        )
 
     @staticmethod
     def _build_grounded_context(
@@ -389,6 +520,8 @@ class ChatService:
             ),
         )
         lines = [f"{label}: {value}" for label, value in fields if value]
+        if request.analysis and request.analysis.question_intent:
+            lines.insert(0, f"답변 유형: {request.analysis.question_intent}")
         if request.analysis and request.analysis.occurrence_type:
             lines.append(
                 "팀 Qwen LoRA 사고유형 예측(실험용): "
@@ -417,8 +550,12 @@ class ChatService:
 
     @staticmethod
     def _fallback(request: ChatRequest) -> ChatResponse:
+        intent = classify_question_intent(request).intent
+        details = no_evidence_details(work_related=intent == "maintenance_guide")
         return ChatResponse(
-            answer=format_no_evidence_answer(),
+            answer=no_evidence_answer(work_related=intent == "maintenance_guide"),
+            answer_type="no_evidence",
+            structured_answer=details,
             sources=[],
             retrieval_mode="safety-fallback",
             warning=RAG_UNAVAILABLE_WARNING,
