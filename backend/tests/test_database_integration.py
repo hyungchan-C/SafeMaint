@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from os import getenv
 from uuid import UUID, uuid4
 
@@ -561,6 +562,7 @@ def test_document_approval_activates_and_supersedes_versions() -> None:
         )
         assert user is not None
         assert manager_role is not None
+        manager_user_id = user.id
         session.add(UserRole(user_id=user.id, role_id=manager_role.id))
         session.commit()
 
@@ -659,6 +661,47 @@ def test_document_approval_activates_and_supersedes_versions() -> None:
         session.commit()
         unrelated_document_id = unrelated_document.id
 
+        excluded_document_ids: set[UUID] = set()
+        for label, lifecycle_status, version_status in (
+            ("active", "active", "active"),
+            ("failed", "failed", "failed"),
+            ("superseded", "active", "superseded"),
+            ("deleted", "deleted", "deleted"),
+        ):
+            excluded_document = Document(
+                external_id=f"approval-excluded:{label}:{suffix}",
+                title=f"Excluded {label} document",
+                source_type="manual",
+                document_type_code="equipment_manual",
+                access_level="restricted",
+                lifecycle_status=lifecycle_status,
+                deleted_at=(
+                    datetime.now(timezone.utc) if lifecycle_status == "deleted" else None
+                ),
+                metadata_json={},
+            )
+            session.add(excluded_document)
+            session.flush()
+            excluded_version = DocumentVersion(
+                document_id=excluded_document.id,
+                version_number=1,
+                original_filename=f"excluded-{label}.pdf",
+                stored_filename=f"excluded-{label}-{suffix}.pdf",
+                storage_path=f"/tmp/excluded-{label}-{suffix}.pdf",
+                sha256=(label.encode().hex() + suffix.lower()).ljust(64, "0")[:64],
+                file_size=1,
+                mime_type="application/pdf",
+                status=version_status,
+                is_active=version_status == "active",
+                uploaded_by_user_id=manager_user_id,
+            )
+            session.add(excluded_version)
+            session.flush()
+            if version_status == "active":
+                excluded_document.current_version_id = excluded_version.id
+            excluded_document_ids.add(excluded_document.id)
+        session.commit()
+
     mismatched = asyncio.run(
         _request(
             "POST",
@@ -667,6 +710,35 @@ def test_document_approval_activates_and_supersedes_versions() -> None:
         )
     )
     assert mismatched.status_code == 404
+
+    worker_queue = asyncio.run(
+        _request(
+            "GET",
+            "/api/v1/documents/review-queue",
+            headers=worker_headers,
+        )
+    )
+    assert worker_queue.status_code == 403
+
+    manager_queue = asyncio.run(
+        _request(
+            "GET",
+            "/api/v1/documents/review-queue",
+            headers=manager_headers,
+        )
+    )
+    assert manager_queue.status_code == 200
+    queued_first_version = next(
+        item
+        for item in manager_queue.json()
+        if item["document_id"] == str(document_id)
+    )
+    assert queued_first_version["document_version_id"] == str(first_version_id)
+    assert queued_first_version["version_status"] == "review_required"
+    assert queued_first_version["uploader_name"] == "문서 승인 통합 사용자"
+    assert excluded_document_ids.isdisjoint(
+        {UUID(item["document_id"]) for item in manager_queue.json()}
+    )
 
     first_approval = asyncio.run(
         _request(
@@ -678,6 +750,28 @@ def test_document_approval_activates_and_supersedes_versions() -> None:
     assert first_approval.status_code == 200
     assert first_approval.json()["status"] == "active"
     assert first_approval.json()["is_active"] is True
+
+    duplicate_approval = asyncio.run(
+        _request(
+            "POST",
+            f"/api/v1/documents/{document_id}/versions/{first_version_id}/approve",
+            headers=manager_headers,
+        )
+    )
+    assert duplicate_approval.status_code == 409
+
+    queue_after_approval = asyncio.run(
+        _request(
+            "GET",
+            "/api/v1/documents/review-queue",
+            headers=manager_headers,
+        )
+    )
+    assert queue_after_approval.status_code == 200
+    assert all(
+        item["document_id"] != str(document_id)
+        for item in queue_after_approval.json()
+    )
 
     second_upload = asyncio.run(
         _request(
@@ -693,36 +787,76 @@ def test_document_approval_activates_and_supersedes_versions() -> None:
     assert second_body["version_number"] == 2
     second_version_id = UUID(second_body["document_version_id"])
 
-    with SessionLocal() as session:
-        second_version = session.get(DocumentVersion, second_version_id)
-        assert second_version is not None
-        second_version.status = "review_required"
-        session.commit()
-
-    second_approval = asyncio.run(
+    third_upload = asyncio.run(
         _request(
             "POST",
-            f"/api/v1/documents/{document_id}/versions/{second_version_id}/approve",
+            "/api/v1/documents/upload",
+            headers=manager_headers,
+            data=upload_data,
+            files=upload_file,
+        )
+    )
+    assert third_upload.status_code == 201
+    third_body = third_upload.json()
+    assert third_body["version_number"] == 3
+    third_version_id = UUID(third_body["document_version_id"])
+
+    with SessionLocal() as session:
+        document = session.get(Document, document_id)
+        second_version = session.get(DocumentVersion, second_version_id)
+        third_version = session.get(DocumentVersion, third_version_id)
+        assert document is not None
+        assert second_version is not None
+        assert third_version is not None
+        document.lifecycle_status = "review_required"
+        second_version.status = "review_required"
+        third_version.status = "review_required"
+        session.commit()
+
+    latest_queue = asyncio.run(
+        _request(
+            "GET",
+            "/api/v1/documents/review-queue?include_processing=true",
             headers=manager_headers,
         )
     )
-    assert second_approval.status_code == 200
+    assert latest_queue.status_code == 200
+    latest_item = next(
+        item
+        for item in latest_queue.json()
+        if item["document_id"] == str(document_id)
+    )
+    assert latest_item["document_version_id"] == str(third_version_id)
+    assert latest_item["version_number"] == 3
+
+    latest_approval = asyncio.run(
+        _request(
+            "POST",
+            f"/api/v1/documents/{document_id}/versions/{third_version_id}/approve",
+            headers=manager_headers,
+        )
+    )
+    assert latest_approval.status_code == 200
 
     with SessionLocal() as session:
         document = session.get(Document, document_id)
         first_version = session.get(DocumentVersion, first_version_id)
         second_version = session.get(DocumentVersion, second_version_id)
+        third_version = session.get(DocumentVersion, third_version_id)
         assert document is not None
-        assert document.current_version_id == second_version_id
+        assert document.current_version_id == third_version_id
         assert document.lifecycle_status == "active"
         assert first_version is not None
         assert first_version.status == "superseded"
         assert first_version.is_active is False
         assert second_version is not None
-        assert second_version.status == "active"
-        assert second_version.is_active is True
-        assert second_version.approved_by_user_id is not None
-        assert second_version.approved_at is not None
+        assert second_version.status == "review_required"
+        assert second_version.is_active is False
+        assert third_version is not None
+        assert third_version.status == "active"
+        assert third_version.is_active is True
+        assert third_version.approved_by_user_id is not None
+        assert third_version.approved_at is not None
         assert session.scalar(
             select(func.count(AuditEvent.id)).where(
                 AuditEvent.entity_id == document_id,

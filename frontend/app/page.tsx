@@ -1,8 +1,10 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import DocumentReviewPanel from "@/components/DocumentReviewPanel";
 import SafetyAnswerView from "@/components/SafetyAnswerView";
+import StructuredChatAnswer from "@/components/StructuredChatAnswer";
 import TbmChecklist from "@/components/TbmChecklist";
 import type {
   AssessmentResponse,
@@ -10,6 +12,8 @@ import type {
   ChecklistItemUpdateResponse,
 } from "@/types/assessment";
 import type { CatalogCandidate, ChatMessage, ChatResponse } from "@/types/chat";
+import type { UserDocumentSummary } from "@/types/documents";
+import { DOCUMENT_STATUS_LABELS } from "@/types/documents";
 import type { GpsCheckResponse, VirtualEquipment } from "@/types/gps";
 import { getApiBaseUrl } from "@/lib/api";
 
@@ -100,15 +104,6 @@ type WorkspaceSnapshot = {
   manuals: string[];
   selectedDocumentIds: string[];
   assessmentId: string | null;
-};
-
-type UserDocumentSummary = {
-  document_id: string;
-  document_version_id: string;
-  original_filename: string;
-  version_number: number;
-  status: string;
-  is_active: boolean;
 };
 
 function readStorage<T>(key: string, fallback: T): T {
@@ -398,6 +393,7 @@ function WorkspaceScreen({
   const [autoSpeak, setAutoSpeak] = useState(false);
   const autoSpeakRef = useRef(autoSpeak);
   const [manuals, setManuals] = useState<string[]>([]);
+  const [userDocuments, setUserDocuments] = useState<UserDocumentSummary[]>([]);
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
   const [manualStatus, setManualStatus] = useState("");
   const [sitePhotoName, setSitePhotoName] = useState("");
@@ -429,6 +425,7 @@ function WorkspaceScreen({
   const [chatWorkContext, setChatWorkContext] = useState<typeof initialForm | null>(null);
   const [result, setResult] = useState<AssessmentResponse | null>(null);
   const [savedAssessmentId, setSavedAssessmentId] = useState<string | null>(null);
+  const [assessmentNotice, setAssessmentNotice] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isSavingAssessment, setIsSavingAssessment] = useState(false);
   const [pendingChecklistItemIds, setPendingChecklistItemIds] = useState<Set<string>>(new Set());
@@ -445,6 +442,41 @@ function WorkspaceScreen({
   const recordedChunksRef = useRef<Blob[]>([]);
   const [error, setError] = useState("");
   const [workspaceRestored, setWorkspaceRestored] = useState(false);
+  const assessmentDrawerRef = useRef<HTMLDetailsElement | null>(null);
+  const myDocumentsInitializedRef = useRef(false);
+
+  const refreshMyDocuments = useCallback(async () => {
+    const token = getAccessToken();
+    if (!token) return;
+    const response = await fetch(`${getApiBaseUrl()}/api/v1/documents/mine`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) return;
+    const documents = await response.json() as UserDocumentSummary[];
+    const availableIds = new Set(documents.map((document) => document.document_id));
+    const isFirstLoad = !myDocumentsInitializedRef.current;
+    myDocumentsInitializedRef.current = true;
+    setUserDocuments(documents);
+    setManuals(documents.map((document) => document.original_filename));
+    setSelectedDocumentIds((current) => {
+      const availableSelection = current.filter((id) => availableIds.has(id));
+      return isFirstLoad && availableSelection.length === 0
+        ? documents.map((document) => document.document_id)
+        : availableSelection;
+    });
+
+    if (documents.some((document) => ["pending", "processing"].includes(document.status))) {
+      setManualStatus("업로드 완료 · PDF를 처리 중이며 아직 일반 RAG 검색에는 사용할 수 없습니다.");
+    } else if (documents.some((document) => document.status === "review_required")) {
+      setManualStatus("PDF 처리 완료 · 관리자 승인 대기 중입니다. 승인 전에는 업로더의 선택 미리보기만 가능합니다.");
+    } else if (documents.some((document) => document.status === "failed")) {
+      setManualStatus("처리에 실패한 문서가 있습니다. 문서별 실패 사유를 확인해 주세요.");
+    } else if (documents.some((document) => document.status === "active")) {
+      setManualStatus("승인된 매뉴얼을 DB에서 불러왔습니다 · 일반 RAG 검색에 사용할 수 있습니다.");
+    } else if (documents.length > 0) {
+      setManualStatus("등록 문서를 DB에서 불러왔습니다. 문서별 처리 상태를 확인해 주세요.");
+    }
+  }, []);
 
   useEffect(() => {
     const settings = readStorage<{ volume: number; fontSize: FontSize; autoSpeak?: boolean }>(STORAGE_KEYS.settings, { volume: 70, fontSize: "medium", autoSpeak: false });
@@ -522,34 +554,10 @@ function WorkspaceScreen({
 
   useEffect(() => {
     if (!workspaceRestored || !username) return;
-    const token = getAccessToken();
-    if (!token) return;
-    let cancelled = false;
-
-    void (async () => {
-      try {
-        const response = await fetch(`${getApiBaseUrl()}/api/v1/documents/mine`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!response.ok) return;
-        const documents = await response.json() as UserDocumentSummary[];
-        if (cancelled) return;
-        setManuals(documents.map((document) => document.original_filename));
-        setSelectedDocumentIds(documents.map((document) => document.document_id));
-        if (documents.some((document) => document.status === "pending" || document.status === "processing")) {
-          setManualStatus("등록된 매뉴얼을 처리하는 중입니다. 완료 후 자동으로 검색됩니다.");
-        } else if (documents.length > 0) {
-          setManualStatus("DB에서 매뉴얼을 불러왔습니다 · 등록한 사용자가 바로 질문할 수 있습니다.");
-        }
-      } catch {
-        // Keep the local snapshot when the backend is temporarily unavailable.
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [username, workspaceRestored]);
+    void refreshMyDocuments().catch(() => {
+      // Keep the local snapshot when the backend is temporarily unavailable.
+    });
+  }, [refreshMyDocuments, username, workspaceRestored]);
 
   useEffect(() => {
     if (typeof window !== "undefined") writeStorage(STORAGE_KEYS.settings, { volume, fontSize, autoSpeak });
@@ -674,6 +682,7 @@ function WorkspaceScreen({
     setIsLoading(true);
     setError("");
     setChecklistError("");
+    setAssessmentNotice("");
     try {
       const token = getAccessToken();
       if (!token) throw new Error("위험성평가를 만들려면 먼저 로그인해 주세요.");
@@ -830,6 +839,11 @@ function WorkspaceScreen({
         {
           role: "ai",
           text: payload.answer,
+          sourceQuestion: submittedQuestion,
+          answerType: payload.answer_type,
+          structuredAnswer: payload.structured_answer,
+          checklistItems: payload.checklist_items,
+          clarificationQuestion: payload.clarification_question,
           sources: payload.sources,
           retrievalMode: payload.retrieval_mode,
           generationMode: payload.generation_mode,
@@ -861,6 +875,31 @@ function WorkspaceScreen({
   function updateField(field: keyof typeof initialForm, value: string) {
     setForm((current) => ({ ...current, [field]: value }));
     setChatWorkContext(null);
+  }
+
+  function prepareAssessmentFromChat(sourceQuestion: string) {
+    const importedDescription = sourceQuestion.trim().slice(0, 2000);
+    setForm((current) => ({
+      ...current,
+      task_type: current.task_type || importedDescription.slice(0, 100),
+      description: importedDescription || current.description,
+    }));
+    setChatWorkContext(null);
+    setResult(null);
+    setSavedAssessmentId(null);
+    setPendingChecklistItemIds(new Set());
+    setChecklistError("");
+    setError("");
+    setActiveTab("tbm");
+    setAssessmentNotice(
+      "채팅 질문을 작업 설명으로 가져왔습니다. 사업장·설비·작업정보를 확인하고 초안을 만든 뒤 저장해 주세요. 채팅 체크리스트는 안전 검증을 위해 자동 저장되지 않습니다.",
+    );
+
+    const drawer = assessmentDrawerRef.current;
+    if (drawer) {
+      drawer.open = true;
+      drawer.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   }
 
   async function addManuals(files: FileList | null) {
@@ -911,10 +950,14 @@ function WorkspaceScreen({
       }
     }
 
+    if (uploadedCount > 0) {
+      await refreshMyDocuments().catch(() => undefined);
+    }
+
     if (uploadedCount > 0 && uploadFailures.length === 0 && visionPending.length === 0) {
-      setManualStatus("문서 등록 완료 · RAG 처리 후 업로드한 사용자가 바로 질문할 수 있습니다.");
+      setManualStatus("업로드 완료 · PDF 처리 후 관리자 승인이 필요합니다. 승인 전에는 일반 RAG 검색에 포함되지 않습니다.");
     } else if (uploadedCount > 0 && uploadFailures.length === 0) {
-      setManualStatus("문서 등록 완료 · 로컬 비전 서비스가 꺼져 있어 이미지 인덱싱만 대기 중입니다.");
+      setManualStatus("업로드 완료 · 관리자 승인과 이미지 인덱싱이 필요합니다. 로컬 비전 서비스 상태를 확인해 주세요.");
     } else if (uploadedCount > 0) {
       setManualStatus(`${uploadedCount}개 문서 등록 완료 · 일부 실패: ${uploadFailures.join(" · ")}`);
     } else {
@@ -1478,13 +1521,41 @@ function WorkspaceScreen({
       <section className="manual-row upgraded-manual-row">
         <label className="file-card">📄 작업 설비 매뉴얼 추가<input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
         <div><strong>{manuals.length ? `${manuals.length}개 매뉴얼 등록됨` : "등록된 매뉴얼 없음"}</strong><span>{manualStatus || (sitePhotoName ? `현장 사진: ${sitePhotoName} · ${visionStatus}` : "현장 사진 없음")}</span></div>
-        <div className="document-chip-list">{manuals.map((name, index) => <span key={name}>📄 {name}<button type="button" aria-label={`${name} 삭제`} onClick={() => {
-          setManuals((current) => current.filter((_, itemIndex) => itemIndex !== index));
-          setSelectedDocumentIds((current) => current.filter((_, itemIndex) => itemIndex !== index));
-          setCatalogCandidates([]);
-          setVisionSummary("");
-        }}>×</button></span>)}</div>
+        <div className="document-chip-list">
+          {userDocuments.length > 0
+            ? userDocuments.map((document) => {
+                const isSelected = selectedDocumentIds.includes(document.document_id);
+                return <article className={`uploaded-document-chip ${isSelected ? "selected" : ""}`} key={document.document_version_id}>
+                  <div>
+                    <strong>📄 {document.original_filename}</strong>
+                    <small>버전 {document.version_number} · {DOCUMENT_STATUS_LABELS[document.status]}</small>
+                    {document.fallback_used && <small className="fallback-label">PyMuPDF 대체 처리됨</small>}
+                    {document.processing_warning && <small className="document-chip-warning">⚠ {document.processing_warning}</small>}
+                    {document.failure_reason && <small className="document-chip-warning">{document.failure_reason}</small>}
+                  </div>
+                  <button type="button" aria-label={`${document.original_filename} ${isSelected ? "선택 해제" : "검색에 선택"}`} onClick={() => {
+                    setSelectedDocumentIds((current) => isSelected
+                      ? current.filter((id) => id !== document.document_id)
+                      : [...current, document.document_id]);
+                    setCatalogCandidates([]);
+                    setVisionSummary("");
+                  }}>{isSelected ? "선택됨" : "선택"}</button>
+                </article>;
+              })
+            : manuals.map((name, index) => <span key={`${name}-${index}`}>📄 {name}<button type="button" aria-label={`${name} 선택 해제`} onClick={() => {
+                setManuals((current) => current.filter((_, itemIndex) => itemIndex !== index));
+                setSelectedDocumentIds((current) => current.filter((_, itemIndex) => itemIndex !== index));
+                setCatalogCandidates([]);
+                setVisionSummary("");
+              }}>×</button></span>)}
+        </div>
       </section>
+
+      <DocumentReviewPanel
+        apiBaseUrl={getApiBaseUrl()}
+        token={getAccessToken()}
+        onApproved={async () => refreshMyDocuments()}
+      />
 
       <section className="chat-stage upgraded-chat">
         <div className="chat-heading"><div><strong>SafeMaint AI 상담</strong><span>분석 결과와 등록 문서를 바탕으로 후속 질문을 입력하세요.</span></div><button type="button" onClick={() => setMessages([])}>대화 지우기</button></div>
@@ -1509,7 +1580,16 @@ function WorkspaceScreen({
                 </div>
               )}
               {message.role === "ai"
-                ? <SafetyAnswerView answer={message.text} />
+                ? message.structuredAnswer
+                  ? <StructuredChatAnswer
+                      answer={message.structuredAnswer}
+                      checklistItems={message.checklistItems ?? []}
+                      sources={message.sources ?? []}
+                      onPrepareAssessment={message.structuredAnswer.answer_type === "maintenance_guide"
+                        ? () => prepareAssessmentFromChat(message.sourceQuestion ?? "")
+                        : undefined}
+                    />
+                  : <SafetyAnswerView answer={message.text} />
                 : <p className="chat-answer-text">{message.text}</p>}
               {message.catalogCandidates && message.catalogCandidates.length > 0 && (
                 <div className="catalog-candidate-list">
@@ -1552,6 +1632,10 @@ function WorkspaceScreen({
                           source.document_version ? `문서 버전 ${source.document_version}` : null,
                         ].filter(Boolean).join(" · ")}
                       </small>
+                      <small className="chat-source-location">
+                        문서 ID {source.document_id}
+                        {source.document_version_id ? ` · 문서 버전 ID ${source.document_version_id}` : ""}
+                      </small>
                       <p>{source.excerpt}</p>
                       {source.url && <a href={source.url} target="_blank" rel="noreferrer">원문 확인</a>}
                     </article>
@@ -1571,7 +1655,7 @@ function WorkspaceScreen({
         </form>
       </section>
 
-      <details className="assessment-drawer">
+      <details className="assessment-drawer" ref={assessmentDrawerRef}>
         <summary>규칙 기반 위험성평가 미리보기 열기</summary>
         <section className="search-progress">
           <div className="panel-heading compact-heading"><div><span className="section-number">진행</span><h2>분석 과정</h2></div><span className={isLoading ? "status-pill active" : "status-pill"}>{isLoading ? "진행 중" : result ? "완료" : "대기"}</span></div>
@@ -1591,6 +1675,7 @@ function WorkspaceScreen({
                 <Field label="주요 에너지원"><select value={form.energy_source} onChange={(e) => updateField("energy_source", e.target.value)}><option value="">미확인</option><option value="전기">전기</option><option value="기계">기계</option><option value="압력">압력</option><option value="열">열</option></select></Field>
               </div>
               <Field label="작업 설명"><textarea value={form.description} onChange={(e) => updateField("description", e.target.value)} placeholder="수행할 작업 범위와 현재 상태를 입력해 주세요." minLength={5} rows={4} required /></Field>
+              {assessmentNotice && <p className="assessment-import-notice" role="status">{assessmentNotice}</p>}
               {error && <p className="error-message">{error}</p>}
               <button className="primary-button" disabled={isLoading} type="submit">{isLoading ? "분석 중..." : "위험성평가 초안 만들기"}</button>
             </form>

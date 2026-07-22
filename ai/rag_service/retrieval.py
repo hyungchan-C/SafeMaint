@@ -317,6 +317,7 @@ class PgvectorRetriever:
                     d.title,
                     d.document_type_code AS source_type,
                     dt.scope AS document_scope,
+                    dv.id::text AS document_version_id,
                     dv.original_filename,
                     dv.version_number AS document_version,
                     COALESCE(dc.metadata->>'section', dc.section_path->>0) AS section,
@@ -502,6 +503,28 @@ class PgvectorRetriever:
             )
             retrieval_score = max(0.0, similarity) * 0.7 + keyword * 0.3
             reranker_score = retrieval_score * 0.9 + metadata_score * 0.1
+            intent = request.analysis.question_intent if request.analysis else None
+            source_type = str(row["source_type"] or "").casefold()
+            if intent == "maintenance_guide":
+                if source_type in {
+                    "manual",
+                    "equipment_manual",
+                    "component_manual",
+                    "work_standard",
+                }:
+                    reranker_score += 0.08
+                elif source_type in {"public_guide", "public_incident", "regulation"}:
+                    reranker_score += 0.03
+            elif intent == "component_info":
+                if source_type in {
+                    "manual",
+                    "equipment_manual",
+                    "component_manual",
+                    "public_guide",
+                }:
+                    reranker_score += 0.05
+                elif source_type in {"public_incident", "incident"}:
+                    reranker_score = max(0.0, reranker_score - 0.03)
             ranked.append((reranker_score, row, keyword, retrieval_score))
 
         ranked.sort(key=lambda item: (-item[0], item[1]["chunk_id"]))
@@ -515,6 +538,7 @@ class PgvectorRetriever:
             sources.append(
                 ChatSource(
                     document_id=document_id,
+                    document_version_id=row.get("document_version_id"),
                     chunk_id=row["chunk_id"],
                     title=row["title"],
                     source_type=row["source_type"],
