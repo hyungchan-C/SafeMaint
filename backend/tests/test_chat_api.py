@@ -5,14 +5,36 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.schemas.chat import (
+    ChatChecklistItem,
     ChatRequest,
     ChatResponse,
+    EvidenceBackedItem,
+    MaintenanceAnswerDetails,
+    MaintenanceHazard,
+    MaintenanceSummary,
     QueryAnalysis,
     RetrievalAccessScope,
 )
 from app.services.chat import ChatService, get_chat_service
 from app.services.qwen import QwenGeneratedAnswer
 from app.services.accident_classifier import AccidentClassifierClient
+
+
+def _grounded_source(source_type: str = "component_manual") -> dict[str, object]:
+    return {
+        "document_id": "doc-1",
+        "document_version_id": "version-1",
+        "chunk_id": "chunk-1",
+        "title": "라이트커튼 매뉴얼",
+        "source_type": source_type,
+        "document_scope": "company" if "manual" in source_type else "public",
+        "original_filename": "light-curtain.pdf",
+        "document_version": 1,
+        "section": "설치 및 개요",
+        "excerpt": "라이트커튼의 용도와 설치 전 확인사항",
+        "page_start": 12,
+        "similarity": 0.84,
+    }
 
 
 def test_chat_service_returns_topic_neutral_fallback_without_evidence() -> None:
@@ -63,7 +85,7 @@ def test_chat_service_does_not_invent_tbm_checklist_without_manual_pdf() -> None
     assert "컨베이어 부품 교체 작업" not in response.answer
     assert "TBM 체크리스트" not in response.answer
     assert "[ ]" not in response.answer
-    assert "관련 문서를 등록" in response.answer
+    assert "승인된 매뉴얼" in response.answer
 
 
 def test_chat_service_accepts_grounded_rag_response() -> None:
@@ -542,20 +564,219 @@ def test_local_vision_summary_is_never_sent_to_external_answer_model() -> None:
     assert "로컬 이미지 분석" in (response.warning or "")
 
 
-def test_visual_question_uses_local_generic_shape_without_document_evidence() -> None:
-    class MustNotUseExternalModel:
-        def analyze(self, question: str, context: str) -> QueryAnalysis:
-            return QueryAnalysis(search_keywords=["bolt"])
-
-        def answer(self, question: str, context: str | None = None) -> str:
-            raise AssertionError("Local visual observations must not leave the server")
+def test_document_question_returns_document_structure_without_tbm() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["analysis"]["question_intent"] == "document_qa"
+        return httpx.Response(
+            200,
+            json={
+                "answer": "문서 검색 결과",
+                "sources": [_grounded_source()],
+                "retrieval_mode": "hybrid",
+            },
+        )
 
     response = asyncio.run(
         ChatService(
-            service_url=None,
-            ai_service=MustNotUseExternalModel(),  # type: ignore[arg-type]
-            openai_enabled=True,
-        ).answer(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+        ).answer(ChatRequest(question="이 PDF를 요약해줘."))
+    )
+
+    assert response.answer_type == "document_qa"
+    assert response.structured_answer is not None
+    assert response.structured_answer.answer_type == "document_qa"
+    assert response.checklist_items == []
+    assert "hazards" not in response.structured_answer.model_dump()
+
+
+def test_component_question_returns_component_structure_without_procedure() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["analysis"]["question_intent"] == "component_info"
+        return httpx.Response(
+            200,
+            json={
+                "answer": "부품 정보 검색 결과",
+                "sources": [_grounded_source()],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+        ).answer(ChatRequest(question="라이트커튼이 무슨 장비인지 알려줘."))
+    )
+
+    assert response.answer_type == "component_info"
+    assert response.structured_answer is not None
+    assert response.structured_answer.answer_type == "component_info"
+    assert response.checklist_items == []
+    assert "manual_steps" not in response.structured_answer.model_dump()
+
+
+def test_ambiguous_question_returns_clarification_without_retrieval() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("Ambiguous questions must be clarified before retrieval")
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+        ).answer(ChatRequest(question="라이트커튼 관련해서 알려줘."))
+    )
+
+    assert response.answer_type == "clarification_required"
+    assert response.clarification_question
+    assert response.sources == []
+    assert response.checklist_items == []
+
+
+def test_maintenance_qwen_structure_and_checklist_are_source_validated() -> None:
+    class StructuredQwenClient:
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            return QueryAnalysis(
+                question_intent="maintenance_guide",
+                intent_confidence=0.98,
+            )
+
+        async def answer(
+            self,
+            request: ChatRequest,
+            retrieval_response: ChatResponse,
+        ) -> QwenGeneratedAnswer:
+            details = MaintenanceAnswerDetails(
+                summary=MaintenanceSummary(
+                    status="안전관리자 확인 필요",
+                    risk_level="높음",
+                    risk_basis=[
+                        EvidenceBackedItem(
+                            content="매뉴얼 설치 전 확인사항",
+                            evidence_chunk_ids=["chunk-1"],
+                        )
+                    ],
+                    core_warning="설치 전 제조사 기준을 확인하세요.",
+                ),
+                pre_checks=[
+                    EvidenceBackedItem(
+                        content="설치 위치를 확인합니다.",
+                        evidence_chunk_ids=["chunk-1"],
+                    )
+                ],
+                hazards=[
+                    MaintenanceHazard(
+                        name="오검출",
+                        content="설치 기준을 벗어나면 검출 성능이 저하될 수 있습니다.",
+                        evidence_chunk_ids=["chunk-1"],
+                    )
+                ],
+                manual_steps=[
+                    EvidenceBackedItem(
+                        content="매뉴얼의 설치 위치 기준을 적용합니다.",
+                        evidence_chunk_ids=["chunk-1"],
+                    )
+                ],
+                stop_conditions=[
+                    EvidenceBackedItem(
+                        content="모델별 설치 기준을 확인할 수 없을 때 중지합니다.",
+                        evidence_chunk_ids=["chunk-1"],
+                    )
+                ],
+                evidence_chunk_ids=["chunk-1"],
+            )
+            return QwenGeneratedAnswer(
+                answer="구조화된 유지보수 안내",
+                model="qwen-test",
+                structured_answer=details,
+                checklist_items=(
+                    ChatChecklistItem(
+                        content="설치 위치 기준 확인",
+                        sequence=1,
+                        evidence_chunk_ids=["chunk-1"],
+                    ),
+                ),
+                used_source_ids=("chunk-1",),
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answer": "검색 기본 답변",
+                "sources": [_grounded_source()],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+            qwen_client=StructuredQwenClient(),  # type: ignore[arg-type]
+            qwen_enabled=True,
+            qwen_allow_company_context=True,
+        ).answer(ChatRequest(question="라이트커튼 설치시 주의사항을 알려줘."))
+    )
+
+    assert response.answer_type == "maintenance_guide"
+    assert response.structured_answer is not None
+    assert response.structured_answer.answer_type == "maintenance_guide"
+    assert len(response.structured_answer.hazards) == 1
+    assert len(response.structured_answer.stop_conditions) == 1
+    assert [item.content for item in response.checklist_items] == ["설치 위치 기준 확인"]
+
+
+def test_invalid_qwen_source_reference_falls_back_without_500() -> None:
+    class InvalidStructuredQwenClient:
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            return QueryAnalysis(question_intent="component_info")
+
+        async def answer(
+            self,
+            request: ChatRequest,
+            retrieval_response: ChatResponse,
+        ) -> QwenGeneratedAnswer:
+            return QwenGeneratedAnswer(
+                answer="검증되지 않은 구조",
+                model="qwen-test",
+                used_source_ids=("invented-chunk",),
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answer": "검증된 검색 fallback",
+                "sources": [_grounded_source("public_guide")],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+            qwen_client=InvalidStructuredQwenClient(),  # type: ignore[arg-type]
+            qwen_enabled=True,
+        ).answer(ChatRequest(question="라이트커튼이 무슨 장비야?"))
+    )
+
+    assert response.answer == "검증된 검색 fallback"
+    assert response.answer_type == "component_info"
+    assert "검색되지 않은 출처" in (response.warning or "")
+
+
+def test_visual_question_uses_local_generic_shape_without_document_evidence() -> None:
+    response = asyncio.run(
+        ChatService(service_url=None, openai_enabled=False).answer(
             ChatRequest.model_validate(
                 {
                     "question": "그럼 이건 뭐야?",
@@ -649,3 +870,4 @@ def test_visual_question_abstains_when_no_verified_category_exists() -> None:
     assert "확인하지 못했습니다" in response.answer
     assert "임의의 제품명이나 용도를 안내하지 않습니다" in response.answer
     assert "베어링" not in response.answer
+ 

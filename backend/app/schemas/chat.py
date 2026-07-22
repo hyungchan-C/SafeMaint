@@ -1,7 +1,23 @@
-from typing import Literal
+from datetime import datetime
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
+
+
+QuestionIntent = Literal[
+    "document_qa",
+    "maintenance_guide",
+    "component_info",
+    "clarification_required",
+]
+AnswerType = Literal[
+    "document_qa",
+    "maintenance_guide",
+    "component_info",
+    "no_evidence",
+    "clarification_required",
+]
 
 
 class ChatContext(BaseModel):
@@ -24,6 +40,9 @@ class ChatContext(BaseModel):
 
 
 class QueryAnalysis(BaseModel):
+    question_intent: QuestionIntent | None = None
+    intent_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    clarification_question: str | None = Field(default=None, max_length=500)
     occurrence_type: str | None = None
     work_type: str | None = None
     equipment: list[str] = Field(default_factory=list, max_length=20)
@@ -57,6 +76,7 @@ class RetrievalAccessScope(BaseModel):
 
 class ChatSource(BaseModel):
     document_id: str
+    document_version_id: str | None = None
     chunk_id: str
     title: str
     source_type: str
@@ -82,8 +102,123 @@ class AccidentClassification(BaseModel):
     adapter: str
 
 
+class DocumentOverview(BaseModel):
+    filename: str | None = None
+    document_type: str | None = None
+    manufacturer: str | None = None
+    model_name: str | None = None
+    version: str | None = None
+    authored_at: str | None = None
+
+
+class EvidenceBackedItem(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+    evidence_chunk_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
+class EvidenceConflict(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+    evidence_chunk_ids: list[str] = Field(min_length=2, max_length=20)
+
+    @field_validator("evidence_chunk_ids")
+    @classmethod
+    def require_two_distinct_sources(cls, value: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(item for item in value if item))
+        if len(normalized) < 2:
+            raise ValueError("a conflict requires at least two distinct evidence chunks")
+        return normalized
+
+
+class MaintenanceHazard(EvidenceBackedItem):
+    name: str = Field(min_length=1, max_length=300)
+
+
+class MaintenanceSummary(BaseModel):
+    status: Literal["안전관리자 확인 필요", "작업 중지 권고", "근거 부족"]
+    risk_level: Literal["낮음", "보통", "높음", "매우 높음", "판단 불가"]
+    risk_basis: list[EvidenceBackedItem] = Field(default_factory=list, max_length=10)
+    core_warning: str = Field(min_length=1, max_length=2000)
+
+
+class DocumentAnswerDetails(BaseModel):
+    answer_type: Literal["document_qa"] = "document_qa"
+    overview: DocumentOverview = Field(default_factory=DocumentOverview)
+    main_contents: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
+    related_equipment: list[str] = Field(default_factory=list, max_length=20)
+    related_components: list[str] = Field(default_factory=list, max_length=20)
+    supported_tasks: list[str] = Field(default_factory=list, max_length=20)
+    evidence_chunk_ids: list[str] = Field(default_factory=list, max_length=50)
+    conflicts: list[EvidenceConflict] = Field(default_factory=list, max_length=10)
+    unverified_information: list[str] = Field(default_factory=list, max_length=20)
+
+
+class MaintenanceAnswerDetails(BaseModel):
+    answer_type: Literal["maintenance_guide"] = "maintenance_guide"
+    summary: MaintenanceSummary
+    pre_checks: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
+    hazards: list[MaintenanceHazard] = Field(default_factory=list, max_length=3)
+    manual_steps: list[EvidenceBackedItem] = Field(default_factory=list, max_length=30)
+    stop_conditions: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
+    related_regulations_and_incidents: list[EvidenceBackedItem] = Field(
+        default_factory=list, max_length=20
+    )
+    evidence_chunk_ids: list[str] = Field(default_factory=list, max_length=50)
+    conflicts: list[EvidenceConflict] = Field(default_factory=list, max_length=10)
+    additional_information_needed: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ComponentAnswerDetails(BaseModel):
+    answer_type: Literal["component_info"] = "component_info"
+    one_line_description: str = Field(min_length=1, max_length=2000)
+    main_roles: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
+    usage_locations: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
+    precautions: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
+    evidence_chunk_ids: list[str] = Field(default_factory=list, max_length=50)
+    conflicts: list[EvidenceConflict] = Field(default_factory=list, max_length=10)
+    additional_information_needed: list[str] = Field(default_factory=list, max_length=20)
+
+
+class NoEvidenceDetails(BaseModel):
+    answer_type: Literal["no_evidence"] = "no_evidence"
+    message: str
+    required_information: list[str] = Field(default_factory=list, max_length=20)
+    required_documents: list[str] = Field(default_factory=list, max_length=20)
+    work_safety_notice: str | None = None
+
+
+class ClarificationDetails(BaseModel):
+    answer_type: Literal["clarification_required"] = "clarification_required"
+    question: str
+    options: list[str] = Field(default_factory=list, max_length=10)
+
+
+StructuredAnswer = Annotated[
+    DocumentAnswerDetails
+    | MaintenanceAnswerDetails
+    | ComponentAnswerDetails
+    | NoEvidenceDetails
+    | ClarificationDetails,
+    Field(discriminator="answer_type"),
+]
+
+
+class ChatChecklistItem(BaseModel):
+    id: UUID | None = None
+    content: str = Field(min_length=1, max_length=2000)
+    sequence: int = Field(ge=1)
+    is_required: bool = True
+    is_completed: bool = False
+    completed_by_user_id: UUID | None = None
+    completed_at: datetime | None = None
+    evidence_chunk_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
 class ChatResponse(BaseModel):
     answer: str
+    answer_type: AnswerType | None = None
+    structured_answer: StructuredAnswer | None = None
+    checklist_items: list[ChatChecklistItem] = Field(default_factory=list)
+    clarification_question: str | None = None
     sources: list[ChatSource] = Field(default_factory=list)
     retrieval_mode: Literal["bge-m3", "hybrid", "safety-fallback"]
     generation_mode: Literal["openai", "template", "qwen"] = "template"

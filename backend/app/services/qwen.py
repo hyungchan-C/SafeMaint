@@ -4,15 +4,28 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from pydantic import TypeAdapter, ValidationError
 
 from app.core.config import settings
-from app.schemas.chat import ChatRequest, ChatResponse, QueryAnalysis
+from app.schemas.chat import (
+    ChatChecklistItem,
+    ChatRequest,
+    ChatResponse,
+    QueryAnalysis,
+    StructuredAnswer,
+)
+
+
+_STRUCTURED_ANSWER_ADAPTER = TypeAdapter(StructuredAnswer)
 
 
 @dataclass(frozen=True, slots=True)
 class QwenGeneratedAnswer:
     answer: str
     model: str | None = None
+    structured_answer: StructuredAnswer | None = None
+    checklist_items: tuple[ChatChecklistItem, ...] = ()
+    used_source_ids: tuple[str, ...] = ()
 
 
 class QwenClient:
@@ -61,9 +74,18 @@ class QwenClient:
             except ValueError:
                 return None
         occurrence_type = str(body.get("occurrence_type") or "").strip()
-        if not occurrence_type:
+        question_intent = str(body.get("question_intent") or "").strip() or None
+        if not occurrence_type and not question_intent:
             return None
-        return QueryAnalysis(occurrence_type=occurrence_type)
+        try:
+            return QueryAnalysis(
+                occurrence_type=occurrence_type or None,
+                question_intent=question_intent,
+                intent_confidence=body.get("intent_confidence"),
+                clarification_question=body.get("clarification_question"),
+            )
+        except ValueError:
+            return QueryAnalysis(occurrence_type=occurrence_type or None)
 
     async def answer(
         self,
@@ -88,6 +110,7 @@ class QwenClient:
                             if request.analysis
                             else None
                         ),
+                        "answer_type": retrieval_response.answer_type,
                         "sources": [
                             self._source_payload(source)
                             for source in retrieval_response.sources
@@ -103,7 +126,33 @@ class QwenClient:
         if not answer:
             return None
         model = str(body.get("model") or "").strip() or None
-        return QwenGeneratedAnswer(answer=answer, model=model)
+        structured_answer = None
+        if isinstance(body.get("structured_answer"), dict):
+            try:
+                structured_answer = _STRUCTURED_ANSWER_ADAPTER.validate_python(
+                    body["structured_answer"]
+                )
+            except ValidationError:
+                structured_answer = None
+        checklist_items: list[ChatChecklistItem] = []
+        if isinstance(body.get("checklist_items"), list):
+            for item in body["checklist_items"]:
+                try:
+                    checklist_items.append(ChatChecklistItem.model_validate(item))
+                except ValidationError:
+                    continue
+        used_source_ids = tuple(
+            str(value)
+            for value in body.get("used_source_ids", [])
+            if isinstance(value, str) and value.strip()
+        )
+        return QwenGeneratedAnswer(
+            answer=answer,
+            model=model,
+            structured_answer=structured_answer,
+            checklist_items=tuple(checklist_items),
+            used_source_ids=used_source_ids,
+        )
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -127,6 +176,7 @@ class QwenClient:
     def _source_payload(source: Any) -> dict[str, Any]:
         return {
             "document_id": source.document_id,
+            "document_version_id": source.document_version_id,
             "chunk_id": source.chunk_id,
             "title": source.title,
             "source_type": source.source_type,
