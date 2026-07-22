@@ -46,6 +46,9 @@ class Settings:
     worker_stale_after_seconds: float = float(
         getenv("DOCUMENT_WORKER_STALE_AFTER_SECONDS", "300")
     )
+    worker_heartbeat_seconds: float = float(
+        getenv("DOCUMENT_WORKER_HEARTBEAT_SECONDS", "30")
+    )
 
 
 settings = Settings()

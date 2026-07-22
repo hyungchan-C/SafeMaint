@@ -1,4 +1,6 @@
-FROM python:3.13-slim AS base
+# Docling 2.113 and the CPU Torch wheels below have stable support on Python 3.11.
+# Keep torch/torchvision paired; mismatched wheels make the worker image fail to build.
+FROM python:3.11-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -7,9 +9,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+      libgl1 \
+      libglib2.0-0 \
+      libxcb1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY ai/requirements-rag.txt ./requirements-rag.txt
 RUN python -m pip install --no-cache-dir \
-      "torch==2.13.0+cpu" \
+      "torch==2.6.0+cpu" \
+      "torchvision==0.21.0+cpu" \
       --index-url https://download.pytorch.org/whl/cpu \
     && python -m pip install --no-cache-dir -r requirements-rag.txt
 

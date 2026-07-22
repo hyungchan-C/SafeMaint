@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -12,10 +15,20 @@ from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from preprocessing.pdf_pipeline import chunk_text as _shared_chunk_text
+from preprocessing.pdf_pipeline import (
+    DoclingConversionError,
+    DoclingDeploymentError,
+    DoclingRuntimeSettings,
+    PdfProcessingLimitError,
+    chunk_text as _shared_chunk_text,
+    validate_docling_runtime,
+)
 from rag_service.config import settings
 from rag_service.pdf_processing import ProcessedChunk, process_document_pdf
 from rag_service.retrieval import BgeM3Embedder, psycopg_database_url
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +262,11 @@ def _process(job: ClaimedJob):
         ),
         chunk_size=settings.worker_chunk_characters,
         overlap=settings.worker_chunk_overlap,
+        log_context={
+            "document_id": job.document_id,
+            "document_version_id": job.version_id,
+            "original_filename": job.original_filename,
+        },
     )
 
 
@@ -280,6 +298,7 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
             "The PDF is image-only and local OCR is required.",
             version_status="ocr_required",
             retryable=False,
+            processing_metadata=processed.processing_metadata,
         )
         return
     if processed.kind == "empty":
@@ -287,6 +306,7 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
             job,
             "The PDF has no extractable text or image content.",
             retryable=False,
+            processing_metadata=processed.processing_metadata,
         )
         return
 
@@ -338,10 +358,16 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
                 """
                 UPDATE document_versions
                 SET status = 'review_required', page_count = %s,
-                    failure_reason = NULL, updated_at = %s
+                    failure_reason = NULL, processing_metadata = %s,
+                    updated_at = %s
                 WHERE id = %s
                 """,
-                (processed.page_count, now, job.version_id),
+                (
+                    processed.page_count,
+                    Jsonb(processed.processing_metadata),
+                    now,
+                    job.version_id,
+                ),
             )
             cursor.execute(
                 """
@@ -370,9 +396,34 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
                     "attempt": job.attempts,
                     "chunk_count": len(processed.chunks),
                     "page_count": processed.page_count,
+                    **_processing_audit_payload(processed.processing_metadata),
                 },
             )
         connection.commit()
+    log_method = logger.warning if processed.processing_metadata.get("fallback_used") else logger.info
+    log_method(
+        "PDF processing completed document_id=%s document_version_id=%s "
+        "filename=%s extractor=%s extractor_version=%s fallback_used=%s ocr_used=%s",
+        job.document_id,
+        job.version_id,
+        job.original_filename,
+        processed.processing_metadata.get("extractor"),
+        processed.processing_metadata.get("extractor_version"),
+        bool(processed.processing_metadata.get("fallback_used")),
+        bool(processed.processing_metadata.get("ocr_used")),
+    )
+
+
+def _processing_audit_payload(
+    processing_metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    metadata = processing_metadata or {}
+    return {
+        "extractor": metadata.get("extractor"),
+        "extractor_version": metadata.get("extractor_version"),
+        "fallback_used": bool(metadata.get("fallback_used")),
+        "ocr_used": bool(metadata.get("ocr_used")),
+    }
 
 
 def _mark_final_failure(
@@ -381,14 +432,23 @@ def _mark_final_failure(
     reason: str,
     version_status: str,
     now: datetime,
+    processing_metadata: dict[str, Any] | None = None,
 ) -> None:
     cursor.execute(
         """
         UPDATE document_versions
-        SET status = %s, failure_reason = %s, updated_at = %s
+        SET status = %s, failure_reason = %s,
+            processing_metadata = COALESCE(%s, processing_metadata),
+            updated_at = %s
         WHERE id = %s AND status <> 'deleted'
         """,
-        (version_status, reason, now, job.version_id),
+        (
+            version_status,
+            reason,
+            Jsonb(processing_metadata) if processing_metadata is not None else None,
+            now,
+            job.version_id,
+        ),
     )
     cursor.execute(
         """
@@ -413,7 +473,11 @@ def _mark_final_failure(
         event_type="DOCUMENT_PROCESSING_FAILED",
         job=job,
         success=False,
-        payload={"reason": reason, "attempts": job.attempts},
+        payload={
+            "reason": reason,
+            "attempts": job.attempts,
+            **_processing_audit_payload(processing_metadata),
+        },
     )
 
 
@@ -423,6 +487,7 @@ def mark_failed(
     *,
     version_status: str = "failed",
     retryable: bool = True,
+    processing_metadata: dict[str, Any] | None = None,
 ) -> None:
     safe_reason = reason[:1000]
     now = datetime.now(timezone.utc)
@@ -430,7 +495,14 @@ def mark_failed(
     with _connect() as connection:
         with connection.cursor() as cursor:
             if not should_retry:
-                _mark_final_failure(cursor, job, safe_reason, version_status, now)
+                _mark_final_failure(
+                    cursor,
+                    job,
+                    safe_reason,
+                    version_status,
+                    now,
+                    processing_metadata,
+                )
             else:
                 next_attempt_at = now + timedelta(
                     seconds=settings.worker_retry_delay_seconds
@@ -449,10 +521,19 @@ def mark_failed(
                 cursor.execute(
                     """
                     UPDATE document_versions
-                    SET status = 'pending', failure_reason = %s, updated_at = %s
+                    SET status = 'pending', failure_reason = %s,
+                        processing_metadata = COALESCE(%s, processing_metadata),
+                        updated_at = %s
                     WHERE id = %s AND status <> 'deleted'
                     """,
-                    (safe_reason, now, job.version_id),
+                    (
+                        safe_reason,
+                        Jsonb(processing_metadata)
+                        if processing_metadata is not None
+                        else None,
+                        now,
+                        job.version_id,
+                    ),
                 )
                 cursor.execute(
                     """
@@ -472,12 +553,115 @@ def mark_failed(
                         "reason": safe_reason,
                         "attempts": job.attempts,
                         "next_attempt_at": next_attempt_at.isoformat(),
+                        **_processing_audit_payload(processing_metadata),
                     },
                 )
         connection.commit()
 
 
+def _failure_processing_metadata(error: BaseException) -> dict[str, Any] | None:
+    if isinstance(error, (DoclingDeploymentError, DoclingConversionError)):
+        return {
+            "extractor": "docling",
+            "extractor_version": None,
+            "fallback_used": False,
+            "fallback_reason": f"{type(error).__name__}: {str(error)[:400]}",
+            "ocr_used": False,
+        }
+    if isinstance(error, PdfProcessingLimitError):
+        return {
+            "extractor": "none",
+            "extractor_version": None,
+            "fallback_used": False,
+            "fallback_reason": f"{type(error).__name__}: {str(error)[:400]}",
+            "ocr_used": False,
+        }
+    return None
+
+
+def _update_heartbeat(job: ClaimedJob) -> None:
+    now = datetime.now(timezone.utc)
+    with _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE document_processing_jobs
+                SET heartbeat_at = %s, updated_at = %s
+                WHERE id = %s AND status = 'processing'
+                """,
+                (now, now, job.job_id),
+            )
+        connection.commit()
+
+
+@contextmanager
+def _job_heartbeat(job: ClaimedJob):
+    interval = max(
+        1.0,
+        min(
+            settings.worker_heartbeat_seconds,
+            max(1.0, settings.worker_stale_after_seconds / 3),
+        ),
+    )
+    stop_event = Event()
+
+    def heartbeat_loop() -> None:
+        while not stop_event.wait(interval):
+            try:
+                _update_heartbeat(job)
+            except Exception:
+                logger.exception(
+                    "Worker heartbeat update failed document_id=%s "
+                    "document_version_id=%s filename=%s",
+                    job.document_id,
+                    job.version_id,
+                    job.original_filename,
+                )
+
+    thread = Thread(
+        target=heartbeat_loop,
+        name=f"document-heartbeat-{job.job_id}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        thread.join(timeout=min(interval, 5.0))
+
+
 def run_forever() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    docling_runtime = DoclingRuntimeSettings.from_env()
+    try:
+        docling_version = validate_docling_runtime(docling_runtime)
+    except DoclingDeploymentError:
+        if docling_runtime.required:
+            logger.critical(
+                "Docling worker preflight failed; worker will not start.",
+                exc_info=True,
+            )
+            raise
+        logger.warning(
+            "Docling worker preflight failed but DOCLING_REQUIRED=false; "
+            "document processing may use PyMuPDF fallback.",
+            exc_info=True,
+        )
+    else:
+        logger.info(
+            "Docling worker preflight passed version=%s artifacts_path=%s "
+            "offline=%s max_file_bytes=%s max_pages=%s num_threads=%s",
+            docling_version,
+            docling_runtime.artifacts_path or "default",
+            docling_runtime.offline,
+            docling_runtime.max_file_bytes,
+            docling_runtime.max_pages,
+            docling_runtime.num_threads,
+        )
     embedder = BgeM3Embedder(settings)
     while True:
         try:
@@ -487,9 +671,21 @@ def run_forever() -> None:
                 time.sleep(settings.worker_poll_seconds)
                 continue
             try:
-                complete_job(job, embedder)
+                with _job_heartbeat(job):
+                    complete_job(job, embedder)
             except Exception as exc:
-                mark_failed(job, f"{type(exc).__name__}: {exc}")
+                logger.exception(
+                    "PDF processing failed document_id=%s document_version_id=%s "
+                    "filename=%s",
+                    job.document_id,
+                    job.version_id,
+                    job.original_filename,
+                )
+                mark_failed(
+                    job,
+                    f"{type(exc).__name__}: {exc}",
+                    processing_metadata=_failure_processing_metadata(exc),
+                )
         except KeyboardInterrupt:
             return
         except Exception:

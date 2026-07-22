@@ -93,7 +93,7 @@ class Settings:
     )
     document_storage_dir: str = getenv("DOCUMENT_STORAGE_DIR", "/data/documents")
     document_max_upload_bytes: int = int(
-        getenv("DOCUMENT_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))
+        getenv("DOCUMENT_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024))
     )
     package_storage_dir: str = getenv("PACKAGE_STORAGE_DIR", "/data/packages")
     public_package_max_bytes: int = int(
