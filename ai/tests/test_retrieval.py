@@ -44,8 +44,44 @@ def test_search_text_combines_context_without_access_scope_content() -> None:
 
     query = retriever.build_search_query(request)
 
-    assert normalize_text(query) == "컨베이어 CV-203 베어링 교체 절차"
+    assert normalize_text(query) == "베어링 교체 절차"
     assert request.access_scope.site_ids[0] not in query
+
+
+def test_specific_question_excludes_unrelated_form_context() -> None:
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "라이트커튼 설치시 주의사항",
+            "context": {
+                "equipment_name": "컨베이어 CV-203",
+                "component_name": "벨트",
+                "task_type": "이물질 제거",
+                "task_description": "컨베이어 벨트에 낀 이물질을 제거합니다.",
+            },
+        }
+    )
+    retriever = PgvectorRetriever(Settings(), embedder=object())  # type: ignore[arg-type]
+
+    query = retriever.build_search_query(request)
+
+    assert query == "라이트커튼 설치시 주의사항"
+    assert "컨베이어" not in query
+    assert "이물질" not in query
+
+
+def test_classifier_label_does_not_override_specific_question_topic() -> None:
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "베어링 교체작업",
+            "analysis": {
+                "occurrence_type": "끼임",
+                "search_keywords": ["베어링", "교체작업"],
+            },
+        }
+    )
+    retriever = PgvectorRetriever(Settings(), embedder=object())  # type: ignore[arg-type]
+
+    assert retriever.build_search_query(request) == "베어링 교체작업"
 
 
 def test_default_access_scope_is_strict_public_only() -> None:

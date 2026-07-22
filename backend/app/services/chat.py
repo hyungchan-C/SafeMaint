@@ -20,14 +20,11 @@ from app.services.accident_classifier import (
     AccidentClassifierError,
 )
 from app.services.ai import AIConfigurationError, AIService
-from app.services.qwen import QwenClient
-from app.services.safety_guidance import format_safety_answer
-
-
-RAG_UNAVAILABLE_WARNING = (
-    "문서 검색 서비스에 연결하지 못해 공통 안전수칙만 표시합니다. "
-    "근거 문서가 없으므로 작업 승인 판단에 사용하지 마세요."
+from app.services.evidence_policy import (
+    RAG_UNAVAILABLE_WARNING,
+    format_no_evidence_answer,
 )
+from app.services.qwen import QwenClient
 ANALYZER_FALLBACK_WARNING = (
     "상황 분석 모델을 사용할 수 없어 입력값 기반 검색어로 안전하게 대체했습니다."
 )
@@ -344,21 +341,7 @@ class ChatService:
 
     @staticmethod
     def _fallback_analysis(request: ChatRequest) -> QueryAnalysis:
-        context = request.context
-        raw_keywords = " ".join(
-            value
-            for value in (
-                context.equipment_name,
-                context.manufacturer,
-                context.model_number,
-                context.component_name,
-                context.task_type,
-                context.energy_source,
-                context.task_description,
-                request.question,
-            )
-            if value
-        )
+        raw_keywords = request.question
         keywords = list(
             dict.fromkeys(
                 token.casefold()
@@ -366,13 +349,7 @@ class ChatService:
                 if len(token) >= 2
             )
         )[:30]
-        return QueryAnalysis(
-            work_type=context.task_type,
-            equipment=[context.equipment_name] if context.equipment_name else [],
-            component=[context.component_name] if context.component_name else [],
-            energy_sources=[context.energy_source] if context.energy_source else [],
-            search_keywords=keywords,
-        )
+        return QueryAnalysis(search_keywords=keywords)
 
     @staticmethod
     def _merge_qwen_analysis(
@@ -440,20 +417,8 @@ class ChatService:
 
     @staticmethod
     def _fallback(request: ChatRequest) -> ChatResponse:
-        context_text = " ".join(
-            value
-            for value in (
-                request.context.equipment_name,
-                request.context.component_name,
-                request.context.task_type,
-                request.context.energy_source,
-                request.context.task_description,
-                request.question,
-            )
-            if value
-        )
         return ChatResponse(
-            answer=format_safety_answer(context_text),
+            answer=format_no_evidence_answer(),
             sources=[],
             retrieval_mode="safety-fallback",
             warning=RAG_UNAVAILABLE_WARNING,

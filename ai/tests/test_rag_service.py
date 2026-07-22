@@ -51,7 +51,7 @@ def test_search_query_contains_equipment_context() -> None:
         }
     )
 
-    assert retriever.build_search_query(request) == "컨베이어 CV-203 벨트 청소 청소법"
+    assert retriever.build_search_query(request) == "청소법 컨베이어 CV-203 벨트 청소"
 
 
 def test_rag_scope_uses_parameters_instead_of_source_type_sql_literals() -> None:
@@ -93,7 +93,7 @@ def test_grounded_excerpt_answer_contains_manual_text_and_page() -> None:
     assert "12쪽" in answer
 
 
-def test_chat_returns_tbm_guidance_when_retrieval_has_no_sources(
+def test_chat_returns_topic_neutral_message_when_retrieval_has_no_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -119,7 +119,8 @@ def test_chat_returns_tbm_guidance_when_retrieval_has_no_sources(
 
     assert response.sources == []
     assert response.retrieval_mode == "hybrid"
-    assert "TBM 체크리스트" in response.answer
-    assert "[ ]" in response.answer
-    assert "작업 중지 기준" in response.answer
-    assert response.warning == "검색 범위에서 질문 주제와 일치하는 근거를 찾지 못했습니다."
+    assert "검증 가능한 문서 근거" in response.answer
+    assert "컨베이어" not in response.answer
+    assert "베어링" not in response.answer
+    assert "TBM 체크리스트" not in response.answer
+    assert response.warning == "검색 범위에서 질문과 일치하는 검증 가능한 문서 근거를 찾지 못했습니다."

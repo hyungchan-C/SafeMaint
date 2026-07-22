@@ -29,7 +29,7 @@ COPY ai/requirements-dev.txt ./requirements-dev.txt
 RUN python -m pip install --no-cache-dir -r requirements-dev.txt
 COPY ai ./ai
 COPY backend/app ./backend/app
-COPY backend/app/services/safety_guidance.py ./safety_guidance.py
+COPY backend/app/services/evidence_policy.py ./evidence_policy.py
 ENV PYTHONPATH=/app:/app/ai
 CMD ["python", "-m", "pytest", "-q", "/app/ai/tests"]
 
@@ -37,7 +37,7 @@ FROM base AS runtime
 
 COPY ai/rag_service ./rag_service
 COPY ai/preprocessing ./preprocessing
-COPY backend/app/services/safety_guidance.py ./safety_guidance.py
+COPY backend/app/services/evidence_policy.py ./evidence_policy.py
 
 EXPOSE 8010
 

@@ -15,7 +15,7 @@ from app.services.qwen import QwenGeneratedAnswer
 from app.services.accident_classifier import AccidentClassifierClient
 
 
-def test_chat_service_returns_task_specific_fallback() -> None:
+def test_chat_service_returns_topic_neutral_fallback_without_evidence() -> None:
     service = ChatService(service_url=None, openai_enabled=False)
     response = asyncio.run(
         service.answer(
@@ -33,13 +33,14 @@ def test_chat_service_returns_task_specific_fallback() -> None:
 
     assert response.retrieval_mode == "safety-fallback"
     assert response.sources == []
-    assert "베어링 교체" in response.answer
-    assert "LOTO" in response.answer
-    assert "TBM" in response.answer
+    assert "검증 가능한 문서 근거" in response.answer
+    assert "베어링 교체" not in response.answer
+    assert "LOTO" not in response.answer
+    assert "TBM" not in response.answer
     assert response.warning
 
 
-def test_chat_service_returns_tbm_checklist_without_manual_pdf() -> None:
+def test_chat_service_does_not_invent_tbm_checklist_without_manual_pdf() -> None:
     service = ChatService(service_url=None, openai_enabled=False)
     response = asyncio.run(
         service.answer(
@@ -58,11 +59,11 @@ def test_chat_service_returns_tbm_checklist_without_manual_pdf() -> None:
     )
 
     assert response.retrieval_mode == "safety-fallback"
-    assert "컨베이어 부품 교체 작업" in response.answer
-    assert "TBM 체크리스트" in response.answer
-    assert "[ ]" in response.answer
-    assert "제조사 PDF/매뉴얼" in response.answer
-    assert "작업 승인이 아닙니다" in response.answer
+    assert "검증 가능한 문서 근거" in response.answer
+    assert "컨베이어 부품 교체 작업" not in response.answer
+    assert "TBM 체크리스트" not in response.answer
+    assert "[ ]" not in response.answer
+    assert "관련 문서를 등록" in response.answer
 
 
 def test_chat_service_accepts_grounded_rag_response() -> None:
@@ -203,7 +204,7 @@ def test_chat_service_does_not_call_openai_without_retrieved_evidence() -> None:
 
     assert response.generation_mode == "template"
     assert response.retrieval_mode == "safety-fallback"
-    assert "근거 문서가 없으므로" in (response.warning or "")
+    assert "문서 검색 서비스에 연결하지 못했습니다" in (response.warning or "")
 
 
 def test_chat_api_uses_injected_service() -> None:
@@ -259,7 +260,7 @@ def test_analyzer_failure_sends_deterministic_fallback_to_retrieval() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        assert body["analysis"]["component"] == ["bearing"]
+        assert body["analysis"]["component"] == []
         assert "bearing" in body["analysis"]["search_keywords"]
         return httpx.Response(
             200,
@@ -400,6 +401,44 @@ def test_chat_service_uses_qwen_classification_and_answer() -> None:
     assert response.generation_mode == "qwen"
     assert response.model == "qwen-test"
     assert response.answer == "Qwen grounded answer [1]"
+
+
+def test_chat_service_does_not_ask_qwen_to_invent_answer_without_evidence() -> None:
+    class ClassificationOnlyQwenClient:
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            return QueryAnalysis(occurrence_type="caught-in")
+
+        async def answer(
+            self,
+            request: ChatRequest,
+            retrieval_response: ChatResponse,
+        ) -> QwenGeneratedAnswer:
+            raise AssertionError("Qwen answer generation requires retrieved evidence")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answer": "질문과 일치하는 검증 가능한 문서 근거를 찾지 못했습니다.",
+                "sources": [],
+                "retrieval_mode": "hybrid",
+                "warning": "no evidence",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+            qwen_client=ClassificationOnlyQwenClient(),  # type: ignore[arg-type]
+            qwen_enabled=True,
+        ).answer(ChatRequest(question="light curtain installation"))
+    )
+
+    assert response.generation_mode == "template"
+    assert response.sources == []
+    assert "검증 가능한 문서 근거" in response.answer
 
 
 def test_qwen_company_context_requires_explicit_allowance() -> None:

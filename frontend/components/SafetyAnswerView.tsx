@@ -18,6 +18,14 @@ const HEADING_TONES: Array<[RegExp, SectionTone]> = [
   [/근거|출처|추가\s*확인|부족한\s*근거/, "evidence"],
 ];
 
+function cleanInlineText(value: string): string {
+  return value
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/`(.+?)`/g, "$1")
+    .trim();
+}
+
 function cleanHeading(line: string): string | null {
   const trimmed = line.trim();
   const markdownHeading = trimmed.match(/^#{1,6}\s+(.+)$/);
@@ -32,7 +40,7 @@ function cleanHeading(line: string): string | null {
     ?? bracketHeading?.[1]
     ?? plainHeading?.[1]
     ?? shortColonHeading?.[1];
-  return value?.trim() || null;
+  return value ? cleanInlineText(value) || null : null;
 }
 
 function toneForHeading(title: string): SectionTone {
@@ -67,20 +75,33 @@ export function parseSafetyAnswer(answer: string): AnswerSection[] {
       continue;
     }
 
+    const checklistItem = trimmed.match(/^\[([ xX])\]\s*(.+)$/u);
     const listItem = trimmed.match(/^(?:(\d+)[.)]|[-*•✓✔☐☑])\s*(.+)$/u);
+    if (checklistItem?.[2]) {
+      recognizedStructure = true;
+      const previous = current.blocks.at(-1);
+      const marker = checklistItem[1].toLowerCase() === "x" ? "☑" : "☐";
+      const item = `${marker} ${cleanInlineText(checklistItem[2])}`;
+      if (previous?.kind === "list" && !previous.ordered) {
+        previous.items.push(item);
+      } else {
+        current.blocks.push({ kind: "list", ordered: false, items: [item] });
+      }
+      continue;
+    }
     if (listItem?.[2]) {
       recognizedStructure = true;
       const ordered = Boolean(listItem[1]);
       const previous = current.blocks.at(-1);
       if (previous?.kind === "list" && previous.ordered === ordered) {
-        previous.items.push(listItem[2].trim());
+        previous.items.push(cleanInlineText(listItem[2]));
       } else {
-        current.blocks.push({ kind: "list", ordered, items: [listItem[2].trim()] });
+        current.blocks.push({ kind: "list", ordered, items: [cleanInlineText(listItem[2])] });
       }
       continue;
     }
 
-    current.blocks.push({ kind: "paragraph", text: trimmed });
+    current.blocks.push({ kind: "paragraph", text: cleanInlineText(trimmed) });
   }
 
   const populated = sections.filter((section) => section.blocks.length > 0 || section.title);
@@ -99,6 +120,7 @@ export function parseSafetyAnswer(answer: string): AnswerSection[] {
 export default function SafetyAnswerView({ answer }: { answer: string }) {
   const sections = parseSafetyAnswer(answer);
   if (sections.length === 0) return null;
+  const alreadyHasDisclaimer = /작업\s*승인이\s*아닙니다/.test(answer);
 
   return (
     <div className="safety-answer-view">
@@ -123,9 +145,11 @@ export default function SafetyAnswerView({ answer }: { answer: string }) {
           })}
         </section>
       ))}
-      <p className="safety-answer-disclaimer">
-        이 안내는 작업 승인이 아닙니다. 현장 상태와 제조사 매뉴얼을 확인하고 안전관리자의 최종 확인 전에는 작업을 시작하지 마세요.
-      </p>
+      {!alreadyHasDisclaimer && (
+        <p className="safety-answer-disclaimer">
+          이 안내는 작업 승인이 아닙니다. 현장 상태와 제조사 매뉴얼을 확인하고 안전관리자의 최종 확인 전에는 작업을 시작하지 마세요.
+        </p>
+      )}
     </div>
   );
 }
