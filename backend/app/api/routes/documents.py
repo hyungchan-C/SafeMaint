@@ -2,7 +2,16 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -23,6 +32,7 @@ from app.db.models import (
 from app.db.session import get_db
 from app.schemas.documents import (
     ApproveDocumentResponse,
+    ReviewQueueDocumentSummary,
     UploadDocumentResponse,
     UserDocumentSummary,
 )
@@ -111,12 +121,101 @@ def list_my_documents(
                 document_id=document.id,
                 document_version_id=version.id,
                 original_filename=version.original_filename,
+                title=document.title,
                 version_number=version.version_number,
+                document_type_code=document.document_type_code,
+                source_type=document.source_type,
+                access_level=document.access_level,
+                lifecycle_status=document.lifecycle_status,
                 status=version.status,
                 is_active=version.is_active,
                 extractor=extractor,
                 fallback_used=fallback_used,
                 processing_warning=processing_warning,
+                failure_reason=version.failure_reason,
+                page_count=version.page_count,
+                created_at=version.created_at,
+            )
+        )
+    return summaries
+
+
+@router.get("/review-queue", response_model=list[ReviewQueueDocumentSummary])
+def list_document_review_queue(
+    current_user: Annotated[User, Depends(require_document_approve)],
+    db: Annotated[Session, Depends(get_db)],
+    include_processing: Annotated[bool, Query()] = False,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[ReviewQueueDocumentSummary]:
+    """Return each document's latest version that still needs operator attention."""
+
+    del current_user
+    visible_statuses = (
+        ("pending", "processing", "review_required")
+        if include_processing
+        else ("review_required",)
+    )
+    ranked_versions = (
+        select(
+            DocumentVersion.id.label("document_version_id"),
+            func.row_number()
+            .over(
+                partition_by=DocumentVersion.document_id,
+                order_by=(
+                    DocumentVersion.version_number.desc(),
+                    DocumentVersion.created_at.desc(),
+                    DocumentVersion.id.desc(),
+                ),
+            )
+            .label("queue_rank"),
+        )
+        .join(Document, Document.id == DocumentVersion.document_id)
+        .where(
+            Document.deleted_at.is_(None),
+            Document.lifecycle_status.in_(visible_statuses),
+            DocumentVersion.status.in_(visible_statuses),
+        )
+        .subquery()
+    )
+    rows = db.execute(
+        select(Document, DocumentVersion, User.name)
+        .join(DocumentVersion, DocumentVersion.document_id == Document.id)
+        .join(
+            ranked_versions,
+            ranked_versions.c.document_version_id == DocumentVersion.id,
+        )
+        .outerjoin(User, User.id == DocumentVersion.uploaded_by_user_id)
+        .where(ranked_versions.c.queue_rank == 1)
+        .order_by(DocumentVersion.created_at.desc(), DocumentVersion.id.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+
+    summaries: list[ReviewQueueDocumentSummary] = []
+    for document, version, uploader_name in rows:
+        extractor, fallback_used, processing_warning = _processing_summary(version)
+        summaries.append(
+            ReviewQueueDocumentSummary(
+                document_id=document.id,
+                document_version_id=version.id,
+                original_filename=version.original_filename,
+                title=document.title,
+                version_number=version.version_number,
+                document_type_code=document.document_type_code,
+                source_type=document.source_type,
+                access_level=document.access_level,
+                lifecycle_status=document.lifecycle_status,
+                version_status=version.status,
+                is_active=version.is_active,
+                uploaded_by_user_id=version.uploaded_by_user_id,
+                uploader_name=uploader_name,
+                created_at=version.created_at,
+                extractor=extractor,
+                fallback_used=fallback_used,
+                processing_warning=processing_warning,
+                failure_reason=version.failure_reason,
+                page_count=version.page_count,
             )
         )
     return summaries

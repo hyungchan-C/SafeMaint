@@ -39,14 +39,26 @@ class QwenEngine:
     def _classify_sync(self, request: ClassifyRequest) -> ClassifyResponse:
         labels = ", ".join(self.settings.occurrence_labels)
         system_prompt = (
-            "SafeMaint 사고유형 분류기입니다. 반드시 JSON만 출력하세요. "
+            "SafeMaint 질문목적 및 사고유형 분류기입니다. 반드시 JSON만 출력하세요. "
             "사고 과정, 분석 과정, 설명 문장은 출력하지 마세요."
         )
         user_prompt = (
             "Choose one occurrence_type from this label list:\n"
             f"{labels}\n\n"
+            "Choose question_intent by the user's purpose, not by a component noun:\n"
+            "- document_qa: asks what a selected PDF/document contains or requests a summary\n"
+            "- maintenance_guide: asks how to install, inspect, clean, repair, or replace\n"
+            "- component_info: asks definition, role, purpose, or where a component is used\n"
+            "- clarification_required: purpose is ambiguous\n"
+            "Examples:\n"
+            "이 PDF를 요약해줘 -> document_qa\n"
+            "'X가 무슨 장비야' -> component_info\n"
+            "'X 설치 방법' -> maintenance_guide\n"
+            "'X 관련해서 알려줘' -> clarification_required\n\n"
             "Return JSON exactly like "
-            '{"occurrence_type":"label","confidence":0.0}.\n\n'
+            '{"occurrence_type":"label","confidence":0.0,'
+            '"question_intent":"component_info","intent_confidence":0.0,'
+            '"clarification_question":null}.\n\n'
             f"Work context:\n{self._context_text(request.context)}\n\n"
             f"Question:\n{request.question}"
         )
@@ -56,11 +68,25 @@ class QwenEngine:
             max_new_tokens=self.settings.classify_max_new_tokens,
             disable_adapter=False,
         )
-        occurrence_type, confidence = self._parse_classification(text)
-        analysis = QueryAnalysis(occurrence_type=occurrence_type)
+        (
+            occurrence_type,
+            confidence,
+            question_intent,
+            intent_confidence,
+            clarification_question,
+        ) = self._parse_classification(text)
+        analysis = QueryAnalysis(
+            occurrence_type=occurrence_type,
+            question_intent=question_intent,
+            intent_confidence=intent_confidence,
+            clarification_question=clarification_question,
+        )
         return ClassifyResponse(
             occurrence_type=occurrence_type,
             confidence=confidence,
+            question_intent=question_intent,
+            intent_confidence=intent_confidence,
+            clarification_question=clarification_question,
             analysis=analysis,
             model=self.settings.base_model,
         )
@@ -68,39 +94,39 @@ class QwenEngine:
     def _answer_sync(self, request: AnswerRequest) -> AnswerResponse:
         evidence = self._evidence_text(request)
         system_prompt = (
-            "당신은 SafeMaint AI입니다. 한국어 최종 답변만 출력하세요. "
+            "당신은 SafeMaint AI입니다. 반드시 유효한 JSON 객체 하나만 출력하세요. "
             "사고 과정, Thinking Process, 분석 과정, 계획, 내부 추론은 절대 출력하지 마세요. "
-            "답변은 현재 근거로 가능한 안전관리/TBM 수준과, 근거가 없어 확정할 수 없는 상세 정비 절차를 분리하세요. "
-            "사실 주장, 안전 수칙, 법령, 사고사례, 매뉴얼, 수치에는 반드시 [1]처럼 근거 번호를 붙이세요. "
-            "제공된 근거만 사용하고, 제조사 PDF/매뉴얼 근거가 없으면 부품 분해 순서, 장력 해제 방법, "
-            "체결 토크, 정렬값, 시운전 기준을 임의로 만들지 마세요. "
-            "작업을 승인하지 말고 현장 상태 확인, 제조사 매뉴얼 확인, 안전관리자 최종 확인을 요구하세요."
-        )
-        answer_format = (
-            "아래 형식으로 답하세요.\n"
-            "1. 작업 판단: 현재 근거로 말할 수 있는 범위와 확정할 수 없는 범위를 구분합니다.\n"
-            "2. 주요 위험: 검색 근거에서 확인되는 위험을 씁니다.\n"
-            "3. TBM 체크리스트: [ ] 형식으로 작업 전 확인항목 5~8개를 씁니다.\n"
-            "4. 작업 중지 기준: 즉시 멈춰야 하는 조건을 씁니다.\n"
-            "5. 부족한 근거: 제조사 PDF/매뉴얼에서 추가 확인할 항목을 씁니다.\n"
-            "질문이 TBM 또는 체크리스트가 아니어도 정비, 교체, 청소, 점검 질문이면 TBM 체크리스트를 포함하세요. "
-            "상세 교체 절차 근거가 없으면 상세 절차를 확정하지 말고, 현재 근거로 가능한 안전 준비와 확인사항을 제시하세요."
+            "제공된 근거만 사용하고 파일명, 페이지, 법령, 사고사례, 절차를 만들지 마세요. "
+            "evidence_chunk_ids와 used_source_ids에는 제공된 chunk_id만 넣으세요. "
+            "작업 승인, 안전함, 그대로 작업해도 됨 같은 표현을 사용하지 마세요."
         )
         user_prompt = (
-            f"{answer_format}\n\n"
+            f"Answer type: {request.answer_type}\n"
+            f"{self._answer_format_for_type(request)}\n\n"
             f"작업 정보:\n{self._context_text(request.context)}\n\n"
             f"분석:\n{self._analysis_text(request.analysis)}\n\n"
             f"근거:\n{evidence}\n\n"
             f"질문:\n{request.question}"
         )
-        answer = self._generate(
+        generated = self._generate(
             system_prompt,
             user_prompt,
             max_new_tokens=self.settings.max_new_tokens,
             disable_adapter=True,
         )
+        parsed = self._extract_json(generated)
+        if parsed:
+            parsed["model"] = self.settings.base_model
+            parsed.setdefault("answer_type", request.answer_type)
+            try:
+                response = AnswerResponse.model_validate(parsed)
+                if response.answer_type == request.answer_type:
+                    return response
+            except ValueError:
+                pass
         return AnswerResponse(
-            answer=self._clean_answer_text(answer),
+            answer=self._clean_answer_text(generated),
+            answer_type=request.answer_type,
             model=self.settings.base_model,
         )
 
@@ -305,20 +331,98 @@ class QwenEngine:
         except StopIteration:
             return "cpu"
 
-    def _parse_classification(self, text: str) -> tuple[str, float | None]:
+    def _parse_classification(
+        self, text: str
+    ) -> tuple[
+        str,
+        float | None,
+        str | None,
+        float | None,
+        str | None,
+    ]:
         parsed = self._extract_json(text)
         if parsed:
             occurrence_type = str(parsed.get("occurrence_type") or "").strip()
             confidence = parsed.get("confidence")
+            question_intent = str(parsed.get("question_intent") or "").strip()
+            if question_intent not in {
+                "document_qa",
+                "maintenance_guide",
+                "component_info",
+                "clarification_required",
+            }:
+                question_intent = ""
+            intent_confidence = parsed.get("intent_confidence")
+            clarification_question = str(
+                parsed.get("clarification_question") or ""
+            ).strip() or None
             if occurrence_type:
                 try:
-                    return occurrence_type, float(confidence)
+                    confidence_value = float(confidence)
                 except (TypeError, ValueError):
-                    return occurrence_type, None
+                    confidence_value = None
+                try:
+                    intent_confidence_value = float(intent_confidence)
+                except (TypeError, ValueError):
+                    intent_confidence_value = None
+                return (
+                    occurrence_type,
+                    confidence_value,
+                    question_intent or None,
+                    intent_confidence_value,
+                    clarification_question,
+                )
         for label in self.settings.occurrence_labels:
             if label and label in text:
-                return label, None
-        return "기타", None
+                return label, None, None, None, None
+        return "기타", None, None, None, None
+
+    @staticmethod
+    def _answer_format_for_type(request: AnswerRequest) -> str:
+        common = (
+            "Top-level keys: answer, answer_type, structured_answer, "
+            "checklist_items, used_source_ids. answer is a Korean readable text version. "
+            "Every evidence-backed item has content and evidence_chunk_ids."
+        )
+        if request.answer_type == "document_qa":
+            return (
+                f"{common}\nstructured_answer keys: answer_type=document_qa, overview "
+                "(filename, document_type, manufacturer, model_name, version, authored_at), "
+                "main_contents, related_equipment, related_components, supported_tasks, "
+                "evidence_chunk_ids, conflicts, unverified_information. "
+                "checklist_items must be []. Do not add risk, stop conditions, or TBM."
+            )
+        if request.answer_type == "component_info":
+            return (
+                f"{common}\nstructured_answer keys: answer_type=component_info, "
+                "one_line_description, main_roles, usage_locations, precautions, "
+                "evidence_chunk_ids, conflicts, additional_information_needed. "
+                "checklist_items must be []. Do not add installation or maintenance steps."
+            )
+        manual_ids = [
+            source.chunk_id
+            for source in request.sources
+            if source.source_type.casefold()
+            in {"manual", "equipment_manual", "component_manual", "work_standard"}
+        ]
+        return (
+            f"{common}\nstructured_answer keys: answer_type=maintenance_guide, summary "
+            "(status, risk_level, risk_basis, core_warning), pre_checks, hazards(maximum 3), "
+            "manual_steps, stop_conditions, related_regulations_and_incidents, "
+            "evidence_chunk_ids, conflicts, additional_information_needed. "
+            "Allowed status: 안전관리자 확인 필요, 작업 중지 권고, 근거 부족. "
+            "Allowed risk_level: 낮음, 보통, 높음, 매우 높음, 판단 불가. "
+            "risk_basis is a list of evidence-backed items and every item must cite retrieved "
+            "chunk IDs. If no verified risk basis exists, risk_level must be 판단 불가 and "
+            "risk_basis must be []. "
+            "Only add a conflict when two or more retrieved chunks directly disagree, and "
+            "cite every conflicting chunk ID. Otherwise conflicts must be []. "
+            "Each checklist item has id=null, content, sequence, is_required, "
+            "is_completed=false, completed_by_user_id=null, completed_at=null, "
+            "evidence_chunk_ids. Never put checklist text inside answer as [ ]. "
+            f"Only these manual chunk IDs may support manual_steps: {manual_ids}. "
+            "If that list is empty, manual_steps must be [] and risk may be 판단 불가."
+        )
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any] | None:

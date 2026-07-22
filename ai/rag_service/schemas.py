@@ -32,6 +32,14 @@ class ChatContext(BaseModel):
 
 
 class QueryAnalysis(BaseModel):
+    question_intent: Literal[
+        "document_qa",
+        "maintenance_guide",
+        "component_info",
+        "clarification_required",
+    ] | None = None
+    intent_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    clarification_question: str | None = Field(default=None, max_length=500)
     occurrence_type: str | None = None
     work_type: str | None = None
     equipment: list[str] = Field(default_factory=list, max_length=20)
@@ -69,6 +77,7 @@ class InternalChatRequest(ChatRequest):
 
 class ChatSource(BaseModel):
     document_id: str
+    document_version_id: str | None = None
     chunk_id: str
     title: str
     source_type: str

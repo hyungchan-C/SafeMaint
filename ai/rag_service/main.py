@@ -18,7 +18,7 @@ app = FastAPI(
 retriever = PgvectorRetriever(settings)
 
 def _grounded_excerpt_answer(sources: list[ChatSource]) -> str:
-    lines = ["선택한 매뉴얼에서 질문과 관련된 다음 근거를 찾았습니다."]
+    lines = ["검색 범위에서 질문과 관련된 다음 검증 근거를 찾았습니다."]
     for index, source in enumerate(sources[:3], start=1):
         location_parts = []
         if source.document_version is not None:
