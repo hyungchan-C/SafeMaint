@@ -2,7 +2,13 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import type { AssessmentResponse } from "@/types/assessment";
+import SafetyAnswerView from "@/components/SafetyAnswerView";
+import TbmChecklist from "@/components/TbmChecklist";
+import type {
+  AssessmentResponse,
+  ChecklistItemResponse,
+  ChecklistItemUpdateResponse,
+} from "@/types/assessment";
 import type { CatalogCandidate, ChatMessage, ChatResponse } from "@/types/chat";
 import type { GpsCheckResponse, VirtualEquipment } from "@/types/gps";
 import { getApiBaseUrl } from "@/lib/api";
@@ -85,6 +91,7 @@ const STORAGE_KEYS = {
 type WorkspaceSnapshot = {
   manuals: string[];
   selectedDocumentIds: string[];
+  assessmentId: string | null;
 };
 
 type UserDocumentSummary = {
@@ -125,6 +132,28 @@ function removeStorage(key: string) {
 
 function getAccessToken(): string {
   return readStorage<StoredSession | null>(STORAGE_KEYS.session, null)?.accessToken ?? "";
+}
+
+async function apiErrorMessage(response: Response, fallback: string): Promise<string> {
+  const payload = await response.json().catch(() => null) as { detail?: string } | null;
+  if (response.status === 401) return "로그인이 만료되었습니다. 다시 로그인해 주세요.";
+  if (response.status === 403) return "이 위험성평가를 사용할 권한이 없습니다.";
+  return payload?.detail || fallback;
+}
+
+function normalizeAssessmentResponse(payload: AssessmentResponse): AssessmentResponse {
+  if (payload.checklist_items?.length) return payload;
+  return {
+    ...payload,
+    checklist_items: payload.tbm_checklist.map((content, index) => ({
+      id: null,
+      sequence: index + 1,
+      content,
+      is_completed: false,
+      completed_by_user_id: null,
+      completed_at: null,
+    })),
+  };
 }
 
 function refersToAttachedPhoto(question: string): boolean {
@@ -385,7 +414,11 @@ function WorkspaceScreen({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [form, setForm] = useState(initialForm);
   const [result, setResult] = useState<AssessmentResponse | null>(null);
+  const [savedAssessmentId, setSavedAssessmentId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSavingAssessment, setIsSavingAssessment] = useState(false);
+  const [pendingChecklistItemIds, setPendingChecklistItemIds] = useState<Set<string>>(new Set());
+  const [checklistError, setChecklistError] = useState("");
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [isVisionLoading, setIsVisionLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -410,6 +443,7 @@ function WorkspaceScreen({
     if (saved) {
       setManuals(saved.manuals ?? []);
       setSelectedDocumentIds(saved.selectedDocumentIds ?? []);
+      setSavedAssessmentId(saved.assessmentId ?? null);
     }
     setWorkspaceRestored(true);
   }, [username]);
@@ -419,13 +453,57 @@ function WorkspaceScreen({
     writeStorage(`${STORAGE_KEYS.workspacePrefix}${username}`, {
       manuals,
       selectedDocumentIds,
+      assessmentId: savedAssessmentId,
     } satisfies WorkspaceSnapshot);
-  }, [manuals, selectedDocumentIds, username, workspaceRestored]);
+  }, [manuals, savedAssessmentId, selectedDocumentIds, username, workspaceRestored]);
 
   useEffect(() => {
     if (!workspaceRestored || manuals.length > 0 || selectedDocumentIds.length === 0) return;
     setSelectedDocumentIds([]);
   }, [manuals.length, selectedDocumentIds.length, workspaceRestored]);
+
+  useEffect(() => {
+    if (!workspaceRestored || !savedAssessmentId || !username) return;
+    const token = getAccessToken();
+    if (!token) {
+      setSavedAssessmentId(null);
+      return;
+    }
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const response = await fetch(
+          `${getApiBaseUrl()}/api/v1/assessments/${savedAssessmentId}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!response.ok) {
+          const message = await apiErrorMessage(response, "저장된 위험성평가를 불러오지 못했습니다.");
+          if (!cancelled) {
+            setChecklistError(message);
+            if ([401, 403, 404].includes(response.status)) {
+              setSavedAssessmentId(null);
+              setResult(null);
+            }
+          }
+          return;
+        }
+        const payload = normalizeAssessmentResponse(await response.json() as AssessmentResponse);
+        if (!cancelled) {
+          setResult(payload);
+          setChecklistError("");
+        }
+      } catch {
+        if (!cancelled) {
+          setChecklistError("저장된 위험성평가를 복원하려면 백엔드 연결을 확인해 주세요.");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [savedAssessmentId, username, workspaceRestored]);
 
   useEffect(() => {
     if (!workspaceRestored || !username) return;
@@ -541,25 +619,121 @@ function WorkspaceScreen({
     writeStorage(STORAGE_KEYS.history, [...current, next]);
   }
 
+  function assessmentPayload() {
+    return {
+      ...form,
+      manufacturer: form.manufacturer || null,
+      energy_sources: form.energy_source ? [form.energy_source] : [],
+    };
+  }
+
   async function handleAssessment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsLoading(true);
     setError("");
+    setChecklistError("");
     try {
+      const token = getAccessToken();
+      if (!token) throw new Error("위험성평가를 만들려면 먼저 로그인해 주세요.");
       const response = await fetch(`${getApiBaseUrl()}/api/v1/assessments/preview`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...form, manufacturer: form.manufacturer || null, energy_sources: form.energy_source ? [form.energy_source] : [] }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(assessmentPayload()),
       });
-      if (!response.ok) throw new Error("분석 요청에 실패했습니다. 백엔드 실행 상태를 확인해 주세요.");
-      const payload = (await response.json()) as AssessmentResponse;
+      if (!response.ok) {
+        throw new Error(await apiErrorMessage(response, "분석 요청에 실패했습니다. 백엔드 실행 상태를 확인해 주세요."));
+      }
+      const payload = normalizeAssessmentResponse(await response.json() as AssessmentResponse);
       setResult(payload);
+      setSavedAssessmentId(null);
+      setPendingChecklistItemIds(new Set());
       const highest = payload.hazards.some((hazard) => hazard.risk_level === "high") ? "높음" : payload.hazards.some((hazard) => hazard.risk_level === "medium") ? "보통" : "낮음";
       saveHistory(form.description, `위험요인 ${payload.hazards.length}건, TBM 체크리스트 ${payload.tbm_checklist.length}건`, highest);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "알 수 없는 오류가 발생했습니다.");
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function saveAssessment() {
+    if (!result || isSavingAssessment) return;
+    setIsSavingAssessment(true);
+    setChecklistError("");
+    try {
+      const token = getAccessToken();
+      if (!token) throw new Error("위험성평가를 저장하려면 다시 로그인해 주세요.");
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/assessments`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(assessmentPayload()),
+      });
+      if (!response.ok) {
+        throw new Error(await apiErrorMessage(response, "위험성평가를 DB에 저장하지 못했습니다."));
+      }
+      const payload = normalizeAssessmentResponse(await response.json() as AssessmentResponse);
+      if (payload.checklist_items.some((item) => !item.id)) {
+        throw new Error("저장 응답에 체크리스트 식별자가 없습니다. 백엔드 버전을 확인해 주세요.");
+      }
+      setResult(payload);
+      setSavedAssessmentId(payload.assessment_id);
+      setPendingChecklistItemIds(new Set());
+      setChecklistError("");
+    } catch (requestError) {
+      setChecklistError(requestError instanceof Error ? requestError.message : "위험성평가 저장 중 오류가 발생했습니다.");
+    } finally {
+      setIsSavingAssessment(false);
+    }
+  }
+
+  async function updateChecklistItem(item: ChecklistItemResponse, isCompleted: boolean) {
+    if (!savedAssessmentId || !item.id || pendingChecklistItemIds.has(item.id)) return;
+    const itemId = item.id;
+    setChecklistError("");
+    setPendingChecklistItemIds((current) => new Set(current).add(itemId));
+    try {
+      const token = getAccessToken();
+      if (!token) throw new Error("체크 상태를 저장하려면 다시 로그인해 주세요.");
+      const response = await fetch(
+        `${getApiBaseUrl()}/api/v1/assessments/${savedAssessmentId}/checklist-items/${itemId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ is_completed: isCompleted }),
+        },
+      );
+      if (!response.ok) {
+        const message = await apiErrorMessage(response, "체크 상태를 저장하지 못했습니다.");
+        if ([401, 403, 404].includes(response.status)) {
+          setSavedAssessmentId(null);
+          setResult(null);
+        }
+        throw new Error(message);
+      }
+      const updated = await response.json() as ChecklistItemUpdateResponse;
+      setResult((current) => current ? {
+        ...current,
+        checklist_items: current.checklist_items.map((currentItem) => (
+          currentItem.id === updated.id ? updated : currentItem
+        )),
+      } : current);
+    } catch (requestError) {
+      setChecklistError(requestError instanceof Error ? requestError.message : "체크 상태 저장 중 오류가 발생했습니다.");
+    } finally {
+      setPendingChecklistItemIds((current) => {
+        const next = new Set(current);
+        next.delete(itemId);
+        return next;
+      });
     }
   }
 
@@ -1164,7 +1338,9 @@ function WorkspaceScreen({
                   <small>{message.accidentClassification.model} · {message.accidentClassification.adapter} · 실험용 분류</small>
                 </div>
               )}
-              <p className="chat-answer-text">{message.text}</p>
+              {message.role === "ai"
+                ? <SafetyAnswerView answer={message.text} />
+                : <p className="chat-answer-text">{message.text}</p>}
               {message.catalogCandidates && message.catalogCandidates.length > 0 && (
                 <div className="catalog-candidate-list">
                   <strong>사진과 유사한 카탈로그 후보</strong>
@@ -1196,6 +1372,16 @@ function WorkspaceScreen({
                         <span>유사도 {(source.similarity * 100).toFixed(1)}%</span>
                       </div>
                       <strong>{source.title}</strong>
+                      <small className="chat-source-location">
+                        {[
+                          source.original_filename || source.title,
+                          source.page_start
+                            ? `${source.page_start}${source.page_end && source.page_end !== source.page_start ? `–${source.page_end}` : ""}페이지`
+                            : source.page ? `${source.page}페이지` : "페이지 정보 없음",
+                          source.section ? `섹션: ${source.section}` : null,
+                          source.document_version ? `문서 버전 ${source.document_version}` : null,
+                        ].filter(Boolean).join(" · ")}
+                      </small>
                       <p>{source.excerpt}</p>
                       {source.url && <a href={source.url} target="_blank" rel="noreferrer">원문 확인</a>}
                     </article>
@@ -1247,7 +1433,18 @@ function WorkspaceScreen({
               <button type="button" className={activeTab === "evidence" ? "active" : ""} onClick={() => setActiveTab("evidence")}>근거 문서</button>
               <button type="button" className={activeTab === "tbm" ? "active" : ""} onClick={() => setActiveTab("tbm")}>TBM 체크</button>
             </div>
-            {!result ? <div className="empty-state"><div className="empty-icon">!</div><h3>아직 분석 결과가 없습니다.</h3><p>왼쪽 작업정보를 확인하고 초안 만들기를 실행해 주세요.</p></div> : activeTab === "summary" ? <AssessmentResult result={result} mode="hazards" /> : activeTab === "accidents" ? <SimilarAccidentPanel result={result} /> : activeTab === "evidence" ? <EvidencePanel result={result} manuals={manuals} /> : <AssessmentResult result={result} mode="tbm" />}
+            {!result ? <div className="empty-state"><div className="empty-icon">!</div><h3>아직 분석 결과가 없습니다.</h3><p>왼쪽 작업정보를 확인하고 초안 만들기를 실행해 주세요.</p></div> : activeTab === "summary" ? <AssessmentResult result={result} mode="hazards" /> : activeTab === "accidents" ? <SimilarAccidentPanel result={result} /> : activeTab === "evidence" ? <EvidencePanel result={result} manuals={manuals} /> : (
+              <AssessmentResult
+                result={result}
+                mode="tbm"
+                persistence={savedAssessmentId === result.assessment_id ? "saved" : "preview"}
+                isSavingAssessment={isSavingAssessment}
+                pendingItemIds={pendingChecklistItemIds}
+                checklistError={checklistError}
+                onSave={() => void saveAssessment()}
+                onToggle={(item, isCompleted) => void updateChecklistItem(item, isCompleted)}
+              />
+            )}
           </section>
         </div>
       </details>
@@ -1257,11 +1454,41 @@ function WorkspaceScreen({
   );
 }
 
-function AssessmentResult({ result, mode = "hazards" }: { result: AssessmentResponse; mode?: "hazards" | "tbm" }) {
+function AssessmentResult({
+  result,
+  mode = "hazards",
+  persistence = "preview",
+  isSavingAssessment = false,
+  pendingItemIds = new Set<string>(),
+  checklistError = "",
+  onSave = () => undefined,
+  onToggle = () => undefined,
+}: {
+  result: AssessmentResponse;
+  mode?: "hazards" | "tbm";
+  persistence?: "preview" | "saved";
+  isSavingAssessment?: boolean;
+  pendingItemIds?: ReadonlySet<string>;
+  checklistError?: string;
+  onSave?: () => void;
+  onToggle?: (item: ChecklistItemResponse, isCompleted: boolean) => void;
+}) {
   const mustStop = result.hazards.some((hazard) => hazard.risk_level === "high");
   const decision = mustStop ? "작업 중지 및 안전관리자 확인 필요" : result.evidence_status === "connected" ? "안전관리자 검토 가능" : "근거 부족으로 판단 불가";
 
-  if (mode === "tbm") return <div className="result-content"><div className="notice">작업 전 팀 단위로 각 항목을 직접 확인하세요.</div><div className="checklist large-checklist"><h3>작업 전 TBM 체크리스트</h3>{result.tbm_checklist.map((item) => <label key={item}><input type="checkbox" /><span>{item}</span></label>)}</div><section className="manager-review"><strong>안전관리자 확인사항</strong><label><input type="checkbox" /> 작업조건과 에너지 차단 여부를 현장에서 재확인했습니다.</label><label><input type="checkbox" /> 근거 문서와 필수 안전조치를 검토했습니다.</label></section></div>;
+  if (mode === "tbm") return (
+    <div className="result-content">
+      <TbmChecklist
+        result={result}
+        persistence={persistence}
+        isSavingAssessment={isSavingAssessment}
+        pendingItemIds={pendingItemIds}
+        error={checklistError}
+        onSave={onSave}
+        onToggle={onToggle}
+      />
+    </div>
+  );
 
   return <div className="result-content">
     <section className={`work-decision ${mustStop ? "stop" : result.evidence_status === "connected" ? "review" : "unknown"}`}>

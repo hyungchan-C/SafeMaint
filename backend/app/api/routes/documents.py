@@ -1,4 +1,3 @@
-import hashlib
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -32,13 +31,29 @@ from app.services.document_approval import (
     DocumentApprovalNotFoundError,
     approve_document_version,
 )
+from app.services.pdf_storage import (
+    EmptyPdfUploadError,
+    InvalidPdfHeaderError,
+    PdfUploadIOError,
+    PdfUploadTooLargeError,
+    StagedPdfUpload,
+    stage_pdf_upload,
+)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 ALLOWED_ACCESS_LEVELS = {"public", "restricted", "private"}
 COMPANY_UPLOAD_ACCESS_LEVELS = {"restricted", "private"}
-PDF_MAGIC = b"%PDF-"
 MAX_PROCESSING_WARNING_LENGTH = 500
+
+
+def _safe_unlink(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _normalized_form_value(value: str, *, field: str, max_length: int) -> str:
@@ -156,23 +171,6 @@ def upload_document(
             detail="PDF 파일만 업로드할 수 있습니다.",
         )
 
-    content = file.file.read(settings.document_max_upload_bytes + 1)
-    if not content:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="빈 파일은 업로드할 수 없습니다.",
-        )
-    if len(content) > settings.document_max_upload_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=f"파일 크기는 {settings.document_max_upload_bytes} 바이트를 넘을 수 없습니다.",
-        )
-    if not content.startswith(PDF_MAGIC):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="PDF 파일 헤더가 올바르지 않습니다.",
-        )
-
     doc_name = _normalized_form_value(
         Path(original_filename).stem, field="파일명", max_length=500
     )
@@ -182,22 +180,31 @@ def upload_document(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="문서 식별 정보가 너무 깁니다. 제조사·모델명·파일명을 줄여 주세요.",
         )
-    document_type = db.scalar(
-        select(DocumentType).where(
-            DocumentType.code == document_type_code,
-            DocumentType.is_active.is_(True),
-        )
-    )
-    if document_type is None or document_type.scope != "company":
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="회사 범위의 활성 문서 유형만 업로드할 수 있습니다.",
-        )
-
+    staged_upload: StagedPdfUpload | None = None
     storage_path: Path | None = None
     try:
+        staged_upload = stage_pdf_upload(
+            file.file,
+            Path(settings.document_storage_dir),
+            max_bytes=settings.document_max_upload_bytes,
+        )
+
+        document_type = db.scalar(
+            select(DocumentType).where(
+                DocumentType.code == document_type_code,
+                DocumentType.is_active.is_(True),
+            )
+        )
+        if document_type is None or document_type.scope != "company":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="회사 범위의 활성 문서 유형만 업로드할 수 있습니다.",
+            )
+
         document = db.scalar(
-            select(Document).where(Document.external_id == external_id)
+            select(Document)
+            .where(Document.external_id == external_id)
+            .with_for_update()
         )
         if document is None:
             document = Document(
@@ -234,11 +241,9 @@ def upload_document(
             or 0
         ) + 1
 
-        storage_dir = Path(settings.document_storage_dir)
-        storage_dir.mkdir(parents=True, exist_ok=True)
         stored_filename = f"{uuid4().hex}.pdf"
-        storage_path = storage_dir / stored_filename
-        storage_path.write_bytes(content)
+        storage_path = Path(settings.document_storage_dir) / stored_filename
+        staged_upload.move_to(storage_path)
 
         version = DocumentVersion(
             document_id=document.id,
@@ -246,8 +251,8 @@ def upload_document(
             original_filename=original_filename,
             stored_filename=stored_filename,
             storage_path=str(storage_path),
-            sha256=hashlib.sha256(content).hexdigest(),
-            file_size=len(content),
+            sha256=staged_upload.sha256,
+            file_size=staged_upload.file_size,
             mime_type="application/pdf",
             uploaded_by_user_id=current_user.id,
         )
@@ -255,27 +260,65 @@ def upload_document(
         db.flush()
         db.add(DocumentProcessingJob(document_version_id=version.id))
         db.commit()
+    except EmptyPdfUploadError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+    except InvalidPdfHeaderError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(error),
+        ) from error
+    except PdfUploadTooLargeError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=str(error),
+        ) from error
+    except PdfUploadIOError as error:
+        db.rollback()
+        _safe_unlink(storage_path)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="문서 저장소에 파일을 저장하지 못했습니다.",
+        ) from error
     except IntegrityError as error:
         db.rollback()
-        if storage_path is not None:
-            storage_path.unlink(missing_ok=True)
+        _safe_unlink(storage_path)
+        constraint_name = getattr(
+            getattr(getattr(error, "orig", None), "diag", None),
+            "constraint_name",
+            None,
+        )
+        if constraint_name in {
+            "uq_documents_external_id",
+            "uq_document_versions_number",
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="동일 문서가 동시에 업로드되었습니다. 잠시 후 다시 시도해 주세요.",
+            ) from error
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="업로드 요청이 문서 제약 조건과 맞지 않습니다 (document_type_code 등을 확인하세요).",
         ) from error
     except OSError as error:
         db.rollback()
-        if storage_path is not None:
-            storage_path.unlink(missing_ok=True)
+        _safe_unlink(storage_path)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="문서 저장소에 파일을 저장하지 못했습니다.",
         ) from error
     except Exception:
         db.rollback()
-        if storage_path is not None:
-            storage_path.unlink(missing_ok=True)
+        _safe_unlink(storage_path)
         raise
+    finally:
+        if staged_upload is not None:
+            staged_upload.cleanup()
 
     return UploadDocumentResponse(
         document_id=document.id,

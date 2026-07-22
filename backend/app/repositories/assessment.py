@@ -20,13 +20,18 @@ class AssessmentRepository:
         self.session = session
 
     def create(
-        self, request: AssessmentRequest, response: AssessmentResponse
+        self,
+        request: AssessmentRequest,
+        response: AssessmentResponse,
+        *,
+        created_by_user_id: UUID,
     ) -> Assessment:
         assessment = Assessment(
             id=UUID(response.assessment_id),
             site_id=request.site_id,
             equipment_id=request.equipment_id,
             component_id=request.component_id,
+            created_by_user_id=created_by_user_id,
             site_name=request.site_name,
             equipment_name=request.equipment_name,
             component_name=request.component_name,
@@ -76,6 +81,7 @@ class AssessmentRepository:
         self.session.add(
             AuditEvent(
                 event_type="assessment.created",
+                actor_user_id=created_by_user_id,
                 entity_type="assessment",
                 entity_id=assessment.id,
                 payload={
@@ -117,3 +123,52 @@ class AssessmentRepository:
             )
         )
         return self.session.scalar(statement)
+
+    def get_checklist_item_for_update(
+        self,
+        assessment_id: UUID,
+        item_id: UUID,
+    ) -> ChecklistItem | None:
+        statement = (
+            select(ChecklistItem)
+            .join(Assessment, Assessment.id == ChecklistItem.assessment_id)
+            .where(
+                ChecklistItem.id == item_id,
+                ChecklistItem.assessment_id == assessment_id,
+            )
+            .options(selectinload(ChecklistItem.assessment))
+            .with_for_update(of=ChecklistItem)
+        )
+        return self.session.scalar(statement)
+
+    def save_checklist_completion(
+        self,
+        item: ChecklistItem,
+        *,
+        actor_user_id: UUID,
+    ) -> ChecklistItem:
+        self.session.add(
+            AuditEvent(
+                event_type=(
+                    "checklist.completed"
+                    if item.is_completed
+                    else "checklist.uncompleted"
+                ),
+                actor_user_id=actor_user_id,
+                entity_type="checklist_item",
+                entity_id=item.id,
+                payload={
+                    "assessment_id": str(item.assessment_id),
+                    "checklist_item_id": str(item.id),
+                    "sequence": item.sequence,
+                    "is_completed": item.is_completed,
+                },
+            )
+        )
+        try:
+            self.session.commit()
+            self.session.refresh(item)
+        except Exception:
+            self.session.rollback()
+            raise
+        return item
