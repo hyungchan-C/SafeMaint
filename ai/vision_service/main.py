@@ -10,7 +10,7 @@ from PIL import Image, UnidentifiedImageError
 
 from vision_service.analyzer import CatalogAnalyzer
 from vision_service.config import settings
-from vision_service.schemas import CatalogAnalysisResponse, CatalogItem
+from vision_service.schemas import CatalogAnalysisResponse
 from vision_service.catalog_matcher import CatalogImageMatcher
 from vision_service.schemas import CatalogIndexResponse
 
@@ -149,10 +149,10 @@ def match_catalog(
         if analysis_mode == "fast":
             return CatalogAnalysisResponse(
                 filename=file.filename or path.name,
-                items=[CatalogItem(
-                    component_name=signals.visual_category or None,
-                    visible_conditions=list(signals.visual_features),
-                )],
+                # A closed-set embedding classifier always picks its nearest
+                # label, even for an unknown object. Do not expose that guess
+                # as a product identity before VLM/catalog verification.
+                items=[],
                 warnings=["빠른 임베딩 검색 결과이며 정밀 분석이 이어서 진행됩니다."],
                 models=[settings.embedding_model],
                 catalog_candidates=candidates[:3],
@@ -165,12 +165,15 @@ def match_catalog(
             or signals.top_similarity >= 0.93
         )
         if confident_match:
+            candidate = candidates[0].model_copy(
+                update={"visual_category": None, "visual_features": []}
+            )
             response = CatalogAnalysisResponse(
                 filename=file.filename or path.name,
                 items=[],
                 warnings=["SigLIP 고신뢰 후보로 확인되어 정밀 VLM 분석을 생략했습니다."],
                 models=[settings.embedding_model],
-                catalog_candidates=candidates[:1],
+                catalog_candidates=[candidate],
             )
         elif candidates:
             # Keep the semantic verification pass small: each additional image
@@ -189,6 +192,8 @@ def match_catalog(
             if not verified and candidates[0].similarity >= settings.fallback_candidate_threshold:
                 fallback = candidates[0].model_copy(update={
                     "confidence": "낮음",
+                    "visual_category": None,
+                    "visual_features": [],
                     "note": (
                         "SigLIP 외형 유사도 기준의 참고 후보입니다. "
                         "Qwen3-VL 정밀 검증에서는 동일 종류로 확정되지 않았습니다."
@@ -230,13 +235,6 @@ def match_catalog(
                 "table_rows": ocr_response.table_rows,
                 "warnings": list(dict.fromkeys([*response.warnings, *ocr_response.warnings])),
                 "models": list(dict.fromkeys([*response.models, *ocr_response.models])),
-            })
-        if not response.items and signals.visual_category:
-            response = response.model_copy(update={
-                "items": [CatalogItem(
-                    component_name=signals.visual_category,
-                    visible_conditions=list(signals.visual_features),
-                )]
             })
         return response
     finally:

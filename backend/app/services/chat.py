@@ -438,11 +438,29 @@ class ChatService:
     @staticmethod
     def _visual_answer(request: ChatRequest) -> str | None:
         question = request.question.casefold()
-        if not request.context.visual_categories or not any(
+        is_photo_question = any(
             token in question
             for token in ("이건", "이것", "뭐", "무엇", "사진", "어디에 쓰", "용도", "부품")
-        ):
+        )
+        if not is_photo_question:
             return None
+        if not request.context.visual_categories:
+            visual_summary = request.context.visual_summary or ""
+            no_verified_result = any(
+                marker in visual_summary
+                for marker in (
+                    "신뢰 임계값을 넘는 카탈로그 후보 없음",
+                    "제품 종류를 확인하지 못",
+                    "종류 확인 불가",
+                )
+            )
+            if not no_verified_result:
+                return None
+            return (
+                "현재 사진만으로는 제품 종류를 신뢰할 수 있게 확인하지 못했습니다.\n\n"
+                "카탈로그 또는 정밀 비전 분석에서 검증된 후보가 없으므로 임의의 제품명이나 용도를 안내하지 않습니다. "
+                "대상을 더 가까이 촬영하거나, 여러 각도의 사진과 제품 각인·라벨이 보이는 사진을 추가해 주세요."
+            )
         categories = list(
             dict.fromkeys(
                 value.strip()

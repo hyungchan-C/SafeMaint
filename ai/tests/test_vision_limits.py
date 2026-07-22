@@ -87,7 +87,9 @@ def test_deep_mode_skips_qwen_for_confident_siglip_match(
         file=BytesIO(_png()),
         headers=Headers({"content-type": "image/png"}),
     )
-    candidate = _candidate(0.95)
+    candidate = _candidate(0.95).model_copy(
+        update={"visual_category": "unverified class", "visual_features": ["guess"]}
+    )
     monkeypatch.setattr(
         vision_main.matcher,
         "match_with_signals",
@@ -101,7 +103,9 @@ def test_deep_mode_skips_qwen_for_confident_siglip_match(
 
     response = match_catalog(upload, '["aaaaaaaaaaaaaaaaaaaa"]', "deep")
 
-    assert response.catalog_candidates == [candidate]
+    assert len(response.catalog_candidates) == 1
+    assert response.catalog_candidates[0].visual_category is None
+    assert response.catalog_candidates[0].visual_features == []
     assert response.models == [vision_main.settings.embedding_model]
 
 
@@ -146,7 +150,9 @@ def test_deep_mode_keeps_one_strong_siglip_fallback_when_qwen_rejects(
         file=BytesIO(_png()),
         headers=Headers({"content-type": "image/png"}),
     )
-    candidate = _candidate(0.80)
+    candidate = _candidate(0.80).model_copy(
+        update={"visual_category": "unverified class", "visual_features": ["guess"]}
+    )
     monkeypatch.setattr(
         vision_main.matcher,
         "match_with_signals",
@@ -163,6 +169,8 @@ def test_deep_mode_keeps_one_strong_siglip_fallback_when_qwen_rejects(
 
     assert len(response.catalog_candidates) == 1
     assert response.catalog_candidates[0].confidence == "낮음"
+    assert response.catalog_candidates[0].visual_category is None
+    assert response.catalog_candidates[0].visual_features == []
     assert "참고 후보 1개" in response.warnings[0]
 
 
@@ -202,7 +210,7 @@ def test_deep_mode_sends_only_top_three_candidates_to_qwen(
     assert received == candidates[:3]
 
 
-def test_deep_mode_keeps_siglip_usb_category_without_catalog_candidate(
+def test_deep_mode_discards_unverified_siglip_category_without_catalog_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     upload = UploadFile(
@@ -230,8 +238,7 @@ def test_deep_mode_keeps_siglip_usb_category_without_catalog_candidate(
 
     response = match_catalog(upload, "[]", "deep")
 
-    assert response.items[0].component_name == "사진상 USB 플래시 메모리"
-    assert "USB 단자" in response.items[0].visible_conditions[0]
+    assert response.items == []
 
 
 def test_internal_service_rejects_unknown_analysis_mode() -> None:

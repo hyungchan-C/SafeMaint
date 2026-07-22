@@ -619,3 +619,33 @@ def test_visual_question_does_not_retrieve_unrelated_selected_manual() -> None:
     assert response.sources == []
     assert "USB 플래시 메모리" in response.answer
     assert "베어링" not in response.answer
+
+
+def test_visual_question_abstains_when_no_verified_category_exists() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("RAG must not guess from unrelated manuals")
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+        ).answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "이건 뭐야?",
+                    "context": {
+                        "visual_summary": "신뢰 임계값을 넘는 카탈로그 후보 없음",
+                        "visual_categories": [],
+                        "registered_manuals": ["NSK_ballbearing (1).pdf"],
+                    },
+                }
+            )
+        )
+    )
+
+    assert response.retrieval_mode == "safety-fallback"
+    assert response.sources == []
+    assert "확인하지 못했습니다" in response.answer
+    assert "임의의 제품명이나 용도를 안내하지 않습니다" in response.answer
+    assert "베어링" not in response.answer
