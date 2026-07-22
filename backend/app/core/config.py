@@ -106,6 +106,7 @@ class Settings:
     tts_voice: str = getenv("TTS_VOICE", "F1")
     tts_language: str = getenv("TTS_LANGUAGE", "ko")
     tts_steps: int = int(getenv("TTS_STEPS", "8"))
+    tts_num_threads: int = int(getenv("TTS_NUM_THREADS", "4"))
     stt_model: str = getenv("STT_MODEL", "small")
     stt_language: str = getenv("STT_LANGUAGE", "ko")
     stt_device: str = getenv("STT_DEVICE", "cpu")

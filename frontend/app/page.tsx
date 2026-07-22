@@ -391,6 +391,7 @@ function WorkspaceScreen({
   const [volume, setVolume] = useState(70);
   const [fontSize, setFontSize] = useState<FontSize>("medium");
   const [autoSpeak, setAutoSpeak] = useState(false);
+  const autoSpeakRef = useRef(autoSpeak);
   const [manuals, setManuals] = useState<string[]>([]);
   const [userDocuments, setUserDocuments] = useState<UserDocumentSummary[]>([]);
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
@@ -433,7 +434,8 @@ function WorkspaceScreen({
   const [isVisionLoading, setIsVisionLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const audioSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const speechAbortRef = useRef<AbortController | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -562,6 +564,10 @@ function WorkspaceScreen({
   }, [volume, fontSize, autoSpeak]);
 
   useEffect(() => {
+    autoSpeakRef.current = autoSpeak;
+  }, [autoSpeak]);
+
+  useEffect(() => {
     // 실제 GPS 권한/응답을 기다리지 않고, 기본 좌표로 즉시 한 번 확인해 화면에
     // "자동으로 위치가 잡혀 있는" 상태를 바로 보여준다. 실제 위치 추적이 성공하면
     // 아래 효과가 이어서 이 값을 진짜 위치로 갱신하고, 화면에 어느 쪽인지 표시한다.
@@ -618,12 +624,13 @@ function WorkspaceScreen({
   }, []);
 
   useEffect(() => () => {
-    const source = audioSourceRef.current;
-    if (source) {
+    speechAbortRef.current?.abort();
+    for (const source of audioSourcesRef.current) {
       source.onended = null;
       try { source.stop(); } catch { /* already stopped */ }
       source.disconnect();
     }
+    audioSourcesRef.current = [];
     void audioContextRef.current?.close();
   }, []);
 
@@ -853,7 +860,7 @@ function WorkspaceScreen({
           "검토 필요",
         );
       }
-      if (autoSpeak) {
+      if (autoSpeakRef.current) {
         void playSpeech(payload.answer);
       }
     } catch (requestError) {
@@ -1126,52 +1133,129 @@ function WorkspaceScreen({
   }
 
   function stopSpeech() {
-    const source = audioSourceRef.current;
-    if (!source) return false;
-    source.onended = null;
-    try { source.stop(); } catch { /* already stopped */ }
-    source.disconnect();
-    audioSourceRef.current = null;
+    const wasActive = audioSourcesRef.current.length > 0 || speechAbortRef.current !== null;
+    speechAbortRef.current?.abort();
+    speechAbortRef.current = null;
+    for (const source of audioSourcesRef.current) {
+      source.onended = null;
+      try { source.stop(); } catch { /* already stopped */ }
+      source.disconnect();
+    }
+    audioSourcesRef.current = [];
     setIsSpeaking(false);
-    return true;
+    return wasActive;
   }
 
   async function playSpeech(text: string) {
     stopSpeech();
     setIsSpeaking(true);
     setError("");
+    const controller = new AbortController();
+    speechAbortRef.current = controller;
+    let scheduledCount = 0;
+    let streamDone = false;
     try {
       // Unlock audio playback while the triggering click/submit is still an active user gesture.
       const audioContext = audioContextRef.current ?? new AudioContext();
       audioContextRef.current = audioContext;
       await audioContext.resume();
 
-      const response = await fetch(`${getApiBaseUrl()}/api/v1/speech/synthesize`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/speech/synthesize/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, speed: 0.92 }),
+        body: JSON.stringify({ text, speed: 1.0 }),
+        signal: controller.signal,
       });
-      if (!response.ok) {
+      if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => null) as { detail?: string } | null;
         throw new Error(payload?.detail || "음성 안내를 생성하지 못했습니다.");
       }
-      const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
-      const source = audioContext.createBufferSource();
-      const gain = audioContext.createGain();
-      gain.gain.value = volume / 100;
-      source.buffer = audioBuffer;
-      source.connect(gain);
-      gain.connect(audioContext.destination);
-      source.onended = () => {
-        source.disconnect();
-        gain.disconnect();
-        if (audioSourceRef.current === source) audioSourceRef.current = null;
-        setIsSpeaking(false);
+
+      // Chunks arrive as they finish synthesizing (length-prefixed WAV frames), so
+      // playback of the first sentence can start long before the rest is ready
+      // instead of waiting for the entire answer to be generated.
+      let nextStartTime = audioContext.currentTime;
+      let buffer = new Uint8Array(0);
+
+      // Scheduling a chunk the instant it decodes leaves zero cushion: if the next
+      // chunk's synthesis is even slightly slower than this chunk's playback
+      // duration, playback catches up to nextStartTime and an audible gap opens up.
+      // Holding back the first couple of chunks before starting playback gives the
+      // synthesis pipeline a head start so brief slowdowns don't cause audible stalls.
+      const LEAD_CHUNKS = 2;
+      const pendingBuffers: AudioBuffer[] = [];
+      let started = false;
+
+      const playBuffer = (audioBuffer: AudioBuffer) => {
+        if (controller.signal.aborted) return;
+        const source = audioContext.createBufferSource();
+        const gain = audioContext.createGain();
+        gain.gain.value = volume / 100;
+        source.buffer = audioBuffer;
+        source.connect(gain);
+        gain.connect(audioContext.destination);
+        const startAt = Math.max(nextStartTime, audioContext.currentTime);
+        source.onended = () => {
+          source.disconnect();
+          gain.disconnect();
+          audioSourcesRef.current = audioSourcesRef.current.filter((s) => s !== source);
+          if (streamDone && audioSourcesRef.current.length === 0) setIsSpeaking(false);
+        };
+        audioSourcesRef.current.push(source);
+        source.start(startAt);
+        nextStartTime = startAt + audioBuffer.duration;
+        scheduledCount += 1;
       };
-      audioSourceRef.current = source;
-      source.start(0);
+
+      const flushPending = () => {
+        started = true;
+        nextStartTime = audioContext.currentTime;
+        for (const audioBuffer of pendingBuffers.splice(0)) playBuffer(audioBuffer);
+      };
+
+      const scheduleFrame = async (frameBytes: Uint8Array) => {
+        const audioBuffer = await audioContext.decodeAudioData(frameBytes.buffer as ArrayBuffer);
+        if (controller.signal.aborted) return;
+        if (!started) {
+          pendingBuffers.push(audioBuffer);
+          if (pendingBuffers.length >= LEAD_CHUNKS) flushPending();
+          return;
+        }
+        playBuffer(audioBuffer);
+      };
+
+      const drainFrames = async () => {
+        for (;;) {
+          if (buffer.length < 4) return;
+          const frameLength = new DataView(buffer.buffer, buffer.byteOffset, 4).getUint32(0);
+          if (buffer.length < 4 + frameLength) return;
+          const frameBytes = buffer.slice(4, 4 + frameLength);
+          buffer = buffer.slice(4 + frameLength);
+          await scheduleFrame(frameBytes);
+        }
+      };
+
+      const reader = response.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (controller.signal.aborted) return;
+        if (value) {
+          const merged = new Uint8Array(buffer.length + value.length);
+          merged.set(buffer);
+          merged.set(value, buffer.length);
+          buffer = merged;
+          await drainFrames();
+        }
+        if (done) break;
+      }
+      streamDone = true;
+      // Short answers may finish with fewer than LEAD_CHUNKS chunks total, in which
+      // case playback never started while waiting for a lead that will never come.
+      if (!started && pendingBuffers.length > 0) flushPending();
+      if (scheduledCount === 0) setIsSpeaking(false);
     } catch (speechError) {
-      audioSourceRef.current = null;
+      if (controller.signal.aborted) return;
+      audioSourcesRef.current = [];
       setIsSpeaking(false);
       setError(speechError instanceof Error ? speechError.message : "음성 안내 중 오류가 발생했습니다.");
     }
