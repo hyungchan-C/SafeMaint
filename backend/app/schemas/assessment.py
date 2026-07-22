@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RiskLevel(str, Enum):
@@ -63,12 +63,33 @@ class EvidenceItem(BaseModel):
     used_in_answer: bool = False
 
 
+class ChecklistItemResponse(BaseModel):
+    id: UUID | None = None
+    sequence: int = Field(ge=1)
+    content: str
+    is_completed: bool = False
+    completed_by_user_id: UUID | None = None
+    completed_at: datetime | None = None
+
+
+class ChecklistItemUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    is_completed: bool
+
+
+class ChecklistItemUpdateResponse(ChecklistItemResponse):
+    id: UUID
+    assessment_id: UUID
+
+
 class AssessmentResponse(BaseModel):
     assessment_id: str
     status: AssessmentStatus
     created_at: datetime
     hazards: list[HazardItem]
     tbm_checklist: list[str]
+    checklist_items: list[ChecklistItemResponse] = Field(default_factory=list)
     evidence: list[EvidenceItem]
     evidence_status: Literal["not_connected", "connected"]
     disclaimer: str

@@ -377,7 +377,8 @@ def pdf_rag_environment(tmp_path_factory: pytest.TempPathFactory):
                 cursor.execute(
                     """
                     SELECT dv.id, dv.storage_path, dv.sha256, j.status, j.attempts,
-                           j.error_message
+                           j.error_message, dv.processing_metadata,
+                           dv.failure_reason, dv.page_count
                     FROM document_versions dv
                     JOIN document_processing_jobs j
                       ON j.document_version_id = dv.id
@@ -391,6 +392,15 @@ def pdf_rag_environment(tmp_path_factory: pytest.TempPathFactory):
                 assert all(row[3] == "completed" for row in version_rows)
                 assert all(1 <= row[4] <= 3 for row in version_rows)
                 assert all(row[5] is None for row in version_rows)
+                assert all(row[6].get("extractor") == "docling" for row in version_rows)
+                assert all(
+                    row[6].get("extractor_version") == "2.113.0"
+                    for row in version_rows
+                )
+                assert all(row[6].get("fallback_used") is False for row in version_rows)
+                assert all(isinstance(row[6].get("ocr_used"), bool) for row in version_rows)
+                assert all(row[7] is None for row in version_rows)
+                assert all(row[8] == 1 for row in version_rows)
                 cursor.execute(
                     """
                     SELECT dc.document_version_id, dc.content, dc.content_hash,

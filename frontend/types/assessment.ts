@@ -12,19 +12,45 @@ export interface HazardItem {
 
 export interface EvidenceItem {
   document_id: string;
+  chunk_id: string;
   title: string;
   page: number | null;
+  page_start: number | null;
+  page_end: number | null;
+  section: string | null;
   source_type: string;
+  document_scope: "public" | "company" | null;
+  original_filename: string | null;
+  document_version: number | null;
   excerpt: string;
   url: string | null;
+  retrieval_rank: number;
+  retrieval_score: number | null;
+  reranker_score: number | null;
+  used_in_answer: boolean;
+}
+
+export interface ChecklistItemResponse {
+  id: string | null;
+  sequence: number;
+  content: string;
+  is_completed: boolean;
+  completed_by_user_id: string | null;
+  completed_at: string | null;
+}
+
+export interface ChecklistItemUpdateResponse extends ChecklistItemResponse {
+  id: string;
+  assessment_id: string;
 }
 
 export interface AssessmentResponse {
   assessment_id: string;
-  status: "draft";
+  status: "draft" | "pending_review" | "approved" | "rejected";
   created_at: string;
   hazards: HazardItem[];
   tbm_checklist: string[];
+  checklist_items: ChecklistItemResponse[];
   evidence: EvidenceItem[];
   evidence_status: "not_connected" | "connected";
   disclaimer: string;

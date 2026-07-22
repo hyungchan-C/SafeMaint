@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core.config import settings
 from app.db.models import (
     AuditEvent,
+    ChecklistItem,
     Document,
     DocumentProcessingJob,
     DocumentVersion,
@@ -102,7 +103,7 @@ def test_schema_extension_and_alembic_head() -> None:
         )
 
     assert extension_version
-    assert alembic_revision == "0008_add_equipment_coordinates"
+    assert alembic_revision == "0009_processing_metadata"
     assert "ck_assessment_hazards_likelihood_range" in constraints
     assert "ck_assessment_hazards_severity_range" in constraints
     assert "ck_assessments_status" in constraints
@@ -844,6 +845,31 @@ def test_chat_scope_is_derived_from_authenticated_roles_and_sites() -> None:
 def test_assessment_is_persisted_and_dashboard_uses_database() -> None:
     _assert_isolated_test_database()
 
+    suffix = uuid4().hex[:10].upper()
+    employee_number = f"ASSESS-{suffix}"
+    password = f"Test-{uuid4().hex}-A!"
+    registration = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/register",
+            json={
+                "employee_number": employee_number,
+                "name": "평가 통합테스트 사용자",
+                "password": password,
+            },
+        )
+    )
+    assert registration.status_code == 201
+    login = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/auth/login",
+            json={"employee_number": employee_number, "password": password},
+        )
+    )
+    assert login.status_code == 200
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
     payload = {
         "site_name": "통합테스트 사업장",
         "equipment_name": "컨베이어 TEST-01",
@@ -852,16 +878,119 @@ def test_assessment_is_persisted_and_dashboard_uses_database() -> None:
         "energy_sources": ["전기"],
         "description": "전원을 차단하고 컨베이어 벨트 이물질을 제거합니다.",
     }
-    created = asyncio.run(_request("POST", "/api/v1/assessments", json=payload))
+    created = asyncio.run(
+        _request(
+            "POST",
+            "/api/v1/assessments",
+            headers=headers,
+            json=payload,
+        )
+    )
     assert created.status_code == 201
-    assessment_id = created.json()["assessment_id"]
+    created_body = created.json()
+    assessment_id = created_body["assessment_id"]
+    assert created_body["tbm_checklist"]
+    assert len(created_body["checklist_items"]) == len(
+        created_body["tbm_checklist"]
+    )
+    assert all(item["id"] for item in created_body["checklist_items"])
+    first_item = created_body["checklist_items"][0]
+
+    completed = asyncio.run(
+        _request(
+            "PATCH",
+            f"/api/v1/assessments/{assessment_id}/checklist-items/{first_item['id']}",
+            headers=headers,
+            json={"is_completed": True},
+        )
+    )
+    assert completed.status_code == 200
+    completed_body = completed.json()
+    assert completed_body["assessment_id"] == assessment_id
+    assert completed_body["is_completed"] is True
+    assert completed_body["completed_by_user_id"] == login.json()["user"]["id"]
+    assert completed_body["completed_at"] is not None
+
+    wrong_assessment = asyncio.run(
+        _request(
+            "PATCH",
+            f"/api/v1/assessments/{uuid4()}/checklist-items/{first_item['id']}",
+            headers=headers,
+            json={"is_completed": True},
+        )
+    )
+    missing_item = asyncio.run(
+        _request(
+            "PATCH",
+            f"/api/v1/assessments/{assessment_id}/checklist-items/{uuid4()}",
+            headers=headers,
+            json={"is_completed": True},
+        )
+    )
+    forged_actor = asyncio.run(
+        _request(
+            "PATCH",
+            f"/api/v1/assessments/{assessment_id}/checklist-items/{first_item['id']}",
+            headers=headers,
+            json={
+                "is_completed": True,
+                "completed_by_user_id": str(uuid4()),
+                "completed_at": "2020-01-01T00:00:00Z",
+            },
+        )
+    )
+    assert wrong_assessment.status_code == 404
+    assert missing_item.status_code == 404
+    assert forged_actor.status_code == 422
 
     loaded = asyncio.run(
-        _request("GET", f"/api/v1/assessments/{assessment_id}")
+        _request(
+            "GET",
+            f"/api/v1/assessments/{assessment_id}",
+            headers=headers,
+        )
     )
     assert loaded.status_code == 200
     assert loaded.json()["assessment_id"] == assessment_id
     assert loaded.json()["hazards"] == created.json()["hazards"]
+    loaded_item = next(
+        item
+        for item in loaded.json()["checklist_items"]
+        if item["id"] == first_item["id"]
+    )
+    assert loaded_item["is_completed"] is True
+    assert loaded_item["completed_by_user_id"] == login.json()["user"]["id"]
+
+    uncompleted = asyncio.run(
+        _request(
+            "PATCH",
+            f"/api/v1/assessments/{assessment_id}/checklist-items/{first_item['id']}",
+            headers=headers,
+            json={"is_completed": False},
+        )
+    )
+    assert uncompleted.status_code == 200
+    assert uncompleted.json()["is_completed"] is False
+    assert uncompleted.json()["completed_by_user_id"] is None
+    assert uncompleted.json()["completed_at"] is None
+
+    with SessionLocal() as session:
+        stored_item = session.get(ChecklistItem, UUID(first_item["id"]))
+        assert stored_item is not None
+        assert stored_item.is_completed is False
+        assert stored_item.completed_by_user_id is None
+        assert stored_item.completed_at is None
+        audit_types = set(
+            session.scalars(
+                select(AuditEvent.event_type).where(
+                    AuditEvent.entity_id == UUID(first_item["id"]),
+                    AuditEvent.event_type.in_(
+                        ["checklist.completed", "checklist.uncompleted"]
+                    ),
+                )
+            ).all()
+        )
+        assert audit_types == {"checklist.completed", "checklist.uncompleted"}
 
     dashboard = asyncio.run(_request("GET", "/api/v1/dashboard/summary"))
     assert dashboard.status_code == 200

@@ -2,12 +2,14 @@ from os import getenv
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.engine import make_url
 
 from app.core.config import settings
-from app.db.models import Assessment, Document, DocumentChunk
+from app.db.models import Assessment, AuditEvent, Document, DocumentChunk, User
 from app.db.session import SessionLocal
 from app.schemas.assessment import AssessmentRequest, EvidenceItem
+from app.schemas.chat import RetrievalAccessScope
 from app.services.assessment import AssessmentService
 
 
@@ -23,7 +25,12 @@ class FakeRetrieval:
         self.document_id = document_id
         self.chunk_id = chunk_id
 
-    def search(self, request: AssessmentRequest, limit: int = 5):
+    def search(
+        self,
+        request: AssessmentRequest,
+        access_scope: RetrievalAccessScope,
+        limit: int = 5,
+    ):
         return [
             EvidenceItem(
                 document_id=str(self.document_id),
@@ -47,7 +54,15 @@ def test_assessment_evidence_is_saved_and_returned() -> None:
     assert (make_url(settings.database_url).database or "").endswith("_test")
     document_id = uuid4()
     chunk_id = uuid4()
+    user_id = uuid4()
     with SessionLocal() as session:
+        user = User(
+            id=user_id,
+            employee_number=f"ASSESS-{user_id.hex[:12].upper()}",
+            name="Assessment integration user",
+            auth_provider="oidc",
+            status="active",
+        )
         document = Document(
             id=document_id,
             external_id=f"assessment-evidence-test:{document_id}",
@@ -71,7 +86,7 @@ def test_assessment_evidence_is_saved_and_returned() -> None:
                 embedding_status="pending",
             )
         )
-        session.add(document)
+        session.add_all((user, document))
         session.commit()
 
     request = AssessmentRequest(
@@ -84,9 +99,12 @@ def test_assessment_evidence_is_saved_and_returned() -> None:
     service = AssessmentService(
         retrieval_service=FakeRetrieval(document_id, chunk_id)
     )
+    scope = RetrievalAccessScope(requester_user_id=user_id)
     with SessionLocal() as session:
-        created = service.create_and_save(request, session)
-        loaded = service.get_by_id(created.assessment_id, session)
+        user = session.get(User, user_id)
+        assert user is not None
+        created = service.create_and_save(request, session, user, scope)
+        loaded = service.get_by_id(created.assessment_id, session, user, scope)
         assert loaded is not None
         assert loaded.evidence_status == "connected"
         assert loaded.evidence[0].chunk_id == str(chunk_id)
@@ -94,6 +112,16 @@ def test_assessment_evidence_is_saved_and_returned() -> None:
         assert loaded.evidence[0].reranker_score == 0.86
         assessment = session.get(Assessment, UUID(created.assessment_id))
         assert assessment is not None
+        assert assessment.created_by_user_id == user_id
+        audit_event = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.entity_id == assessment.id,
+                AuditEvent.event_type == "assessment.created",
+            )
+        )
+        assert audit_event is not None
+        assert audit_event.actor_user_id == user_id
+        session.delete(audit_event)
         session.delete(assessment)
         session.commit()
 
@@ -101,4 +129,7 @@ def test_assessment_evidence_is_saved_and_returned() -> None:
         document = session.get(Document, document_id)
         assert document is not None
         session.delete(document)
+        user = session.get(User, user_id)
+        assert user is not None
+        session.delete(user)
         session.commit()
