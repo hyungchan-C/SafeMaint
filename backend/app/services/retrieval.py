@@ -11,7 +11,10 @@ from app.schemas.chat import ChatResponse, RetrievalAccessScope
 
 class RetrievalService(Protocol):
     def search(
-        self, request: AssessmentRequest, limit: int = 5
+        self,
+        request: AssessmentRequest,
+        access_scope: RetrievalAccessScope,
+        limit: int = 5,
     ) -> list[EvidenceItem]: ...
 
 
@@ -30,7 +33,10 @@ class RagRetrievalService:
         self.transport = transport
 
     def search(
-        self, request: AssessmentRequest, limit: int = 5
+        self,
+        request: AssessmentRequest,
+        access_scope: RetrievalAccessScope,
+        limit: int = 5,
     ) -> list[EvidenceItem]:
         if not self.service_url:
             return []
@@ -50,9 +56,7 @@ class RagRetrievalService:
                 "energy_source": energy_source,
                 "task_description": request.description,
             },
-            # Authentication is not connected in this branch. Keep assessment
-            # retrieval public-only, exactly like an unauthenticated chat call.
-            "access_scope": RetrievalAccessScope().model_dump(mode="json"),
+            "access_scope": access_scope.model_dump(mode="json"),
         }
         try:
             with httpx.Client(

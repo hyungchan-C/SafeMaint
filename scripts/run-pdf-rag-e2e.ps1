@@ -19,7 +19,8 @@ $environmentNames = @(
     "DOCUMENT_VOLUME_NAME", "PACKAGE_VOLUME_NAME", "BACKEND_PORT",
     "RUN_RAG_E2E", "RUN_EXTERNAL_LLM_E2E", "ALLOW_TEST_DB_MUTATION",
     "E2E_USER_PASSWORD", "E2E_RUN_ID", "ALLOW_EXTERNAL_LLM",
-    "LLM_BASE_URL", "LLM_ANALYZER_MODEL", "LLM_ANSWER_MODEL"
+    "LLM_BASE_URL", "LLM_ANALYZER_MODEL", "LLM_ANSWER_MODEL",
+    "DOCLING_ARTIFACTS_PATH", "DOCLING_OFFLINE"
 )
 foreach ($name in $environmentNames) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
@@ -76,6 +77,8 @@ try {
     $env:E2E_RUN_ID = $runId
     $env:RUN_EXTERNAL_LLM_E2E = "0"
     $env:ALLOW_EXTERNAL_LLM = "false"
+    $env:DOCLING_ARTIFACTS_PATH = "/models/docling"
+    $env:DOCLING_OFFLINE = "false"
     $composeEnvironmentReady = $true
 
     if ($RunExternalLlm) {
@@ -91,7 +94,7 @@ try {
         }
     }
 
-    Write-Host "[1/5] Building current backend, RAG, worker, and E2E images"
+    Write-Host "[1/6] Building current backend, RAG, worker, and E2E images"
     # backend/migrate/seed and rag/worker share build definitions. Building the
     # shared images concurrently can make Docker Desktop reuse a broken BuildKit
     # session, so build each unique image once in a deterministic order.
@@ -99,16 +102,25 @@ try {
     Invoke-Compose -Arguments @("--profile", "e2e", "build", "rag")
     Invoke-Compose -Arguments @("--profile", "e2e", "build", "e2e")
 
-    Write-Host "[2/5] Starting isolated DB, migrations, seed, backend, RAG, and worker"
+    Write-Host "[2/6] Preparing Docling models in the shared model cache"
+    Invoke-Compose -Arguments @(
+        "--profile", "e2e", "run", "--rm", "--no-deps", "worker",
+        "docling-tools", "models", "download", "-o", "/models/docling"
+    )
+    # E2E conversion must prove the downloaded artifacts are sufficient without
+    # silently reaching the network while a PDF job is being processed.
+    $env:DOCLING_OFFLINE = "true"
+
+    Write-Host "[3/6] Starting isolated DB, migrations, seed, backend, RAG, and worker"
     Invoke-Compose -Arguments @("--profile", "e2e", "up", "-d", "db", "migrate", "seed", "backend", "rag", "worker")
 
-    Write-Host "[3/5] Checking isolated service status"
+    Write-Host "[4/6] Checking isolated service status"
     Invoke-Compose -Arguments @("--profile", "e2e", "ps", "-a")
 
-    Write-Host "[4/5] Running fake-PDF upload, worker, BGE-M3, RAG, and optional LLM E2E"
+    Write-Host "[5/6] Running fake-PDF upload, worker, BGE-M3, RAG, and optional LLM E2E"
     Invoke-Compose -Arguments @("--profile", "e2e", "run", "--rm", "e2e")
 
-    Write-Host "[5/5] PDF RAG E2E completed successfully"
+    Write-Host "[6/6] PDF RAG E2E completed successfully"
 }
 catch {
     Write-Host "SafeMaint PDF RAG E2E failed: $($_.Exception.Message)" -ForegroundColor Red

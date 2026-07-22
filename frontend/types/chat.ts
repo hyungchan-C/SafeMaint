@@ -3,10 +3,20 @@ export interface ChatSource {
   chunk_id: string;
   title: string;
   source_type: string;
+  document_scope: "public" | "company" | null;
+  original_filename: string | null;
+  document_version: number | null;
+  section: string | null;
   excerpt: string;
   page: number | null;
+  page_start: number | null;
+  page_end: number | null;
+  publisher: string | null;
   url: string | null;
   similarity: number;
+  keyword_score: number;
+  retrieval_score: number;
+  reranker_score: number;
 }
 
 export interface ChatResponse {
