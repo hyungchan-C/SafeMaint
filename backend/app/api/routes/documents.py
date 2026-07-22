@@ -38,6 +38,7 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 ALLOWED_ACCESS_LEVELS = {"public", "restricted", "private"}
 COMPANY_UPLOAD_ACCESS_LEVELS = {"restricted", "private"}
 PDF_MAGIC = b"%PDF-"
+MAX_PROCESSING_WARNING_LENGTH = 500
 
 
 def _normalized_form_value(value: str, *, field: str, max_length: int) -> str:
@@ -48,6 +49,21 @@ def _normalized_form_value(value: str, *, field: str, max_length: int) -> str:
             detail=f"{field}은(는) 1자 이상 {max_length}자 이하여야 합니다.",
         )
     return normalized
+
+
+def _processing_summary(
+    version: DocumentVersion,
+) -> tuple[str | None, bool, str | None]:
+    metadata = dict(version.processing_metadata or {})
+    extractor = str(metadata.get("extractor") or "").strip() or None
+    fallback_used = bool(metadata.get("fallback_used"))
+    raw_warning = metadata.get("fallback_reason")
+    processing_warning = (
+        str(raw_warning).strip()[:MAX_PROCESSING_WARNING_LENGTH]
+        if raw_warning
+        else None
+    )
+    return extractor, fallback_used, processing_warning
 
 
 @router.get("/mine", response_model=list[UserDocumentSummary])
@@ -74,6 +90,7 @@ def list_my_documents(
         if document.id in seen_document_ids:
             continue
         seen_document_ids.add(document.id)
+        extractor, fallback_used, processing_warning = _processing_summary(version)
         summaries.append(
             UserDocumentSummary(
                 document_id=document.id,
@@ -82,6 +99,9 @@ def list_my_documents(
                 version_number=version.version_number,
                 status=version.status,
                 is_active=version.is_active,
+                extractor=extractor,
+                fallback_used=fallback_used,
+                processing_warning=processing_warning,
             )
         )
     return summaries

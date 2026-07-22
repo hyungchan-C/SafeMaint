@@ -8,8 +8,10 @@
 문서별 매직넘버 튜닝 없이도 제조사가 다른 PDF에 일반적으로 적용하기 위함입니다.
 GPU가 있으면 자동으로 사용하고, 없으면 CPU를 사용합니다(DOCLING_ACCELERATOR_DEVICE="auto").
 
-출력은 docs/preprocessing-contract.md 규격을 따르는 {"document": {...}, "chunks": [...]}
-입니다. document는 문서 레코드 1건, chunks는 청크 레코드 N건입니다.
+출력은 docs/preprocessing-contract.md 규격을 따르는
+{"document": {...}, "chunks": [...], "processing_metadata": {...}}입니다.
+document는 문서 레코드 1건, chunks는 청크 레코드 N건이며 processing_metadata는
+실제로 사용한 추출기와 안전한 폴백 정보를 담습니다.
 
 사용법:
     from pdf_pipeline import process_pdf
@@ -26,13 +28,244 @@ GPU가 있으면 자동으로 사용하고, 없으면 CPU를 사용합니다(DOC
 
 import hashlib
 import json
+import logging
+import os
 import re
+from dataclasses import dataclass
+from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 _HEADER_LABELS = {"section_header", "title"}
 _SKIP_LABELS = {"picture", "page_header", "page_footer"}
 DOCLING_ACCELERATOR_DEVICE = "auto"
+_DEFAULT_MAX_FILE_BYTES = 200 * 1024 * 1024
+_DEFAULT_MAX_PAGES = 500
+_DEFAULT_NUM_THREADS = 4
+_MAX_FALLBACK_REASON_LENGTH = 500
+_MODEL_ARTIFACT_SUFFIXES = {
+    ".bin",
+    ".ckpt",
+    ".msgpack",
+    ".onnx",
+    ".pth",
+    ".pt",
+    ".safetensors",
+}
+
+logger = logging.getLogger(__name__)
+
+
+class DoclingDeploymentError(RuntimeError):
+    """Docling package or offline artifacts are not deployable."""
+
+
+class DoclingConversionError(RuntimeError):
+    """Docling is installed but a document could not be converted safely."""
+
+
+class PdfProcessingLimitError(ValueError):
+    """The PDF exceeds the configured worker processing limits."""
+
+
+@dataclass(frozen=True, slots=True)
+class DoclingRuntimeSettings:
+    required: bool = True
+    allow_pymupdf_fallback: bool = True
+    artifacts_path: str | None = None
+    offline: bool = False
+    max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES
+    max_pages: int = _DEFAULT_MAX_PAGES
+    num_threads: int = _DEFAULT_NUM_THREADS
+    accelerator_device: str = DOCLING_ACCELERATOR_DEVICE
+
+    @classmethod
+    def from_env(cls) -> "DoclingRuntimeSettings":
+        return cls(
+            required=_bool_env("DOCLING_REQUIRED", True),
+            allow_pymupdf_fallback=_bool_env(
+                "DOCLING_ALLOW_PYMUPDF_FALLBACK", True
+            ),
+            artifacts_path=os.getenv("DOCLING_ARTIFACTS_PATH", "").strip() or None,
+            offline=_bool_env("DOCLING_OFFLINE", False),
+            max_file_bytes=_positive_int_env(
+                "DOCLING_MAX_FILE_BYTES", _DEFAULT_MAX_FILE_BYTES
+            ),
+            max_pages=_positive_int_env("DOCLING_MAX_PAGES", _DEFAULT_MAX_PAGES),
+            num_threads=_positive_int_env(
+                "DOCLING_NUM_THREADS", _DEFAULT_NUM_THREADS
+            ),
+            accelerator_device=os.getenv(
+                "DOCLING_ACCELERATOR_DEVICE", DOCLING_ACCELERATOR_DEVICE
+            ).strip()
+            or DOCLING_ACCELERATOR_DEVICE,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SectionExtractionResult:
+    sections: list[dict[str, Any]]
+    processing_metadata: dict[str, Any]
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value, got {value!r}.")
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    value = int(os.getenv(name, str(default)))
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than zero.")
+    return value
+
+
+def _installed_version(distribution_name: str) -> str:
+    try:
+        return version(distribution_name)
+    except PackageNotFoundError as exc:
+        raise DoclingDeploymentError(
+            f"Required package {distribution_name!r} is not installed."
+        ) from exc
+
+
+def _validate_artifacts_path(runtime: DoclingRuntimeSettings) -> Path | None:
+    if runtime.offline and not runtime.artifacts_path:
+        raise DoclingDeploymentError(
+            "DOCLING_OFFLINE=true requires DOCLING_ARTIFACTS_PATH."
+        )
+    if not runtime.artifacts_path:
+        return None
+    artifacts_path = Path(runtime.artifacts_path)
+    try:
+        if not artifacts_path.is_dir():
+            raise DoclingDeploymentError(
+                "DOCLING_ARTIFACTS_PATH must point to a directory containing "
+                "downloaded Docling models."
+            )
+        artifact_files = [
+            path
+            for path in artifacts_path.rglob("*")
+            if path.is_file()
+        ]
+    except OSError as exc:
+        raise DoclingDeploymentError(
+            "DOCLING_ARTIFACTS_PATH cannot be inspected."
+        ) from exc
+    if not artifact_files:
+        raise DoclingDeploymentError(
+            "DOCLING_ARTIFACTS_PATH does not contain downloaded Docling models."
+        )
+    has_model_file = any(
+        path.suffix.casefold() in _MODEL_ARTIFACT_SUFFIXES
+        for path in artifact_files
+    )
+    has_config_file = any(
+        path.name.casefold() in {"config.json", "preprocessor_config.json"}
+        for path in artifact_files
+    )
+    if not has_model_file or not has_config_file:
+        raise DoclingDeploymentError(
+            "DOCLING_ARTIFACTS_PATH is missing a Docling model weight or config "
+            "file. Run 'docling-tools models download' with the same Docling "
+            "version and preserve its directory structure."
+        )
+    return artifacts_path
+
+
+def _is_docling_deployment_failure(
+    error: BaseException,
+    runtime: DoclingRuntimeSettings,
+) -> bool:
+    """Identify model/configuration failures that must never use a PDF fallback."""
+    if isinstance(error, (ModuleNotFoundError, ImportError, FileNotFoundError, PermissionError)):
+        return True
+    message = " ".join(str(error).casefold().split())
+    deployment_markers = (
+        "model.safetensors",
+        "missing safe tensors",
+        "missing model",
+        "missing config",
+        "artifact",
+        "checkpoint",
+        "weights",
+        "downloads disabled",
+        "download model",
+        "huggingface",
+        "repository",
+    )
+    if any(marker in message for marker in deployment_markers):
+        return True
+    return bool(runtime.offline and isinstance(error, (OSError, RuntimeError)))
+
+
+def validate_docling_runtime(
+    runtime: DoclingRuntimeSettings | None = None,
+) -> str:
+    """Fail fast for package/configuration problems before a job is claimed."""
+    runtime = runtime or DoclingRuntimeSettings.from_env()
+    try:
+        import_module("docling.document_converter")
+        import_module("docling.datamodel.pipeline_options")
+        import_module("docling_core.types.doc")
+    except (ModuleNotFoundError, ImportError) as exc:
+        raise DoclingDeploymentError(
+            f"Docling runtime import failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    docling_version = _installed_version("docling")
+    _validate_artifacts_path(runtime)
+    if runtime.offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    return docling_version
+
+
+def _safe_fallback_reason(prefix: str, error: BaseException | None = None) -> str:
+    if error is None:
+        reason = prefix
+    else:
+        message = " ".join(str(error).split())
+        reason = f"{prefix}: {type(error).__name__}"
+        if message:
+            reason = f"{reason}: {message}"
+    return reason[:_MAX_FALLBACK_REASON_LENGTH]
+
+
+def _log_context_values(
+    pdf_path: str,
+    log_context: Mapping[str, Any] | None,
+) -> tuple[str, str, str]:
+    context = log_context or {}
+    return (
+        str(context.get("document_id") or "unknown"),
+        str(context.get("document_version_id") or "unknown"),
+        Path(pdf_path).name,
+    )
+
+
+def _processing_metadata(
+    *,
+    extractor: str,
+    extractor_version: str,
+    fallback_used: bool,
+    fallback_reason: str | None,
+    ocr_used: bool,
+) -> dict[str, Any]:
+    return {
+        "extractor": extractor,
+        "extractor_version": extractor_version,
+        "fallback_used": fallback_used,
+        "fallback_reason": fallback_reason,
+        "ocr_used": ocr_used,
+    }
 
 
 # ---------- 1. 텍스트 추출 (docling 레이아웃 모델) ----------
@@ -47,7 +280,10 @@ def _needs_ocr(pdf_path: str, empty_page_ratio: float = 0.5) -> bool:
     return total_pages > 0 and (empty_page_count / total_pages) > empty_page_ratio
 
 
-def _build_converter(do_ocr: bool) -> Any:
+def _build_converter(
+    do_ocr: bool,
+    runtime: DoclingRuntimeSettings,
+) -> Any:
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import (
         AcceleratorDevice,
@@ -58,9 +294,12 @@ def _build_converter(do_ocr: bool) -> Any:
 
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = do_ocr
+    artifacts_path = _validate_artifacts_path(runtime)
+    if artifacts_path is not None:
+        pipeline_options.artifacts_path = artifacts_path
     pipeline_options.accelerator_options = AcceleratorOptions(
-        num_threads=8,
-        device=AcceleratorDevice(DOCLING_ACCELERATOR_DEVICE),
+        num_threads=runtime.num_threads,
+        device=AcceleratorDevice(runtime.accelerator_device),
     )
     return DocumentConverter(
         format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
@@ -115,7 +354,10 @@ def _push_header(stack: list[tuple[int, str]], level: int, text: str) -> list[st
     return [t for _, t in stack]
 
 
-def extract_sections_with_docling(pdf_path: str) -> list[dict]:
+def extract_sections_with_docling(
+    pdf_path: str,
+    runtime: DoclingRuntimeSettings,
+) -> tuple[list[dict[str, Any]], bool]:
     """
     docling으로 문서를 파싱해 SECTION_HEADER/TITLE 라벨을 기준으로 섹션을 묶는다.
     각 섹션은 본문/표를 구분한 blocks 리스트를 가지며, 표는 나중에 행 단위로 청킹하기 위해
@@ -126,10 +368,17 @@ def extract_sections_with_docling(pdf_path: str) -> list[dict]:
 
     do_ocr = _needs_ocr(pdf_path)
     if do_ocr:
-        print(f"[정보] {pdf_path}: 텍스트 없는 페이지 비율이 높아 OCR을 사용합니다 (느려질 수 있음).")
+        logger.info(
+            "Docling OCR enabled filename=%s",
+            Path(pdf_path).name,
+        )
 
-    converter = _build_converter(do_ocr)
-    doc = converter.convert(pdf_path).document
+    converter = _build_converter(do_ocr, runtime)
+    doc = converter.convert(
+        pdf_path,
+        max_file_size=runtime.max_file_bytes,
+        max_num_pages=runtime.max_pages,
+    ).document
 
     sections = []
     header_stack: list[tuple[int, str]] = []
@@ -179,7 +428,7 @@ def extract_sections_with_docling(pdf_path: str) -> list[dict]:
         buf_pages.append(page_no or current_start_page)
 
     flush()
-    return sections
+    return sections, do_ocr
 
 
 def _merge_vertical_fragments(lines: list[dict], x_tol: float = 1.5, y_tol: float = 3.0) -> list[dict]:
@@ -288,17 +537,125 @@ def extract_sections_with_pymupdf(pdf_path: str, header_min_size: float = 8.8) -
     return sections
 
 
-def extract_sections(pdf_path: str) -> list[dict]:
-    """docling 추출을 우선 시도하고, 라이브러리 문제로 실패하거나 섹션을 하나도 못 뽑으면 PyMuPDF 폰트 휴리스틱으로 재시도."""
+def extract_sections(
+    pdf_path: str,
+    *,
+    runtime: DoclingRuntimeSettings | None = None,
+    log_context: Mapping[str, Any] | None = None,
+) -> SectionExtractionResult:
+    """Prefer Docling and only fall back for document-specific failures."""
+    runtime = runtime or DoclingRuntimeSettings.from_env()
+    path = Path(pdf_path)
+    file_size = path.stat().st_size
+    if file_size > runtime.max_file_bytes:
+        raise PdfProcessingLimitError(
+            f"PDF file size {file_size} exceeds limit {runtime.max_file_bytes}."
+        )
+    import fitz  # PyMuPDF
+
+    with fitz.open(path) as pdf:
+        page_count = len(pdf)
+    if page_count > runtime.max_pages:
+        raise PdfProcessingLimitError(
+            f"PDF page count {page_count} exceeds limit {runtime.max_pages}."
+        )
+
+    document_id, version_id, filename = _log_context_values(pdf_path, log_context)
     try:
-        sections = extract_sections_with_docling(pdf_path)
+        docling_version = validate_docling_runtime(runtime)
+    except DoclingDeploymentError as exc:
+        if runtime.required:
+            raise
+        if not runtime.allow_pymupdf_fallback:
+            raise DoclingConversionError(
+                "Docling is unavailable and PyMuPDF fallback is disabled."
+            ) from exc
+        fallback_reason = _safe_fallback_reason("Docling unavailable", exc)
+        logger.warning(
+            "PDF extraction fallback document_id=%s document_version_id=%s "
+            "filename=%s extractor=pymupdf reason=%s",
+            document_id,
+            version_id,
+            filename,
+            fallback_reason,
+        )
+        return SectionExtractionResult(
+            sections=extract_sections_with_pymupdf(pdf_path),
+            processing_metadata=_processing_metadata(
+                extractor="pymupdf",
+                extractor_version=_installed_version("PyMuPDF"),
+                fallback_used=True,
+                fallback_reason=fallback_reason,
+                ocr_used=False,
+            ),
+        )
+
+    try:
+        sections, ocr_used = extract_sections_with_docling(pdf_path, runtime)
+    except (ModuleNotFoundError, ImportError) as exc:
+        raise DoclingDeploymentError(
+            f"Docling runtime import failed during conversion: {type(exc).__name__}: {exc}"
+        ) from exc
     except Exception as exc:
-        print(f"[경고] {pdf_path}: docling 변환 실패({exc}). PyMuPDF 폴백으로 재시도합니다.")
-        return extract_sections_with_pymupdf(pdf_path)
+        if _is_docling_deployment_failure(exc, runtime):
+            raise DoclingDeploymentError(
+                _safe_fallback_reason("Docling model/configuration failed", exc)
+            ) from exc
+        if not runtime.allow_pymupdf_fallback:
+            raise DoclingConversionError(
+                _safe_fallback_reason("Docling conversion failed", exc)
+            ) from exc
+        fallback_reason = _safe_fallback_reason("Docling conversion failed", exc)
+        logger.exception(
+            "PDF extraction fallback document_id=%s document_version_id=%s "
+            "filename=%s extractor=pymupdf reason=%s",
+            document_id,
+            version_id,
+            filename,
+            fallback_reason,
+        )
+        return SectionExtractionResult(
+            sections=extract_sections_with_pymupdf(pdf_path),
+            processing_metadata=_processing_metadata(
+                extractor="pymupdf",
+                extractor_version=_installed_version("PyMuPDF"),
+                fallback_used=True,
+                fallback_reason=fallback_reason,
+                ocr_used=False,
+            ),
+        )
     if not sections:
-        print(f"[경고] {pdf_path}: docling이 섹션을 하나도 추출하지 못했습니다. PyMuPDF 폴백으로 재시도합니다.")
-        return extract_sections_with_pymupdf(pdf_path)
-    return sections
+        if not runtime.allow_pymupdf_fallback:
+            raise DoclingConversionError("Docling returned no sections.")
+        fallback_reason = _safe_fallback_reason("Docling returned no sections")
+        logger.warning(
+            "PDF extraction fallback document_id=%s document_version_id=%s "
+            "filename=%s extractor=pymupdf reason=%s",
+            document_id,
+            version_id,
+            filename,
+            fallback_reason,
+        )
+        return SectionExtractionResult(
+            sections=extract_sections_with_pymupdf(pdf_path),
+            processing_metadata=_processing_metadata(
+                extractor="pymupdf",
+                extractor_version=_installed_version("PyMuPDF"),
+                fallback_used=True,
+                fallback_reason=fallback_reason,
+                ocr_used=False,
+            ),
+        )
+    return SectionExtractionResult(
+        sections=sections,
+        processing_metadata=_processing_metadata(
+            extractor="docling",
+            extractor_version=docling_version,
+            fallback_used=False,
+            fallback_reason=None,
+            ocr_used=ocr_used,
+        ),
+    )
 
 
 # ---------- 2. 노이즈 제거 ----------
@@ -496,10 +853,12 @@ def process_pdf(
     source_type: str = "manual",
     document_type_code: str = "equipment_manual",
     access_level: str = "restricted",
+    docling_settings: DoclingRuntimeSettings | None = None,
+    log_context: Mapping[str, Any] | None = None,
 ) -> dict:
     """
     PDF 한 개를 받아서 docs/preprocessing-contract.md 규격의
-    {"document": {...}, "chunks": [...]}를 반환.
+    {"document": {...}, "chunks": [...], "processing_metadata": {...}}를 반환.
 
     access_level 기본값은 "restricted"로 둔다. 제조사 매뉴얼의 재배포 조건이
     확인되기 전까지는 공개로 단정하지 않기 위함 (architecture.md 데이터 계층 정책 참고).
@@ -530,7 +889,12 @@ def process_pdf(
         "metadata": doc_metadata,
     }
 
-    sections = extract_sections(pdf_path)
+    extraction = extract_sections(
+        pdf_path,
+        runtime=docling_settings,
+        log_context=log_context,
+    )
+    sections = extraction.sections
     for s in sections:
         s["blocks"] = clean_blocks(s["blocks"])
 
@@ -559,7 +923,11 @@ def process_pdf(
                 "embedding_status": "pending",
             })
 
-    return {"document": document, "chunks": chunks}
+    return {
+        "document": document,
+        "chunks": chunks,
+        "processing_metadata": extraction.processing_metadata,
+    }
 
 
 if __name__ == "__main__":

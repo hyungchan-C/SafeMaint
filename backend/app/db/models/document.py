@@ -268,6 +268,12 @@ class DocumentVersion(UuidPrimaryKeyMixin, TimestampMixin, Base):
         String(30), nullable=False, server_default=text("'pending'"), index=True
     )
     failure_reason: Mapped[str | None] = mapped_column(Text)
+    processing_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false"), index=True
     )

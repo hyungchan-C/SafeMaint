@@ -1,6 +1,6 @@
 # PDF 전처리 파이프라인
 
-`ai/preprocessing/pdf_pipeline.py`는 제조사 PDF를 Docling으로 분석하고 임베딩 직전 JSON 청크로 변환합니다. NVIDIA GPU가 있으면 자동으로 사용하고, 없으면 CPU를 선택합니다. Docling 변환 자체가 실패하면 PyMuPDF 폴백을 사용합니다.
+`ai/preprocessing/pdf_pipeline.py`는 제조사 PDF를 Docling으로 분석하고 임베딩 직전 JSON 청크로 변환합니다. NVIDIA GPU가 있으면 자동으로 사용하고, 없으면 CPU를 선택합니다. Docling 패키지·오프라인 모델 누락은 배포 오류로 처리하며, Docling이 정상 설치된 상태에서 특정 PDF 변환만 실패한 경우에만 설정에 따라 PyMuPDF 폴백을 사용합니다.
 
 ## 개발 환경 준비
 
@@ -34,9 +34,10 @@ result = process_pdf(
 )
 result["document"]  # 문서 레코드 1건
 result["chunks"]    # 청크 레코드 N건
+result["processing_metadata"]  # extractor, 버전, 폴백 및 OCR 정보
 ```
 
-반환값은 `docs/preprocessing-contract.md` 규격을 따르는 `{"document": {...}, "chunks": [...]}`입니다. `document`에는 `external_id`, `source_type`, `access_level`, `file_sha256` 등이, 각 `chunk`에는 `document_external_id`, `chunk_index`, `content`, `content_hash`, `section_path`, `embedding_status` 등이 포함됩니다. 긴 문장과 표도 설정한 `chunk_size`를 넘지 않도록 최종 분할합니다.
+반환값은 기존 `{"document": {...}, "chunks": [...]}` 계약을 유지하면서 `processing_metadata`를 추가합니다. `document`에는 `external_id`, `source_type`, `access_level`, `file_sha256` 등이, 각 `chunk`에는 `document_external_id`, `chunk_index`, `content`, `content_hash`, `section_path`, `embedding_status` 등이 포함됩니다. 긴 문장과 표도 설정한 `chunk_size`를 넘지 않도록 최종 분할합니다.
 
 ## 테스트
 
@@ -73,10 +74,10 @@ result["document_id"]  # 적재된 documents.id (UUID)
 result["chunk_count"]  # 적재된 청크 수
 ```
 
-> ⚠️ 현재 `embed_pending_chunks()`는 `Document.source_type == "incident"`로
-> 필터링돼 있어, PDF 매뉴얼(`source_type="manual"`)로 적재된 청크는 이 함수가
-> 아직 집어가지 않습니다. 실제로 임베딩이 채워지려면 이 필터를 일반화하는
-> 작업이 팀원 쪽에 필요합니다.
+`embed_pending_chunks()`는 처리 범위를 호출자가 명시하도록 일반화돼 있습니다.
+매뉴얼을 적재한 뒤에는 생성된 `document_id`만 지정해 기존 pending 청크와 섞이지
+않게 임베딩하세요. `source_type`을 지정하지 않은 전체 pending 처리는 CLI의
+`--all-pending`를 명시한 경우에만 허용됩니다.
 
 ## BGE-M3 임베딩 실험
 

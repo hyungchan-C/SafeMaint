@@ -66,12 +66,20 @@ function metersPerDegLon(latDeg: number) {
 const GPS_MAP_SIZE_PX = 320;
 const GPS_MAP_SCALE_PX_PER_M = 2;
 const GPS_EQUIPMENT_RADIUS_M = 30;
+const GPS_MAP_MARKER_EDGE_PADDING_PX = 20;
 
 function metersOffsetFromCenter(center: { lat: number; lon: number }, lat: number, lon: number) {
   return {
     x: (lon - center.lon) * metersPerDegLon(center.lat),
     y: (center.lat - lat) * METERS_PER_DEG_LAT,
   };
+}
+
+// 지도 박스는 overflow: hidden이라, 표시 범위(기준점에서 반경 약 80m) 밖의 좌표는
+// 그냥 안 보이게 잘려서 "마커가 사라진" 것처럼 보인다. 박스 가장자리에 붙여서라도
+// 항상 어느 방향에 있는지는 보이도록 좌표를 박스 안쪽으로 눌러 담는다.
+function clampToMapBounds(px: number) {
+  return Math.min(GPS_MAP_SIZE_PX - GPS_MAP_MARKER_EDGE_PADDING_PX, Math.max(GPS_MAP_MARKER_EDGE_PADDING_PX, px));
 }
 
 const STORAGE_KEYS = {
@@ -396,6 +404,10 @@ function WorkspaceScreen({
   const gpsWatchIdRef = useRef<number | null>(null);
   const gpsOriginRef = useRef<{ latitude: number; longitude: number } | null>(null);
   const gpsOriginLockedRef = useRef(false);
+  const gpsManualOverrideRef = useRef(false);
+  const latestRealPositionRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  const [hasRealFix, setHasRealFix] = useState(false);
+  const calibratedRequestIdRef = useRef(0);
   const [activeTab, setActiveTab] = useState<"summary" | "accidents" | "evidence" | "tbm">("summary");
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -500,12 +512,23 @@ function WorkspaceScreen({
       (position) => {
         setGpsPermissionDenied(false);
         const current = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+        // override 중에도(수동 확인 결과를 화면에 띄워둔 동안에도) 최신 실제 위치는
+        // 계속 기록해 둔다. "실제 위치로 돌아가기"를 누르면 다음 업데이트를 기다릴
+        // 필요 없이 이 값을 바로 보여줄 수 있다.
+        latestRealPositionRef.current = current;
+        setHasRealFix(true);
         if (!gpsOriginLockedRef.current) {
-          gpsOriginLockedRef.current = true;
-          gpsOriginRef.current = current;
-          setGpsOrigin(current);
-          void loadCalibratedEquipment(current);
+          // 실제 위치가 처음 잡히는 순간으로, "이 위치로 다시 보정"과 완전히 같은
+          // 경로(recalibrateTo)로 기준점을 실제 위치로 승격한다. 이후 코드는 이미
+          // 여기서 다 처리됐으므로 더 실행할 게 없다.
+          recalibrateTo(current, { lockOrigin: true, source: "real" });
+          return;
         }
+        // "이 위치로 확인"(수동 1회 확인) 직후에는, 뒤이어 들어오는 실제 위치
+        // 업데이트가 화면에 띄워둔 수동 확인 결과를 조용히 덮어쓰지 않도록 건너뛴다.
+        // "실제 위치로 돌아가기"나 "이 위치로 다시 보정"이 이 override를 해제하므로
+        // 그 이후엔 다시 실시간 반영된다.
+        if (gpsManualOverrideRef.current) return;
         // 기준점(설비 배치)을 옮기는 것과 별개로, 이 결과가 "실제 위치"에서 온
         // 것이라는 표시는 실제 위치 업데이트가 올 때마다 매번 갱신한다.
         setGpsSource("real");
@@ -554,6 +577,17 @@ function WorkspaceScreen({
   }
 
   const gpsMapCenter = gpsOrigin ? { lat: gpsOrigin.latitude, lon: gpsOrigin.longitude } : null;
+  const gpsLiveOffset =
+    gpsMapCenter && gpsLivePosition
+      ? metersOffsetFromCenter(gpsMapCenter, gpsLivePosition.latitude, gpsLivePosition.longitude)
+      : null;
+  const gpsLiveDistanceM = gpsLiveOffset ? Math.round(Math.hypot(gpsLiveOffset.x, gpsLiveOffset.y)) : 0;
+  // 지도 박스가 실제로 표시하는 반경(대략 GPS_MAP_SIZE_PX/2 ÷ GPS_MAP_SCALE_PX_PER_M, m
+  // 단위)보다 멀면 마커가 박스 밖으로 밀려서 overflow:hidden에 잘려 안 보이게 된다.
+  const gpsLiveIsOffMap =
+    gpsLiveOffset !== null &&
+    (Math.abs(gpsLiveOffset.x) * GPS_MAP_SCALE_PX_PER_M > GPS_MAP_SIZE_PX / 2 - GPS_MAP_MARKER_EDGE_PADDING_PX ||
+      Math.abs(gpsLiveOffset.y) * GPS_MAP_SCALE_PX_PER_M > GPS_MAP_SIZE_PX / 2 - GPS_MAP_MARKER_EDGE_PADDING_PX);
 
   function saveHistory(questionText: string, summary: string, riskLabel: string) {
     const current = readStorage<HistoryItem[]>(STORAGE_KEYS.history, []);
@@ -836,6 +870,11 @@ function WorkspaceScreen({
   }
 
   async function loadCalibratedEquipment(origin: { latitude: number; longitude: number }) {
+    // 마운트 시 기본 좌표 확인과 실제 GPS 최초 확인이 거의 동시에 이 함수를 호출할 수
+    // 있는데, 두 요청의 응답 순서는 보장되지 않는다. 나중에 시작된 요청보다 먼저
+    // 시작된(=원점이 이미 낡은) 요청의 응답이 더 늦게 와서 최신 상태를 덮어쓰는 걸
+    // 막기 위해, 가장 마지막으로 시작된 요청의 결과만 반영한다.
+    const requestId = ++calibratedRequestIdRef.current;
     try {
       const params = new URLSearchParams({
         origin_latitude: String(origin.latitude),
@@ -843,7 +882,9 @@ function WorkspaceScreen({
       });
       const response = await fetch(`${getApiBaseUrl()}/api/v1/gps/equipment?${params.toString()}`);
       if (!response.ok) return;
-      setCalibratedEquipment((await response.json()) as VirtualEquipment[]);
+      const data = (await response.json()) as VirtualEquipment[];
+      if (requestId !== calibratedRequestIdRef.current) return;
+      setCalibratedEquipment(data);
     } catch {
       // 지도 표시용 목록을 못 불러와도 위치 추적 자체는 계속 진행
     }
@@ -893,36 +934,67 @@ function WorkspaceScreen({
     return { latitude, longitude };
   }
 
+  // 기준점(설비 배치)을 point로 재설정하는 유일한 경로. 마운트 시 기본값 표시,
+  // 실제 GPS 최초 확인, "이 위치로 다시 보정" 버튼이 모두 이 함수 하나만 거치게
+  // 해서, 원점을 옮기는 로직이 여러 곳에 비슷하게 중복되며 조금씩 어긋나는 걸 막는다.
   // lockOrigin=true(기본값)는 사용자가 명시적으로 기준점을 다시 잡는 경우로,
   // 이후 실제 GPS가 잡혀도 이 기준점을 몰래 덮어쓰지 않도록 잠근다.
   // mount 시 자동 기본값 설정만 lockOrigin=false로 호출해, 실제 GPS가 처음
   // 잡히면 그쪽으로 자동 승격될 수 있게 열어둔다.
+  function recalibrateTo(point: { latitude: number; longitude: number }, options: { lockOrigin: boolean; source: "default" | "real" }) {
+    gpsOriginRef.current = point;
+    if (options.lockOrigin) gpsOriginLockedRef.current = true;
+    // 기준점을 다시 잡는 것이므로, 이 시점부터는 실제 위치 변화가 이 기준점
+    // 대비로 다시 실시간 반영되도록 수동 override를 해제한다.
+    gpsManualOverrideRef.current = false;
+    setGpsOrigin(point);
+    setGpsLivePosition(point);
+    setGpsSource(options.source);
+    // 입력창을 이 기준점으로 동기화해 둔다. 안 그러면 실제 GPS가 잡혀 기준점이
+    // 사용자의 실제 위치로 옮겨간 뒤에도 입력창엔 옛날 기본값이 그대로 남아서,
+    // "조금만 옮겨서 테스트"해도 실제로는 기준점에서 수백~수천m 떨어진 값을
+    // 건드리는 셈이 되어 매번 반경 밖으로 나온다.
+    setManualLatitude(point.latitude.toFixed(6));
+    setManualLongitude(point.longitude.toFixed(6));
+    void loadCalibratedEquipment(point);
+    void checkLocation(point.latitude, point.longitude, point);
+  }
+
   function recalibrateManualLocation(lockOrigin = true) {
     const point = parseManualCoordinates();
     if (!point) return;
-    gpsOriginRef.current = point;
-    if (lockOrigin) gpsOriginLockedRef.current = true;
-    setGpsOrigin(point);
-    setGpsLivePosition(point);
-    setGpsSource("default");
-    void loadCalibratedEquipment(point);
-    void checkLocation(point.latitude, point.longitude, point);
+    recalibrateTo(point, { lockOrigin, source: "default" });
   }
 
   function checkManualLocation() {
     const point = parseManualCoordinates();
     if (!point) return;
-    if (!gpsOriginRef.current) {
-      gpsOriginRef.current = point;
-      gpsOriginLockedRef.current = true;
-      setGpsOrigin(point);
-      void loadCalibratedEquipment(point);
-    }
     // 수동 입력으로 확인한 결과이므로, 직전에 실제 위치로 표시돼 있었더라도
-    // 지금 보여주는 결과의 출처는 "기본 테스트 좌표"로 명확히 되돌린다.
+    // 지금 보여주는 결과의 출처는 "기본 테스트 좌표"로 명확히 되돌린다. 이어서
+    // 들어오는 실제 위치 업데이트가 이 결과를 곧바로 덮어쓰지 않도록 잠근다.
+    // (기준점은 마운트 시 recalibrateTo로 항상 먼저 설정돼 있으므로 건드리지 않는다.)
+    gpsManualOverrideRef.current = true;
     setGpsSource("default");
     setGpsLivePosition(point);
-    void checkLocation(point.latitude, point.longitude, gpsOriginRef.current);
+    void checkLocation(point.latitude, point.longitude, gpsOriginRef.current ?? point);
+  }
+
+  // "이 위치로 확인"으로 실제 위치 반영을 잠가둔 뒤, 기준점(설비 배치)은 그대로 둔 채
+  // 실시간 위치 표시만 재개한다. 기준점까지 옮기고 싶다면 recalibrateManualLocation을 쓴다.
+  function switchToRealPosition() {
+    gpsManualOverrideRef.current = false;
+    const real = latestRealPositionRef.current;
+    if (!real) {
+      setLocationStatus("아직 확인된 실제 위치가 없습니다");
+      return;
+    }
+    setGpsSource("real");
+    setGpsLivePosition(real);
+    // 여기서도 입력창을 실제 위치로 맞춰둬야, 이어서 "조금 옮겨서" 테스트할 때
+    // 기준점 근처의 의미 있는 값에서 시작한다.
+    setManualLatitude(real.latitude.toFixed(6));
+    setManualLongitude(real.longitude.toFixed(6));
+    void checkLocation(real.latitude, real.longitude, gpsOriginRef.current ?? real);
   }
 
   function stopSpeech() {
@@ -1086,8 +1158,10 @@ function WorkspaceScreen({
         </summary>
         <section className="panel gps-map-panel" aria-label="가상 GPS 자동 위치 추적">
         <p className="muted-copy">
-          브라우저가 실제 위치를 확인하면 자동으로 그 위치 기준으로 전환되고, 실패하면 기본 테스트 좌표를 사용합니다.
-          아래 위경도 값을 바꿔서 "이동"을 시뮬레이션할 수도 있습니다(수동으로 확인하면 실제 위치 대신 그 값이 기준이 됩니다).
+          브라우저가 실제 위치를 확인하면 자동으로 그 위치를 보여주고, 실패하면 기본 테스트 좌표를 사용합니다.
+          아래 위경도 값을 바꿔 <strong>이 위치로 확인</strong>을 누르면 설비 배치 기준점은 그대로 둔 채 그 좌표에서의 결과만
+          1회성으로 미리볼 수 있고, <strong>실제 위치로 돌아가기</strong>로 다시 실시간 위치 표시로 돌아갈 수 있습니다.
+          <strong>이 위치로 다시 보정</strong>은 설비 배치 자체의 기준점을 그 좌표로 옮깁니다.
           (점선 원은 설비별 근접 판정 반경 {GPS_EQUIPMENT_RADIUS_M}m)
         </p>
         {gpsPermissionDenied && (
@@ -1111,21 +1185,26 @@ function WorkspaceScreen({
                 </div>
               );
             })}
-            {gpsLivePosition && (() => {
-              const offset = metersOffsetFromCenter(gpsMapCenter, gpsLivePosition.latitude, gpsLivePosition.longitude);
+            {gpsLivePosition && gpsLiveOffset && (() => {
+              const rawLeft = GPS_MAP_SIZE_PX / 2 + gpsLiveOffset.x * GPS_MAP_SCALE_PX_PER_M;
+              const rawTop = GPS_MAP_SIZE_PX / 2 + gpsLiveOffset.y * GPS_MAP_SCALE_PX_PER_M;
               return (
                 <span
-                  className="gps-map-marker"
-                  style={{
-                    left: GPS_MAP_SIZE_PX / 2 + offset.x * GPS_MAP_SCALE_PX_PER_M,
-                    top: GPS_MAP_SIZE_PX / 2 + offset.y * GPS_MAP_SCALE_PX_PER_M,
-                  }}
+                  className={gpsLiveIsOffMap ? "gps-map-marker gps-map-marker-clamped" : "gps-map-marker"}
+                  style={{ left: clampToMapBounds(rawLeft), top: clampToMapBounds(rawTop) }}
+                  title={gpsLiveIsOffMap ? `기준점에서 약 ${gpsLiveDistanceM}m 떨어져 있어 방향만 표시됩니다` : undefined}
                 >📍</span>
               );
             })()}
           </div>
         ) : (
           <p className="muted-copy">위치 권한을 허용하면 지도가 표시됩니다.</p>
+        )}
+        {gpsLiveIsOffMap && (
+          <p className="muted-copy">
+            📍 지금 확인 중인 위치는 지도에 보이는 범위(기준점에서 약 {Math.round(GPS_MAP_SIZE_PX / 2 / GPS_MAP_SCALE_PX_PER_M)}m
+            이내) 밖이라, 방향만 가장자리에 표시됩니다. 실제 거리는 약 {gpsLiveDistanceM}m입니다.
+          </p>
         )}
         <div className="gps-manual-input">
           <p className="muted-copy">기본 좌표로 이미 자동 확인되어 있습니다. 다른 위치를 테스트하려면 값을 바꿔서 확인해 보세요.</p>
@@ -1148,6 +1227,9 @@ function WorkspaceScreen({
             </label>
             <button type="button" onClick={checkManualLocation} disabled={isGpsChecking}>
               이 위치로 확인
+            </button>
+            <button type="button" onClick={switchToRealPosition} disabled={isGpsChecking || !hasRealFix}>
+              실제 위치로 돌아가기
             </button>
             <button type="button" onClick={() => recalibrateManualLocation()} disabled={isGpsChecking}>
               이 위치로 다시 보정

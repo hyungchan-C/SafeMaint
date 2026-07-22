@@ -9,6 +9,7 @@ import psycopg
 import pytest
 
 from rag_service.config import settings
+from rag_service import pdf_processing
 from rag_service.retrieval import psycopg_database_url
 from rag_service.worker import claim_job, complete_job
 
@@ -25,7 +26,10 @@ class FakeEmbedder:
         return np.asarray([[1.0, 0.0, 0.0] for _ in texts], dtype=np.float32)
 
 
-def test_worker_extracts_embeds_and_moves_version_to_review(tmp_path: Path) -> None:
+def test_worker_extracts_embeds_and_moves_version_to_review(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     assert settings.database_url.rsplit("/", 1)[-1].endswith("_test")
     path = tmp_path / "worker-manual.pdf"
     pdf = fitz.open()
@@ -33,6 +37,31 @@ def test_worker_extracts_embeds_and_moves_version_to_review(tmp_path: Path) -> N
     page.insert_text((72, 72), "Disconnect power and apply lockout before maintenance.")
     pdf.save(path)
     pdf.close()
+
+    def fake_process_pdf(*_args, **_kwargs) -> dict:
+        content = "Disconnect power and apply lockout before maintenance."
+        return {
+            "document": {"external_id": "worker-test"},
+            "chunks": [
+                {
+                    "document_external_id": "worker-test",
+                    "chunk_index": 0,
+                    "content": content,
+                    "page_number": 1,
+                    "section_path": ["Safety"],
+                    "metadata": {},
+                }
+            ],
+            "processing_metadata": {
+                "extractor": "docling",
+                "extractor_version": "2.113.0",
+                "fallback_used": False,
+                "fallback_reason": None,
+                "ocr_used": False,
+            },
+        }
+
+    monkeypatch.setattr(pdf_processing, "process_pdf", fake_process_pdf)
 
     document_id = uuid4()
     version_id = uuid4()
@@ -86,10 +115,16 @@ def test_worker_extracts_embeds_and_moves_version_to_review(tmp_path: Path) -> N
     with psycopg.connect(database_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT status, page_count FROM document_versions WHERE id = %s",
+                """
+                SELECT status, page_count, processing_metadata
+                FROM document_versions WHERE id = %s
+                """,
                 (version_id,),
             )
-            assert cursor.fetchone() == ("review_required", 1)
+            status, page_count, processing_metadata = cursor.fetchone()
+            assert (status, page_count) == ("review_required", 1)
+            assert processing_metadata["extractor"] == "docling"
+            assert processing_metadata["fallback_used"] is False
             cursor.execute(
                 "SELECT status FROM document_processing_jobs WHERE id = %s", (job_id,)
             )

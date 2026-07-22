@@ -110,12 +110,17 @@ def test_upload_rejects_empty_file() -> None:
 def test_upload_rejects_oversized_file() -> None:
     from app.core.config import settings
 
-    oversized = b"0" * (settings.document_max_upload_bytes + 1)
-    response = asyncio.run(
-        _upload(
-            _pdf_file(content=oversized),
-            {"product_type": "포토센서", "model_name": "BTS"},
+    original_limit = settings.document_max_upload_bytes
+    object.__setattr__(settings, "document_max_upload_bytes", 32)
+    try:
+        oversized = b"%PDF-" + (b"0" * 28)
+        response = asyncio.run(
+            _upload(
+                _pdf_file(content=oversized),
+                {"product_type": "포토센서", "model_name": "BTS"},
+            )
         )
-    )
+    finally:
+        object.__setattr__(settings, "document_max_upload_bytes", original_limit)
 
     assert response.status_code == 413

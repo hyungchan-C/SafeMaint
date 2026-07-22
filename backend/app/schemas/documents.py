@@ -17,6 +17,9 @@ class UserDocumentSummary(BaseModel):
     version_number: int
     status: str
     is_active: bool
+    extractor: str | None = None
+    fallback_used: bool = False
+    processing_warning: str | None = None
 
 
 class ApproveDocumentResponse(BaseModel):
