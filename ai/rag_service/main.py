@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, status
 from rag_service.config import settings
 from rag_service.retrieval import PgvectorRetriever
 from rag_service.schemas import ChatResponse, ChatSource, InternalChatRequest
-from safety_guidance import format_safety_answer
+from evidence_policy import NO_EVIDENCE_WARNING, format_no_evidence_answer
 
 
 app = FastAPI(
@@ -80,19 +80,9 @@ async def chat(payload: InternalChatRequest) -> ChatResponse:
             detail="Hybrid document retrieval failed.",
         ) from exc
 
-    context_text = " ".join(
-        value
-        for value in (
-            payload.context.equipment_name,
-            payload.context.component_name,
-            payload.context.task_type,
-            payload.question,
-        )
-        if value
-    )
     warning = None
     if not sources:
-        warning = "검색 범위에서 질문 주제와 일치하는 근거를 찾지 못했습니다."
+        warning = NO_EVIDENCE_WARNING
     if _unresolved_legacy_manuals(payload):
         manual_warning = (
             "기존 파일명 방식의 매뉴얼 선택값은 검색 범위로 사용하지 않았습니다. "
@@ -104,7 +94,7 @@ async def chat(payload: InternalChatRequest) -> ChatResponse:
         answer=(
             _grounded_excerpt_answer(sources)
             if sources
-            else format_safety_answer(context_text)
+            else format_no_evidence_answer()
         ),
         sources=sources,
         retrieval_mode="hybrid",
