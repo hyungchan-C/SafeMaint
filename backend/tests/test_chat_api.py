@@ -772,4 +772,102 @@ def test_invalid_qwen_source_reference_falls_back_without_500() -> None:
     assert response.answer == "검증된 검색 fallback"
     assert response.answer_type == "component_info"
     assert "검색되지 않은 출처" in (response.warning or "")
+
+
+def test_visual_question_uses_local_generic_shape_without_document_evidence() -> None:
+    response = asyncio.run(
+        ChatService(service_url=None, openai_enabled=False).answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "그럼 이건 뭐야?",
+                    "context": {
+                        "visual_categories": ["사진상 육각 머리 볼트"],
+                        "visual_features": ["육각형 머리와 나사산이 보임"],
+                    },
+                }
+            )
+        )
+    )
+
+    assert response.generation_mode == "template"
+    assert "육각 머리 볼트" in response.answer
+    assert "육각형 머리" in response.answer
+    assert "정확한 제품명" in response.answer
+
+
+def test_visual_usage_question_returns_only_generic_usage() -> None:
+    response = asyncio.run(
+        ChatService(service_url=None, openai_enabled=False).answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "이건 어디에 쓰여?",
+                    "context": {
+                        "visual_categories": ["사진상 둥근 머리 내부 육각 소켓 나사"],
+                    },
+                }
+            )
+        )
+    )
+
+    assert "부품을 서로 체결" in response.answer
+    assert "규격" in response.answer
+
+
+def test_visual_question_does_not_retrieve_unrelated_selected_manual() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("RAG must not run for a locally analyzed photo question")
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+        ).answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "이 사진은 뭐야?",
+                    "context": {
+                        "visual_categories": ["USB 플래시 메모리"],
+                        "visual_features": ["USB 단자와 16 GB 표기가 보임"],
+                        "registered_manuals": ["NSK_ballbearing (1).pdf"],
+                    },
+                }
+            )
+        )
+    )
+
+    assert response.retrieval_mode == "safety-fallback"
+    assert response.sources == []
+    assert "USB 플래시 메모리" in response.answer
+    assert "베어링" not in response.answer
+
+
+def test_visual_question_abstains_when_no_verified_category_exists() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("RAG must not guess from unrelated manuals")
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+        ).answer(
+            ChatRequest.model_validate(
+                {
+                    "question": "이건 뭐야?",
+                    "context": {
+                        "visual_summary": "신뢰 임계값을 넘는 카탈로그 후보 없음",
+                        "visual_categories": [],
+                        "registered_manuals": ["NSK_ballbearing (1).pdf"],
+                    },
+                }
+            )
+        )
+    )
+
+    assert response.retrieval_mode == "safety-fallback"
+    assert response.sources == []
+    assert "확인하지 못했습니다" in response.answer
+    assert "임의의 제품명이나 용도를 안내하지 않습니다" in response.answer
+    assert "베어링" not in response.answer
  

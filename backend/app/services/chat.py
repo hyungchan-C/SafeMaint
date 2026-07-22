@@ -138,6 +138,23 @@ class ChatService:
                         )
                     }
                 )
+        # Image-identification questions must use the latest local Vision result.
+        # Do this before RAG so an unrelated selected manual cannot replace the
+        # current photo with stale document evidence (for example, a bearing manual).
+        visual_answer = self._visual_answer(analyzed_request)
+        if visual_answer:
+            return ChatResponse(
+                answer=visual_answer,
+                sources=[],
+                retrieval_mode="safety-fallback",
+                generation_mode="template",
+                warning=(
+                    "사진에서 직접 관찰한 일반 형상과 로컬 분석 결과이며, "
+                    "정확한 제품·모델·규격을 확정한 결과가 아닙니다."
+                ),
+                accident_classification=classification,
+            )
+
         answer_type = self._resolved_answer_type(analyzed_request)
         if answer_type == "clarification_required":
             return self._clarification_response(analyzed_request)
@@ -397,6 +414,8 @@ class ChatService:
                     "selected_document_ids",
                     "selected_document_version_ids",
                     "visual_summary",
+                    "visual_categories",
+                    "visual_features",
                 },
             ),
             ensure_ascii=False,
@@ -547,6 +566,72 @@ class ChatService:
     @staticmethod
     def _append_warning(current: str | None, additional: str) -> str:
         return f"{current} {additional}" if current else additional
+
+    @staticmethod
+    def _visual_answer(request: ChatRequest) -> str | None:
+        question = request.question.casefold()
+        is_photo_question = any(
+            token in question
+            for token in ("이건", "이것", "뭐", "무엇", "사진", "어디에 쓰", "용도", "부품")
+        )
+        if not is_photo_question:
+            return None
+        if not request.context.visual_categories:
+            visual_summary = request.context.visual_summary or ""
+            no_verified_result = any(
+                marker in visual_summary
+                for marker in (
+                    "신뢰 임계값을 넘는 카탈로그 후보 없음",
+                    "제품 종류를 확인하지 못",
+                    "종류 확인 불가",
+                )
+            )
+            if not no_verified_result:
+                return None
+            return (
+                "현재 사진만으로는 제품 종류를 신뢰할 수 있게 확인하지 못했습니다.\n\n"
+                "카탈로그 또는 정밀 비전 분석에서 검증된 후보가 없으므로 임의의 제품명이나 용도를 안내하지 않습니다. "
+                "대상을 더 가까이 촬영하거나, 여러 각도의 사진과 제품 각인·라벨이 보이는 사진을 추가해 주세요."
+            )
+        categories = list(
+            dict.fromkeys(
+                value.strip()
+                for value in request.context.visual_categories
+                if value.strip()
+            )
+        )[:3]
+        if not categories:
+            return None
+        primary = categories[0]
+        features = list(
+            dict.fromkeys(
+                value.strip()
+                for value in request.context.visual_features
+                if value.strip()
+            )
+        )[:3]
+        lines = [f"사진에서 보이는 일반 형상은 **{primary}**로 추정됩니다."]
+        if features:
+            lines.append("관찰 근거: " + ", ".join(features) + ".")
+        if "어디에 쓰" in question or "용도" in question:
+            usage = "부품을 서로 체결하는 용도"
+            if "너트" in primary:
+                usage = "볼트와 함께 부품을 조여 고정하는 용도"
+            elif "와셔" in primary:
+                usage = "체결 하중을 분산하거나 표면 손상을 줄이는 용도"
+            elif "베어링" in primary:
+                usage = "회전축을 지지하고 마찰을 줄이는 용도"
+            elif "센서" in primary:
+                usage = "상태나 물리량을 감지하는 용도"
+            elif "카메라" in primary:
+                usage = "대상을 촬영하거나 검사하는 용도"
+            elif "usb" in primary.casefold() or "메모리" in primary:
+                usage = "파일과 데이터를 저장하고 USB 포트가 있는 장치 사이에서 옮기는 용도"
+            lines.append(f"일반적으로는 {usage}에 사용됩니다.")
+        lines.append(
+            "다만 현재 결과는 사진 형상에 대한 추정이므로, 정확한 제품명·규격·적용 위치는 각인과 카탈로그 표의 일치 여부를 추가로 확인해야 합니다."
+        )
+        return "\n\n".join(lines)
 
     @staticmethod
     def _fallback(request: ChatRequest) -> ChatResponse:

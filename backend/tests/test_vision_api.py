@@ -5,6 +5,7 @@ import pytest
 from fastapi import HTTPException, UploadFile
 
 from app.api.routes.vision import (
+    _catalog_id_for_match,
     _can_access_document,
     _parse_document_ids,
     _read_upload,
@@ -88,3 +89,24 @@ def test_vision_upload_rejects_oversize_and_spoofed_images() -> None:
     with pytest.raises(HTTPException) as error:
         _read_upload(spoofed, limit=100, expected="image")
     assert error.value.status_code == 422
+
+
+def test_legacy_vision_catalog_requires_reindexing() -> None:
+    document = _document()
+    document.metadata_json = {"vision_catalog_id": "legacy-efficientnet-index"}
+
+    with pytest.raises(HTTPException) as error:
+        _catalog_id_for_match(document)
+
+    assert error.value.status_code == 409
+    assert "재인덱싱" in error.value.detail
+
+
+def test_current_vision_catalog_can_be_matched() -> None:
+    document = _document()
+    document.metadata_json = {
+        "vision_catalog_id": "siglip-index",
+        "vision_catalog_index_version": "safemaint-matrix-v4:google/siglip2-base-patch16-naflex",
+    }
+
+    assert _catalog_id_for_match(document) == "siglip-index"

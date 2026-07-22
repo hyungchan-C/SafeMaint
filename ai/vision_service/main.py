@@ -23,6 +23,9 @@ matcher = CatalogImageMatcher(
     max_pages=settings.pdf_max_pages,
     max_images=settings.catalog_max_images,
     max_image_pixels=settings.image_max_pixels,
+    embedding_model=settings.embedding_model,
+    embedding_device=settings.embedding_device,
+    model_cache_dir=settings.model_cache_dir,
 )
 SUPPORTED_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
@@ -116,6 +119,7 @@ def catalog_image(catalog_id: str, page: int, image_index: int) -> FileResponse:
 def match_catalog(
     file: UploadFile = File(...),
     catalog_ids: str = Form("[]"),
+    analysis_mode: str = Form("deep"),
 ) -> CatalogAnalysisResponse:
     if file.content_type not in SUPPORTED_TYPES:
         raise HTTPException(status_code=415, detail="JPEG, PNG, WEBP 이미지만 분석할 수 있습니다.")
@@ -128,6 +132,8 @@ def match_catalog(
     selected_ids = list(dict.fromkeys(str(value) for value in raw_ids))
     if not all(len(value) == 20 and all(char in "0123456789abcdef" for char in value) for value in selected_ids):
         raise HTTPException(status_code=422, detail="카탈로그 ID 형식이 올바르지 않습니다.")
+    if analysis_mode not in {"fast", "deep"}:
+        raise HTTPException(status_code=422, detail="analysis_mode는 fast 또는 deep이어야 합니다.")
     content = _read_limited(file, settings.image_max_upload_bytes)
     _validate_image(content)
     suffix = Path(file.filename or "field-image.png").suffix or ".png"
@@ -135,23 +141,101 @@ def match_catalog(
         temporary.write(content)
         path = Path(temporary.name)
     try:
-        response = analyzer.analyze(path, file.filename or path.name)
         try:
-            candidates = matcher.match(path, selected_ids)
+            signals = matcher.match_with_signals(path, selected_ids)
+            candidates = signals.candidates
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        candidate_pairs = [(candidate, matcher.image_path(candidate)) for candidate in candidates]
-        candidate_pairs = [(candidate, image) for candidate, image in candidate_pairs if image is not None]
-        verified = analyzer.rerank_catalog_candidates(
-            path,
-            [candidate for candidate, _ in candidate_pairs],
-            [image for _, image in candidate_pairs],
-            next((
-                item.component_name or item.equipment_type
-                for item in response.items
-                if item.component_name or item.equipment_type
-            ), None),
+        if analysis_mode == "fast":
+            return CatalogAnalysisResponse(
+                filename=file.filename or path.name,
+                # A closed-set embedding classifier always picks its nearest
+                # label, even for an unknown object. Do not expose that guess
+                # as a product identity before VLM/catalog verification.
+                items=[],
+                warnings=["빠른 임베딩 검색 결과이며 정밀 분석이 이어서 진행됩니다."],
+                models=[settings.embedding_model],
+                catalog_candidates=candidates[:3],
+            )
+        # Adaptive pipeline: SigLIP always runs first. A strong, clearly separated
+        # match avoids loading the VLM. Ambiguous matches use one Qwen pass only.
+        confident_match = signals.top_similarity >= settings.adaptive_confidence_threshold and (
+            len(candidates) == 1
+            or signals.similarity_margin >= settings.adaptive_margin_threshold
+            or signals.top_similarity >= 0.93
         )
-        return response.model_copy(update={"catalog_candidates": verified})
+        if confident_match:
+            candidate = candidates[0].model_copy(
+                update={"visual_category": None, "visual_features": []}
+            )
+            response = CatalogAnalysisResponse(
+                filename=file.filename or path.name,
+                items=[],
+                warnings=["SigLIP 고신뢰 후보로 확인되어 정밀 VLM 분석을 생략했습니다."],
+                models=[settings.embedding_model],
+                catalog_candidates=[candidate],
+            )
+        elif candidates:
+            # Keep the semantic verification pass small: each additional image
+            # expands Qwen3-VL's visual token workload substantially.
+            candidate_pairs = [
+                (candidate, matcher.image_path(candidate))
+                for candidate in candidates[:3]
+            ]
+            candidate_pairs = [(candidate, image) for candidate, image in candidate_pairs if image is not None]
+            verified = analyzer.rerank_catalog_candidates(
+                path,
+                [candidate for candidate, _ in candidate_pairs],
+                [image for _, image in candidate_pairs],
+            )
+            warnings: list[str] = []
+            if not verified and candidates[0].similarity >= settings.fallback_candidate_threshold:
+                fallback = candidates[0].model_copy(update={
+                    "confidence": "낮음",
+                    "visual_category": None,
+                    "visual_features": [],
+                    "note": (
+                        "SigLIP 외형 유사도 기준의 참고 후보입니다. "
+                        "Qwen3-VL 정밀 검증에서는 동일 종류로 확정되지 않았습니다."
+                    ),
+                })
+                verified = [fallback]
+                warnings.append(
+                    "Qwen3-VL이 확정한 후보는 없으며, 유사도 기준의 참고 후보 1개만 표시합니다."
+                )
+            response = CatalogAnalysisResponse(
+                filename=file.filename or path.name,
+                items=[],
+                warnings=warnings,
+                models=[settings.embedding_model, settings.qwen_model],
+                catalog_candidates=verified,
+            )
+        else:
+            response = analyzer.analyze(
+                path,
+                file.filename or path.name,
+                include_ocr=False,
+                include_qwen=True,
+            )
+            response = response.model_copy(
+                update={"models": list(dict.fromkeys([settings.embedding_model, *response.models]))}
+            )
+
+        # PaddleOCR-VL is CPU-heavy. Run it only when SigLIP detects a visible
+        # label, engraving, letters, or numbers in the field photo.
+        if signals.has_visible_text:
+            ocr_response = analyzer.analyze(
+                path,
+                file.filename or path.name,
+                include_ocr=True,
+                include_qwen=False,
+            )
+            response = response.model_copy(update={
+                "extracted_markdown": ocr_response.extracted_markdown,
+                "table_rows": ocr_response.table_rows,
+                "warnings": list(dict.fromkeys([*response.warnings, *ocr_response.warnings])),
+                "models": list(dict.fromkeys([*response.models, *ocr_response.models])),
+            })
+        return response
     finally:
         path.unlink(missing_ok=True)

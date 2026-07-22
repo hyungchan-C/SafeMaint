@@ -23,6 +23,7 @@ from app.schemas.chat import RetrievalAccessScope
 router = APIRouter(prefix="/vision", tags=["vision"])
 
 CATALOG_METADATA_KEY = "vision_catalog_id"
+CATALOG_INDEX_VERSION_KEY = "vision_catalog_index_version"
 PDF_MAGIC = b"%PDF-"
 IMAGE_SIGNATURES = (
     b"\xff\xd8\xff",
@@ -68,6 +69,19 @@ def _require_accessible_document(
         # Do not reveal whether an inaccessible document exists.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "문서를 찾을 수 없습니다.")
     return document
+
+
+def _catalog_id_for_match(document: Document) -> str:
+    metadata = document.metadata_json or {}
+    catalog_id = str(metadata.get(CATALOG_METADATA_KEY) or "")
+    if not catalog_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "선택한 문서의 이미지 인덱스가 준비되지 않았습니다.")
+    if not str(metadata.get(CATALOG_INDEX_VERSION_KEY) or ""):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "선택한 문서는 이전 비전 인덱스 형식입니다. 문서 목록에서 비전 재인덱싱을 실행해 주세요.",
+        )
+    return catalog_id
 
 
 def _read_upload(file: UploadFile, *, limit: int, expected: str) -> bytes:
@@ -190,9 +204,16 @@ def index_catalog(
         fallback="카탈로그 이미지 인덱싱에 실패했습니다.",
     )
     catalog_id = str(payload.pop("catalog_id", ""))
+    index_version = str(payload.pop("index_version", ""))
     if not catalog_id:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "비전 서비스가 카탈로그 ID를 반환하지 않았습니다.")
-    document.metadata_json = {**(document.metadata_json or {}), CATALOG_METADATA_KEY: catalog_id}
+    if not index_version:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "비전 서비스가 인덱스 형식을 반환하지 않았습니다.")
+    document.metadata_json = {
+        **(document.metadata_json or {}),
+        CATALOG_METADATA_KEY: catalog_id,
+        CATALOG_INDEX_VERSION_KEY: index_version,
+    }
     db.add(document)
     db.commit()
     return {"document_id": str(document.id), **payload}
@@ -218,14 +239,15 @@ def match_catalog(
     db: Annotated[Session, Depends(get_db)],
     file: UploadFile = File(...),
     document_ids: str = Form("[]"),
+    analysis_mode: str = Form("deep"),
 ) -> dict[str, object]:
+    if analysis_mode not in {"fast", "deep"}:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "analysis_mode는 fast 또는 deep이어야 합니다.")
     selected_ids = _parse_document_ids(document_ids)
     catalog_to_document: dict[str, str] = {}
     for document_id in selected_ids:
         document = _require_accessible_document(db, document_id, current_user, access_scope)
-        catalog_id = str((document.metadata_json or {}).get(CATALOG_METADATA_KEY) or "")
-        if not catalog_id:
-            raise HTTPException(status.HTTP_409_CONFLICT, "선택한 문서의 이미지 인덱스가 준비되지 않았습니다.")
+        catalog_id = _catalog_id_for_match(document)
         catalog_to_document[catalog_id] = str(document.id)
 
     content = _read_upload(file, limit=settings.vision_image_max_upload_bytes, expected="image")
@@ -235,7 +257,10 @@ def match_catalog(
         content=content,
         content_type=file.content_type or "application/octet-stream",
         fallback="카탈로그 이미지 비교에 실패했습니다.",
-        data={"catalog_ids": json.dumps(list(catalog_to_document))},
+        data={
+            "catalog_ids": json.dumps(list(catalog_to_document)),
+            "analysis_mode": analysis_mode,
+        },
     )
     safe_candidates = []
     candidates = payload.get("catalog_candidates")

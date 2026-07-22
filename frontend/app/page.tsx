@@ -65,7 +65,6 @@ const initialForm = {
 
 const levelLabel = { low: "낮음", medium: "보통", high: "높음" } as const;
 const ppeItems = ["안전모", "보호장갑", "보안경", "안전화"] as const;
-
 // 위경도 ↔ 미터 변환(근사). 위경도 1도당 거리는 위도에 따라 달라지므로
 // 경도는 현재 위도의 코사인으로 보정한다. 좁은 지역(수백m 이내) 가정.
 const METERS_PER_DEG_LAT = 111_320;
@@ -160,7 +159,20 @@ function normalizeAssessmentResponse(payload: AssessmentResponse): AssessmentRes
 }
 
 function refersToAttachedPhoto(question: string): boolean {
-  return /(이건|이게|이것|이거|저건|저게|그건|그게|뭐야|무엇|어디에\s*쓰|용도|쓰이는|사용하는|어떤\s*(부품|제품)|비슷한|같은\s*(부품|제품)|후보)/i.test(question);
+  const normalized = question.replace(/\s+/g, "");
+  return /(이것|이거|이게|이건|저것|저거|그것|그거|사진|이미지|방금|첨부|보낸|찍은|뭐야|무엇|어디에쓰|용도|어떤(?:부품|제품)|비슷한(?:부품|제품)|후보)/i.test(normalized);
+}
+
+function formatElapsedTime(elapsedMs: number): string {
+  const totalSeconds = Math.max(1, Math.round(elapsedMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [
+    hours ? `${hours}시간` : "",
+    minutes ? `${minutes}분` : "",
+    `${seconds}초`,
+  ].filter(Boolean).join(" ");
 }
 
 export default function HomePage() {
@@ -399,7 +411,10 @@ function WorkspaceScreen({
   const [sitePhotoName, setSitePhotoName] = useState("");
   const [visionSummary, setVisionSummary] = useState("");
   const [visionStatus, setVisionStatus] = useState("");
+  const [visionElapsedMs, setVisionElapsedMs] = useState<number | null>(null);
   const [catalogCandidates, setCatalogCandidates] = useState<CatalogCandidate[]>([]);
+  const [visualCategories, setVisualCategories] = useState<string[]>([]);
+  const [visualFeatures, setVisualFeatures] = useState<string[]>([]);
   const [ppeChecks, setPpeChecks] = useState<Record<string, boolean>>({});
   const [locationStatus, setLocationStatus] = useState("위치 미확인");
   const [gpsOrigin, setGpsOrigin] = useState<{ latitude: number; longitude: number } | null>(null);
@@ -440,6 +455,7 @@ function WorkspaceScreen({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  const visionRequestIdRef = useRef(0);
   const [error, setError] = useState("");
   const [workspaceRestored, setWorkspaceRestored] = useState(false);
   const assessmentDrawerRef = useRef<HTMLDetailsElement | null>(null);
@@ -647,6 +663,12 @@ function WorkspaceScreen({
   const highestRisk = result?.hazards.some((hazard) => hazard.risk_level === "high") ? "high" : result?.hazards.some((hazard) => hazard.risk_level === "medium") ? "medium" : result ? "low" : "pending";
   const accidentTypes = result ? Array.from(new Set(result.hazards.map((hazard) => hazard.accident_type))) : [];
 
+  function requireActiveSession(response: Response) {
+    if (response.status !== 401) return;
+    onLogout();
+    throw new Error("로그인 세션이 만료되었습니다. 다시 로그인해 주세요.");
+  }
+
   const gpsMapCenter = gpsOrigin ? { lat: gpsOrigin.latitude, lon: gpsOrigin.longitude } : null;
   const gpsLiveOffset =
     gpsMapCenter && gpsLivePosition
@@ -793,7 +815,22 @@ function WorkspaceScreen({
     event.preventDefault();
     const submittedQuestion = question.trim();
     if (!submittedQuestion || isChatLoading || isVisionLoading) return;
-    const candidatesForAnswer = refersToAttachedPhoto(submittedQuestion) ? catalogCandidates : [];
+    const isPhotoQuestion = refersToAttachedPhoto(submittedQuestion);
+    const candidatesForAnswer = isPhotoQuestion ? catalogCandidates : [];
+
+    if (isPhotoQuestion && sitePhotoName && visualCategories.length === 0) {
+      setQuestion("");
+      setMessages((current) => [
+        ...current,
+        { role: "user", text: submittedQuestion },
+        {
+          role: "ai",
+          text: "현재 사진에서 신뢰할 수 있는 제품 종류를 확인하지 못했습니다. 관련 없는 매뉴얼 검색 결과로 대체하지 않습니다. 대상을 더 가까이 촬영하거나 정면 사진을 다시 첨부해 주세요.",
+          warning: "사진 분류 결과 없음",
+        },
+      ]);
+      return;
+    }
 
     // Create the AudioContext synchronously within this user-gesture handler so
     // browsers don't block autoplay once the answer arrives after the awaits below.
@@ -826,10 +863,13 @@ function WorkspaceScreen({
             energy_source: chatWorkContext?.energy_source || null,
             task_description: chatWorkContext?.description || null,
             visual_summary: visionSummary || null,
+            visual_categories: visualCategories,
+            visual_features: visualFeatures,
             selected_document_ids: selectedDocumentIds,
           },
         }),
       });
+      requireActiveSession(response);
       const payload = (await response.json()) as ChatResponse & { detail?: string };
       if (!response.ok || !payload.answer) {
         throw new Error(payload.detail || "안전자료 검색에 실패했습니다.");
@@ -905,6 +945,10 @@ function WorkspaceScreen({
   async function addManuals(files: FileList | null) {
     if (!files) return;
     const token = getAccessToken();
+    if (!token) {
+      onLogout();
+      return;
+    }
     setManualStatus("문서를 등록하고 로컬 이미지 인덱스를 생성하는 중...");
     let uploadedCount = 0;
     const uploadFailures: string[] = [];
@@ -923,6 +967,7 @@ function WorkspaceScreen({
           headers: { Authorization: `Bearer ${token}` },
           body: uploadBody,
         });
+        requireActiveSession(uploadResponse);
         const uploadPayload = await uploadResponse.json().catch(() => null) as { document_id?: string; detail?: string } | null;
         if (!uploadResponse.ok || !uploadPayload?.document_id) throw new Error(uploadPayload?.detail || `${file.name} 문서 등록 실패`);
 
@@ -965,42 +1010,115 @@ function WorkspaceScreen({
     }
   }
 
+  async function reindexManual(documentId: string, filename: string) {
+    const token = getAccessToken();
+    if (!token) {
+      onLogout();
+      return;
+    }
+    setManualStatus(`${filename} 비전 인덱스를 다시 생성하는 중...`);
+    const body = new FormData();
+    body.append("document_id", documentId);
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/index`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body,
+      });
+      requireActiveSession(response);
+      const payload = await response.json().catch(() => null) as { document_id?: string; detail?: string } | null;
+      if (!response.ok || payload?.document_id !== documentId) {
+        throw new Error(payload?.detail || `${filename} 비전 인덱스 재생성 실패`);
+      }
+      setCatalogCandidates([]);
+      setVisionSummary("");
+      setManualStatus(`${filename} 비전 인덱스를 최신 형식으로 다시 생성했습니다.`);
+    } catch (requestError) {
+      setManualStatus(requestError instanceof Error ? requestError.message : `${filename} 비전 인덱스 재생성 실패`);
+    }
+  }
+
   async function analyzePhoto(file: File | undefined) {
     if (!file) return;
+    const analysisStartedAt = performance.now();
     setIsVisionLoading(true);
     const token = getAccessToken();
+    if (!token) {
+      setIsVisionLoading(false);
+      onLogout();
+      return;
+    }
     setSitePhotoName(file.name);
     setVisionStatus("로컬 이미지 분석 중...");
+    setVisionElapsedMs(null);
+    setVisionSummary("");
     setCatalogCandidates([]);
-    const body = new FormData();
-    body.append("file", file);
-    body.append("document_ids", JSON.stringify(selectedDocumentIds));
-    try {
+    setVisualCategories([]);
+    setVisualFeatures([]);
+    const requestId = ++visionRequestIdRef.current;
+    type VisionPayload = {
+      items?: Array<{
+        equipment_type?: string | null;
+        component_name?: string | null;
+        description?: string | null;
+        visible_conditions?: string[];
+      }>;
+      raw_visual_description?: string;
+      extracted_markdown?: string;
+      catalog_candidates?: CatalogCandidate[];
+      warnings?: string[];
+      detail?: string;
+    };
+    const requestAnalysis = async () => {
+      const body = new FormData();
+      body.append("file", file);
+      body.append("document_ids", JSON.stringify(selectedDocumentIds));
+      body.append("analysis_mode", "deep");
       const response = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/match`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body,
       });
-      const payload = await response.json().catch(() => null) as {
-        raw_visual_description?: string;
-        extracted_markdown?: string;
-        catalog_candidates?: CatalogCandidate[];
-        warnings?: string[];
-        detail?: string;
-      } | null;
+      requireActiveSession(response);
+      const payload = await response.json().catch(() => null) as VisionPayload | null;
       if (!response.ok) throw new Error(payload?.detail || "이미지 분석 실패");
+      return payload;
+    };
+    const applyPayload = (payload: VisionPayload | null) => {
+      if (visionRequestIdRef.current !== requestId) return;
       const candidates = payload?.catalog_candidates ?? [];
+      const items = payload?.items ?? [];
+      const categories = Array.from(new Set([
+        ...candidates.map((item) => item.visual_category),
+        ...items.flatMap((item) => [item.component_name, item.equipment_type]),
+      ].filter((value): value is string => Boolean(value?.trim()))));
+      const features = Array.from(new Set([
+        ...candidates.flatMap((item) => item.visual_features || []),
+        ...items.flatMap((item) => [item.description, ...(item.visible_conditions || [])]),
+      ].filter((value): value is string => Boolean(value?.trim()))));
+      setVisualCategories(categories);
+      setVisualFeatures(features);
       setCatalogCandidates(candidates);
       setVisionSummary([
+        items.length ? `로컬 VLM 관찰 결과:\n${items.map((item, index) => `${index + 1}. ${item.component_name || item.equipment_type || "종류 확인 불가"}${item.description ? ` · ${item.description}` : ""}`).join("\n")}` : "",
         candidates.length ? `카탈로그 외형 유사 후보(동일 제품 확정 아님):\n${candidates.map((item, index) => `${index + 1}. ${item.visual_category || "종류 확인 불가"}, ${item.filename} ${item.page}페이지, 유사도 ${(item.similarity * 100).toFixed(1)}%, 특징 ${item.visual_features?.join(", ") || "확인 불가"}`).join("\n")}` : "신뢰 임계값을 넘는 카탈로그 후보 없음",
         payload?.extracted_markdown ? `로컬 OCR 확인 내용:\n${payload.extracted_markdown}` : "",
         payload?.raw_visual_description ? `로컬 비전 참고 설명(각인·규격 확정 근거 아님):\n${payload.raw_visual_description}` : "",
       ].filter(Boolean).join("\n\n"));
-      setVisionStatus(payload?.warnings?.length ? `분석 완료 · ${payload.warnings.join(" · ")}` : "로컬 분석 완료");
+      setVisionStatus(payload?.warnings?.length ? `정밀 분석 완료 · ${payload.warnings.join(" · ")}` : "정밀 분석 완료");
+    };
+    try {
+      const payload = await requestAnalysis();
+      applyPayload(payload);
+      if (visionRequestIdRef.current === requestId) {
+        setVisionElapsedMs(performance.now() - analysisStartedAt);
+      }
     } catch (requestError) {
-      setVisionStatus(requestError instanceof Error ? requestError.message : "로컬 비전 서비스 연결 실패");
+      if (visionRequestIdRef.current === requestId) {
+        setVisionStatus(requestError instanceof Error ? requestError.message : "로컬 비전 서비스 연결 실패");
+      }
     } finally {
-      setIsVisionLoading(false);
+      if (visionRequestIdRef.current === requestId) setIsVisionLoading(false);
     }
   }
 
@@ -1520,7 +1638,14 @@ function WorkspaceScreen({
 
       <section className="manual-row upgraded-manual-row">
         <label className="file-card">📄 작업 설비 매뉴얼 추가<input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
-        <div><strong>{manuals.length ? `${manuals.length}개 매뉴얼 등록됨` : "등록된 매뉴얼 없음"}</strong><span>{manualStatus || (sitePhotoName ? `현장 사진: ${sitePhotoName} · ${visionStatus}` : "현장 사진 없음")}</span></div>
+        <div>
+          <strong>{manuals.length ? `${manuals.length}개 매뉴얼 등록됨` : "등록된 매뉴얼 없음"}</strong>
+          {manualStatus && <span>{manualStatus}</span>}
+          <span>{sitePhotoName ? `현장 사진: ${sitePhotoName} · ${visionStatus}` : "현장 사진 없음"}</span>
+          {visionElapsedMs !== null && visionStatus.startsWith("정밀 분석 완료") && (
+            <span className="vision-elapsed">분석 소요 시간: {formatElapsedTime(visionElapsedMs)}</span>
+          )}
+        </div>
         <div className="document-chip-list">
           {userDocuments.length > 0
             ? userDocuments.map((document) => {
@@ -1540,6 +1665,9 @@ function WorkspaceScreen({
                     setCatalogCandidates([]);
                     setVisionSummary("");
                   }}>{isSelected ? "선택됨" : "선택"}</button>
+                  <button type="button" aria-label={`${document.original_filename} 비전 인덱스 재생성`} onClick={() => void reindexManual(document.document_id, document.original_filename)}>
+                    비전 재인덱싱
+                  </button>
                 </article>;
               })
             : manuals.map((name, index) => <span key={`${name}-${index}`}>📄 {name}<button type="button" aria-label={`${name} 선택 해제`} onClick={() => {
