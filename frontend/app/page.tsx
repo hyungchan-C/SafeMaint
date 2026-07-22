@@ -65,7 +65,6 @@ const initialForm = {
 
 const levelLabel = { low: "낮음", medium: "보통", high: "높음" } as const;
 const ppeItems = ["안전모", "보호장갑", "보안경", "안전화"] as const;
-
 // 위경도 ↔ 미터 변환(근사). 위경도 1도당 거리는 위도에 따라 달라지므로
 // 경도는 현재 위도의 코사인으로 보정한다. 좁은 지역(수백m 이내) 가정.
 const METERS_PER_DEG_LAT = 111_320;
