@@ -173,7 +173,12 @@ def match_catalog(
                 catalog_candidates=candidates[:1],
             )
         elif candidates:
-            candidate_pairs = [(candidate, matcher.image_path(candidate)) for candidate in candidates]
+            # Keep the semantic verification pass small: each additional image
+            # expands Qwen3-VL's visual token workload substantially.
+            candidate_pairs = [
+                (candidate, matcher.image_path(candidate))
+                for candidate in candidates[:3]
+            ]
             candidate_pairs = [(candidate, image) for candidate, image in candidate_pairs if image is not None]
             verified = analyzer.rerank_catalog_candidates(
                 path,

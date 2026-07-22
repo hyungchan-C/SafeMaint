@@ -192,7 +192,10 @@ class CatalogAnalyzer:
         prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         images, videos = process_vision_info(messages)
         inputs = processor(text=[prompt], images=images, videos=videos, padding=True, return_tensors="pt").to(model.device)
-        generated = model.generate(**inputs, max_new_tokens=128)
+        generated = model.generate(
+            **inputs,
+            max_new_tokens=self.settings.max_new_tokens,
+        )
         trimmed = [output[len(source):] for source, output in zip(inputs.input_ids, generated)]
         parsed = _json_object(processor.batch_decode(trimmed, skip_special_tokens=True)[0])
         matches = parsed.get("matches", []) if isinstance(parsed.get("matches"), list) else []

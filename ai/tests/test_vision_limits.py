@@ -166,6 +166,42 @@ def test_deep_mode_keeps_one_strong_siglip_fallback_when_qwen_rejects(
     assert "참고 후보 1개" in response.warnings[0]
 
 
+def test_deep_mode_sends_only_top_three_candidates_to_qwen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upload = UploadFile(
+        filename="photo.png",
+        file=BytesIO(_png()),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    candidates = [_candidate(0.80 - index * 0.01) for index in range(5)]
+    monkeypatch.setattr(
+        vision_main.matcher,
+        "match_with_signals",
+        lambda *_args, **_kwargs: CatalogMatchSignals(candidates, False, 0.80, 0.01),
+    )
+    monkeypatch.setattr(
+        vision_main.matcher,
+        "image_path",
+        lambda candidate: Path(f"candidate-{candidate.similarity}.jpg"),
+    )
+    received: list[CatalogCandidate] = []
+
+    def fake_rerank(_field_image, qwen_candidates, _candidate_paths, **_kwargs):
+        received.extend(qwen_candidates)
+        return []
+
+    monkeypatch.setattr(
+        vision_main.analyzer,
+        "rerank_catalog_candidates",
+        fake_rerank,
+    )
+
+    match_catalog(upload, '["aaaaaaaaaaaaaaaaaaaa"]', "deep")
+
+    assert received == candidates[:3]
+
+
 def test_deep_mode_keeps_siglip_usb_category_without_catalog_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

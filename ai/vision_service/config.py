@@ -16,8 +16,8 @@ class Settings:
     load_in_4bit: bool = _as_bool("VISION_LOAD_IN_4BIT", True)
     enable_paddle: bool = _as_bool("VISION_ENABLE_PADDLE", True)
     enable_qwen: bool = _as_bool("VISION_ENABLE_QWEN", True)
-    max_new_tokens: int = int(getenv("VISION_MAX_NEW_TOKENS", "128"))
-    qwen_max_pixels: int = int(getenv("VISION_QWEN_MAX_PIXELS", str(1024 * 1024)))
+    max_new_tokens: int = int(getenv("VISION_MAX_NEW_TOKENS", "96"))
+    qwen_max_pixels: int = int(getenv("VISION_QWEN_MAX_PIXELS", str(512 * 1024)))
     embedding_model: str = getenv(
         "VISION_EMBEDDING_MODEL", "google/siglip2-base-patch16-naflex"
     )
