@@ -6,8 +6,17 @@ from qwen_service.model import QwenEngine
 from qwen_service.schemas import AnswerRequest, ChatSource, ClassifyRequest
 
 
+def _structured_settings() -> Settings:
+    return Settings(
+        answer_mode="structured",
+        repair_enabled=True,
+        max_new_tokens=768,
+        classify_max_new_tokens=96,
+    )
+
+
 def test_qwen_classifier_returns_question_intent(monkeypatch) -> None:
-    engine = QwenEngine(Settings())
+    engine = QwenEngine(_structured_settings())
     monkeypatch.setattr(
         engine,
         "_generate",
@@ -33,7 +42,7 @@ def test_qwen_classifier_returns_question_intent(monkeypatch) -> None:
 
 
 def test_qwen_component_answer_has_no_checklist(monkeypatch) -> None:
-    engine = QwenEngine(Settings())
+    engine = QwenEngine(_structured_settings())
     payload = {
         "answer": "라이트커튼 부품 정보 [1]",
         "answer_type": "component_info",
@@ -79,7 +88,7 @@ def test_qwen_component_answer_has_no_checklist(monkeypatch) -> None:
 
 
 def test_qwen_empty_component_sections_are_enriched_from_sources(monkeypatch) -> None:
-    engine = QwenEngine(Settings())
+    engine = QwenEngine(_structured_settings())
     payload = {
         "answer": "라이트 커튼은 안전 장치입니다.",
         "answer_type": "component_info",
@@ -128,7 +137,7 @@ def test_qwen_empty_component_sections_are_enriched_from_sources(monkeypatch) ->
 
 
 def test_qwen_malformed_json_returns_legacy_fallback_without_exception(monkeypatch) -> None:
-    engine = QwenEngine(Settings())
+    engine = QwenEngine(_structured_settings())
     monkeypatch.setattr(
         engine,
         "_generate",
@@ -148,10 +157,44 @@ def test_qwen_malformed_json_returns_legacy_fallback_without_exception(monkeypat
     assert response.structured_answer is None
 
 
+def test_qwen_text_mode_returns_answer_without_structured_generation(monkeypatch) -> None:
+    engine = QwenEngine(Settings(answer_mode="text", max_new_tokens=64))
+    calls: list[dict[str, object]] = []
+
+    def fake_generate(*args, **kwargs):
+        calls.append(kwargs)
+        return "근거 기준으로 라이트커튼은 광축 차단을 감지하는 안전장치입니다."
+
+    monkeypatch.setattr(engine, "_generate", fake_generate)
+
+    response = engine._answer_sync(
+        AnswerRequest(
+            question="라이트커튼이 뭐야?",
+            answer_type="component_info",
+            sources=[
+                ChatSource(
+                    document_id="doc-1",
+                    chunk_id="demo-chunk-1",
+                    title="Light curtain manual",
+                    source_type="component_manual",
+                    excerpt="Light curtain detects interrupted optical beams.",
+                )
+            ],
+        )
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["max_new_tokens"] == 64
+    assert response.answer.startswith("근거 기준")
+    assert response.structured_answer is None
+    assert response.checklist_items == []
+    assert response.used_source_ids == ["demo-chunk-1"]
+
+
 def test_qwen_nested_answer_json_is_unwrapped_and_source_numbers_are_normalized(
     monkeypatch,
 ) -> None:
-    engine = QwenEngine(Settings())
+    engine = QwenEngine(_structured_settings())
     nested_payload = {
         "answer": "라이트커튼은 광축 차단을 감지하는 안전장치입니다.",
         "answer_type": "component_info",
@@ -202,7 +245,7 @@ def test_qwen_nested_answer_json_is_unwrapped_and_source_numbers_are_normalized(
 
 
 def test_qwen_missing_required_fields_are_normalized_without_repair(monkeypatch) -> None:
-    engine = QwenEngine(Settings())
+    engine = QwenEngine(_structured_settings())
     invalid_payload = {
         "answer": "설치 전 확인이 필요합니다.",
         "answer_type": "maintenance_guide",
@@ -300,7 +343,7 @@ def test_qwen_missing_required_fields_are_normalized_without_repair(monkeypatch)
 
 
 def test_qwen_maintenance_payload_is_normalized_without_repair(monkeypatch) -> None:
-    engine = QwenEngine(Settings())
+    engine = QwenEngine(_structured_settings())
     payload = {
         "answer": "설치 전 안전거리와 광축 정렬을 확인하세요.",
         "answer_type": "maintenance_guide",
@@ -396,7 +439,7 @@ def test_qwen_maintenance_payload_is_normalized_without_repair(monkeypatch) -> N
 
 
 def test_qwen_repeated_invalid_json_returns_safe_structured_fallback(monkeypatch) -> None:
-    engine = QwenEngine(Settings())
+    engine = QwenEngine(_structured_settings())
     monkeypatch.setattr(
         engine,
         "_generate",
@@ -426,7 +469,7 @@ def test_qwen_repeated_invalid_json_returns_safe_structured_fallback(monkeypatch
 
 
 def test_qwen_fallback_checklist_uses_actionable_source_text(monkeypatch) -> None:
-    engine = QwenEngine(Settings())
+    engine = QwenEngine(_structured_settings())
     monkeypatch.setattr(
         engine,
         "_generate",

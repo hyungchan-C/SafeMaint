@@ -1,59 +1,60 @@
-# SafeMaint Qwen 구조화 답변 API 전달 안내
+# SafeMaint Qwen Fast API Handoff
 
-팀원에게 아래 파일을 함께 전달해야 합니다.
+Colab에 올리는 프로젝트 ZIP에는 반드시 최신 `ai/qwen_service/`가 들어가야 합니다.
 
-- `notebooks/SafeMaint_Qwen35_9B_Colab_Server.ipynb`
-- `ai/qwen_service/` 전체
+## 기본 속도 모드
 
-노트북은 `ai/qwen_service`의 FastAPI 서버를 실행하는 런처입니다. 노트북 파일만
-전달하면 새 API 계약이 적용되지 않으므로, 최신 프로젝트 ZIP을 업로드하거나 최신
-저장소를 clone해야 합니다.
+현재 기본값은 빠른 답변 모드입니다.
 
-## 변경된 계약
+- `QWEN_LOAD_IN_4BIT=true`
+- `QWEN_ANSWER_MODE=text`
+- `QWEN_REPAIR_ENABLED=false`
+- `QWEN_MAX_NEW_TOKENS=256`
+- `QWEN_CLASSIFY_MAX_NEW_TOKENS=64`
 
-### `POST /v1/classify`
+이 모드에서 `POST /v1/answer`는 짧은 자연어 `answer`만 Qwen으로 생성합니다.
+`structured_answer`는 `null`, `checklist_items`는 빈 배열로 반환될 수 있습니다. 정상입니다.
 
-기존 `occurrence_type`과 함께 다음 값을 반환합니다.
+웹 백엔드는 Qwen 답변을 받은 뒤, 이미 검색된 RAG source를 기준으로 `structured_answer`와
+`checklist_items`를 `source_based_fallback` / `enriched_structured_answer` 로 채웁니다.
+따라서 화면의 구조화 UI는 유지하면서 Qwen이 긴 JSON을 생성하는 시간을 줄입니다.
 
-- `question_intent`: `document_qa`, `maintenance_guide`, `component_info`, `clarification_required`
-- `intent_confidence`
-- `clarification_question`
-- 같은 값을 포함한 `analysis`
+## 느린 구조화 모드
 
-### `POST /v1/answer`
+디버깅이나 비교 실험이 필요할 때만 다음처럼 켭니다.
 
-요청에 다음 필드가 추가됩니다.
+- `QWEN_ANSWER_MODE=structured`
+- `QWEN_REPAIR_ENABLED=true`
+- `QWEN_MAX_NEW_TOKENS=768` 이상
 
-- `answer_type`: `document_qa`, `maintenance_guide`, `component_info`
+이 모드는 Qwen이 `structured_answer` JSON 전체를 생성하고, 실패하면 repair 생성을 추가로 수행할 수 있어
+응답 시간이 크게 늘어납니다.
 
-응답은 기존 `answer`, `model`을 유지하고 다음 필드를 추가합니다.
+## 백엔드 설정
 
-- `answer_type`
-- `structured_answer`
-- `checklist_items`
-- `used_source_ids`
+Colab ngrok URL을 받은 뒤 각자 `.env`에는 다음 값을 맞춥니다.
 
-`used_source_ids`와 각 항목의 `evidence_chunk_ids`에는 요청으로 전달받은 `chunk_id`만
-사용해야 합니다. 유지보수 작업 절차는 `manual`, `equipment_manual`,
-`component_manual`, `work_standard` 근거가 있을 때만 생성합니다.
+```env
+QWEN_ENABLED=true
+QWEN_PROVIDER=colab
+QWEN_SERVICE_URL=https://your-current-colab-tunnel.ngrok-free.app
+QWEN_API_KEY=shared-demo-token
+QWEN_TIMEOUT_SECONDS=600
+QWEN_ALLOW_COMPANY_CONTEXT=true
+QWEN_INTENT_CLASSIFY_ENABLED=false
+```
 
-위험도 `risk_level`을 `판단 불가`가 아닌 값으로 반환하려면 `risk_basis`를 문자열이
-아닌 `content`와 `evidence_chunk_ids`를 가진 근거 객체 배열로 반환해야 합니다.
-유효한 검색 청크 근거가 없으면 반드시 `risk_level=판단 불가`, `risk_basis=[]`로
-반환합니다. 백엔드도 이 조건을 다시 검증하고 충족하지 않으면 `판단 불가`로
-강제합니다.
-
-서로 충돌하는 근거가 실제로 있을 때만 `conflicts`에 항목을 추가합니다. 각 충돌
-항목은 `content`와 서로 다른 검색 청크 ID 두 개 이상을 포함해야 하며, 근거 간
-차이가 없으면 `conflicts=[]`로 반환합니다.
+`QWEN_INTENT_CLASSIFY_ENABLED=false`는 `/v1/answer` 전에 Qwen 서비스의 `/v1/classify`를
+추가 호출하지 않게 하는 옵션입니다. 별도 LoRA 사고유형 분류 서비스인
+`QWEN_CLASSIFIER_ENABLED`와는 다른 옵션입니다.
 
 ## 확인 순서
 
-1. 최신 프로젝트 ZIP 또는 저장소를 Colab에 준비합니다.
-2. 노트북을 위에서부터 실행합니다.
-3. `Structured answer contract smoke test` 셀을 실행합니다.
-4. component/maintenance 관련 모든 assertion이 통과한 뒤 ngrok URL을 팀원에게 공유합니다.
-
-백엔드는 이전 Qwen 서버가 문자열 `answer`만 반환해도 기존 답변을 표시합니다. 새
-구조화 JSON이 잘못되면 API를 500으로 종료하지 않고 검증된 검색 근거 기반 fallback을
-사용합니다.
+1. 최신 프로젝트 ZIP 또는 repo clone으로 Colab notebook을 실행합니다.
+2. 첫 설정 셀에서 `QWEN_ANSWER_MODE=text`, `QWEN_MAX_NEW_TOKENS=256`인지 확인합니다.
+3. ngrok 셀이 통과하면 URL을 공유해도 됩니다.
+4. 필요할 때만 `Optional fast answer smoke test` 셀로 `/v1/answer`를 워밍업합니다.
+5. Colab 로그의 `qwen_generate`에서 `cuda_available`, `gpu_name`, `hf_device_map`,
+   `is_loaded_in_4bit`, `input_tokens`, `new_tokens`, `elapsed_seconds`,
+   `tokens_per_second`를 확인합니다.
+6. 웹 백엔드를 재시작한 뒤 동일 질문을 다시 5회 측정합니다.

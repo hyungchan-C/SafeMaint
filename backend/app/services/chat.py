@@ -59,11 +59,11 @@ QWEN_COMPANY_CONTEXT_WARNING = (
 CLASSIFIER_FALLBACK_WARNING = (
     "팀 Qwen 사고유형 분류기를 사용할 수 없어 기존 검색 분석으로 대체했습니다."
 )
-QWEN_SOURCE_EXCERPT_CHARS = 360
+QWEN_SOURCE_EXCERPT_CHARS = 240
 QWEN_SOURCE_LIMIT_BY_TYPE: dict[AnswerType, int] = {
     "maintenance_guide": 2,
-    "document_qa": 4,
-    "component_info": 3,
+    "document_qa": 2,
+    "component_info": 2,
     "no_evidence": 0,
     "clarification_required": 0,
 }
@@ -188,6 +188,7 @@ class ChatService:
         qwen_client: QwenClient | None = None,
         qwen_enabled: bool | None = None,
         qwen_allow_company_context: bool | None = None,
+        qwen_intent_classify_enabled: bool | None = None,
         classifier_client: AccidentClassifierClient | None = None,
         classifier_enabled: bool | None = None,
     ) -> None:
@@ -215,6 +216,11 @@ class ChatService:
             settings.qwen_allow_company_context
             if qwen_allow_company_context is None
             else qwen_allow_company_context
+        )
+        self.qwen_intent_classify_enabled = (
+            settings.qwen_intent_classify_enabled
+            if qwen_intent_classify_enabled is None
+            else qwen_intent_classify_enabled
         )
         self.classifier_client = classifier_client or AccidentClassifierClient(
             settings.qwen_classifier_url
@@ -247,7 +253,7 @@ class ChatService:
             analyzed_request = self._apply_classification(
                 analyzed_request, classification
             )
-        elif use_qwen:
+        elif use_qwen and self.qwen_intent_classify_enabled:
             qwen_analysis = await self.qwen_client.classify(analyzed_request)
             if qwen_analysis is not None:
                 analyzed_request = analyzed_request.model_copy(

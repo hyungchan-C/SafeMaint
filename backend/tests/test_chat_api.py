@@ -427,6 +427,48 @@ def test_chat_service_uses_qwen_classification_and_answer() -> None:
     assert response.answer == "Qwen grounded answer [1]"
 
 
+def test_chat_service_can_skip_qwen_intent_classification() -> None:
+    class AnswerOnlyQwenClient:
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            raise AssertionError("Qwen classify should be skipped")
+
+        async def answer(
+            self,
+            request: ChatRequest,
+            retrieval_response: ChatResponse,
+        ) -> QwenGeneratedAnswer:
+            assert request.analysis is not None
+            assert request.analysis.question_intent == "maintenance_guide"
+            return QwenGeneratedAnswer("Fast Qwen answer", "qwen-test")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["analysis"]["question_intent"] == "maintenance_guide"
+        return httpx.Response(
+            200,
+            json={
+                "answer": "Local grounded template answer",
+                "sources": [_grounded_source()],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+            qwen_client=AnswerOnlyQwenClient(),  # type: ignore[arg-type]
+            qwen_enabled=True,
+            qwen_allow_company_context=True,
+            qwen_intent_classify_enabled=False,
+        ).answer(ChatRequest(question="light curtain installation"))
+    )
+
+    assert response.generation_mode == "qwen"
+    assert response.answer == "Fast Qwen answer"
+
+
 def test_low_confidence_qwen_clarification_does_not_override_local_maintenance_intent() -> None:
     class MisclassifyingQwenClient:
         async def classify(self, request: ChatRequest) -> QueryAnalysis:

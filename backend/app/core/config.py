@@ -84,6 +84,9 @@ class Settings:
     qwen_api_key: str = getenv("QWEN_API_KEY", "")
     qwen_timeout_seconds: float = float(getenv("QWEN_TIMEOUT_SECONDS", "600"))
     qwen_allow_company_context: bool = _bool_env("QWEN_ALLOW_COMPANY_CONTEXT", False)
+    qwen_intent_classify_enabled: bool = _bool_env(
+        "QWEN_INTENT_CLASSIFY_ENABLED", True
+    )
     qwen_classifier_enabled: bool = _bool_env(
         "QWEN_CLASSIFIER_ENABLED", False
     )
