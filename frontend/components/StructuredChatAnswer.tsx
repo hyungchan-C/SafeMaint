@@ -14,7 +14,6 @@ type Props = {
   answer: StructuredAnswer;
   checklistItems: ChatChecklistItem[];
   sources: ChatSource[];
-  onPrepareAssessment?: () => void;
 };
 
 function EvidenceList({
@@ -66,16 +65,10 @@ function ConflictSection({
   );
 }
 
-function ChatChecklist({
-  items,
-  onPrepareAssessment,
-}: {
-  items: ChatChecklistItem[];
-  onPrepareAssessment?: () => void;
-}) {
+function ChatChecklist({ items }: { items: ChatChecklistItem[] }) {
   const [checked, setChecked] = useState<Set<number>>(new Set());
   useEffect(() => setChecked(new Set()), [items]);
-  if (!items.length && !onPrepareAssessment) return null;
+  if (!items.length) return null;
 
   return (
     <section className="structured-section maintenance-checklist">
@@ -106,19 +99,14 @@ function ChatChecklist({
         <p className="structured-empty">현재 검색 근거만으로 검증된 체크리스트를 만들지 못했습니다.</p>
       )}
       <p className="structured-note">
-        이 체크 상태는 미리보기이며 DB에 자동 저장되지 않습니다. 작업정보를 확인한 뒤 기존 위험성평가를
-        생성·저장하면 DB 식별자가 있는 TBM 항목으로 관리할 수 있습니다.
+        이 체크 상태는 채팅 미리보기이며 DB에 자동 저장되지 않습니다. 실제 작업 전 현장 조건과 매뉴얼을
+        다시 확인하고 안전관리자의 검토를 받아야 합니다.
       </p>
-      {onPrepareAssessment && (
-        <button className="assessment-handoff-button" type="button" onClick={onPrepareAssessment}>
-          위험성평가 작성으로 가져오기
-        </button>
-      )}
     </section>
   );
 }
 
-export default function StructuredChatAnswer({ answer, checklistItems, sources, onPrepareAssessment }: Props) {
+export default function StructuredChatAnswer({ answer, checklistItems, sources }: Props) {
   const sourceNumbers = useMemo(
     () => new Map(sources.map((source, index) => [source.chunk_id, index + 1])),
     [sources],
@@ -200,7 +188,7 @@ export default function StructuredChatAnswer({ answer, checklistItems, sources, 
       <section className="structured-section"><h4>5. 관련 법령·사고사례</h4><EvidenceList items={answer.related_regulations_and_incidents} sourceNumbers={sourceNumbers} /></section>
       <ConflictSection items={answer.conflicts} sourceNumbers={sourceNumbers} />
       <section className="structured-section muted"><h4>6. 추가 확인이 필요한 내용</h4><TextList items={answer.additional_information_needed} /></section>
-      <ChatChecklist items={checklistItems} onPrepareAssessment={onPrepareAssessment} />
+      <ChatChecklist items={checklistItems} />
       <p className="structured-critical">이 안내는 작업 승인이 아닙니다. 안전관리자의 최종 확인 전에는 작업을 시작하지 마세요.</p>
     </div>
   );

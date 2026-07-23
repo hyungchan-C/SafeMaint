@@ -3,9 +3,13 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import DocumentReviewPanel from "@/components/DocumentReviewPanel";
+import ChatSources from "@/components/ChatSources";
+import InterfaceIcon from "@/components/InterfaceIcon";
+import ManualManager from "@/components/ManualManager";
 import SafetyAnswerView from "@/components/SafetyAnswerView";
 import StructuredChatAnswer from "@/components/StructuredChatAnswer";
 import TbmChecklist from "@/components/TbmChecklist";
+import WorkspaceHeader from "@/components/WorkspaceHeader";
 import type {
   AssessmentResponse,
   ChecklistItemResponse,
@@ -13,7 +17,6 @@ import type {
 } from "@/types/assessment";
 import type { CatalogCandidate, ChatMessage, ChatResponse } from "@/types/chat";
 import type { UserDocumentSummary } from "@/types/documents";
-import { DOCUMENT_STATUS_LABELS } from "@/types/documents";
 import type { GpsCheckResponse, VirtualEquipment } from "@/types/gps";
 import { getApiBaseUrl } from "@/lib/api";
 
@@ -408,12 +411,9 @@ function WorkspaceScreen({
   const [activeTab, setActiveTab] = useState<"summary" | "accidents" | "evidence" | "tbm">("summary");
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [form, setForm] = useState(initialForm);
-  const [chatWorkContext, setChatWorkContext] = useState<typeof initialForm | null>(null);
+  const form = initialForm;
   const [result, setResult] = useState<AssessmentResponse | null>(null);
   const [savedAssessmentId, setSavedAssessmentId] = useState<string | null>(null);
-  const [assessmentNotice, setAssessmentNotice] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
   const [isSavingAssessment, setIsSavingAssessment] = useState(false);
   const [pendingChecklistItemIds, setPendingChecklistItemIds] = useState<Set<string>>(new Set());
   const [checklistError, setChecklistError] = useState("");
@@ -428,7 +428,6 @@ function WorkspaceScreen({
   const recordedChunksRef = useRef<Blob[]>([]);
   const [error, setError] = useState("");
   const [workspaceRestored, setWorkspaceRestored] = useState(false);
-  const assessmentDrawerRef = useRef<HTMLDetailsElement | null>(null);
   const myDocumentsInitializedRef = useRef(false);
 
   const refreshMyDocuments = useCallback(async () => {
@@ -636,40 +635,6 @@ function WorkspaceScreen({
     };
   }
 
-  async function handleAssessment(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setIsLoading(true);
-    setError("");
-    setChecklistError("");
-    setAssessmentNotice("");
-    try {
-      const token = getAccessToken();
-      if (!token) throw new Error("위험성평가를 만들려면 먼저 로그인해 주세요.");
-      const response = await fetch(`${getApiBaseUrl()}/api/v1/assessments/preview`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(assessmentPayload()),
-      });
-      if (!response.ok) {
-        throw new Error(await apiErrorMessage(response, "분석 요청에 실패했습니다. 백엔드 실행 상태를 확인해 주세요."));
-      }
-      const payload = normalizeAssessmentResponse(await response.json() as AssessmentResponse);
-      setResult(payload);
-      setChatWorkContext({ ...form });
-      setSavedAssessmentId(null);
-      setPendingChecklistItemIds(new Set());
-      const highest = payload.hazards.some((hazard) => hazard.risk_level === "high") ? "높음" : payload.hazards.some((hazard) => hazard.risk_level === "medium") ? "보통" : "낮음";
-      saveHistory(form.description, `위험요인 ${payload.hazards.length}건, TBM 체크리스트 ${payload.tbm_checklist.length}건`, highest);
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "알 수 없는 오류가 발생했습니다.");
-    } finally {
-      setIsLoading(false);
-    }
-  }
-
   async function saveAssessment() {
     if (!result || isSavingAssessment) return;
     setIsSavingAssessment(true);
@@ -776,14 +741,14 @@ function WorkspaceScreen({
         body: JSON.stringify({
           question: submittedQuestion,
           context: {
-            site_name: chatWorkContext?.site_name || null,
-            equipment_name: chatWorkContext?.equipment_name || null,
-            manufacturer: chatWorkContext?.manufacturer || null,
-            model_number: chatWorkContext?.model_number || null,
-            component_name: chatWorkContext?.component_name || null,
-            task_type: chatWorkContext?.task_type || null,
-            energy_source: chatWorkContext?.energy_source || null,
-            task_description: chatWorkContext?.description || null,
+            site_name: null,
+            equipment_name: null,
+            manufacturer: null,
+            model_number: null,
+            component_name: null,
+            task_type: null,
+            energy_source: null,
+            task_description: null,
             visual_summary: visionSummary || null,
             selected_document_ids: selectedDocumentIds,
           },
@@ -828,36 +793,6 @@ function WorkspaceScreen({
       setError(message);
     } finally {
       setIsChatLoading(false);
-    }
-  }
-
-  function updateField(field: keyof typeof initialForm, value: string) {
-    setForm((current) => ({ ...current, [field]: value }));
-    setChatWorkContext(null);
-  }
-
-  function prepareAssessmentFromChat(sourceQuestion: string) {
-    const importedDescription = sourceQuestion.trim().slice(0, 2000);
-    setForm((current) => ({
-      ...current,
-      task_type: current.task_type || importedDescription.slice(0, 100),
-      description: importedDescription || current.description,
-    }));
-    setChatWorkContext(null);
-    setResult(null);
-    setSavedAssessmentId(null);
-    setPendingChecklistItemIds(new Set());
-    setChecklistError("");
-    setError("");
-    setActiveTab("tbm");
-    setAssessmentNotice(
-      "채팅 질문을 작업 설명으로 가져왔습니다. 사업장·설비·작업정보를 확인하고 초안을 만든 뒤 저장해 주세요. 채팅 체크리스트는 안전 검증을 위해 자동 저장되지 않습니다.",
-    );
-
-    const drawer = assessmentDrawerRef.current;
-    if (drawer) {
-      drawer.open = true;
-      drawer.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }
 
@@ -1111,7 +1046,7 @@ function WorkspaceScreen({
     const latestAnswer = [...messages].reverse().find((message) => message.role === "ai")?.text;
     const text = latestAnswer ?? (result
       ? `현재 분석된 위험요인은 ${result.hazards.length}건입니다. ${result.hazards.map((hazard) => `${hazard.name}. ${hazard.safety_actions.join(". ")}`).join(". ")}`
-      : "작업정보를 입력하고 위험성평가를 실행한 뒤 음성 안전 안내를 들을 수 있습니다.");
+      : "매뉴얼을 선택하고 AI 상담에서 질문한 뒤 음성 안전 안내를 들을 수 있습니다.");
 
     await playSpeech(text);
   }
@@ -1173,42 +1108,48 @@ function WorkspaceScreen({
 
   return (
     <main className={`prototype-shell ${fontClass}`}>
-      <header className="prototype-topbar">
-        <details className="menu-control">
-          <summary className="menu-button">☰ 메뉴</summary>
-          <aside className="floating-menu">
-            <h2>메뉴</h2>
-            <label>🔊 음량 <strong>{volume}</strong><input type="range" min="0" max="100" value={volume} onChange={(event) => setVolume(Number(event.target.value))} /></label>
-            <label>글자 크기<select value={fontSize} onChange={(event) => setFontSize(event.target.value as FontSize)}><option value="small">작게</option><option value="medium">보통</option><option value="large">크게</option></select></label>
-            <label>💬 채팅 답변 자동 음성 출력<input type="checkbox" checked={autoSpeak} onChange={(event) => setAutoSpeak(event.target.checked)} /></label>
-            <button onClick={() => setMessages([])}>🧹 대화 초기화</button>
-            <button onClick={() => {
-              setManuals([]);
-              setSelectedDocumentIds([]);
-              setCatalogCandidates([]);
-              setVisionSummary("");
-              setManualStatus("매뉴얼 선택을 초기화했습니다.");
-            }}>📚 매뉴얼 목록 초기화</button>
-            <button className="logout-button" onClick={onLogout}>🚪 로그아웃</button>
-          </aside>
-        </details>
-        <div><strong>SafeMaint AI</strong><span>작업 전 위험성평가 · 사고예방 · 근거 기반 안전 안내</span></div>
-        <div className="user-label"><strong>{displayName}</strong> 님</div>
-      </header>
+      <WorkspaceHeader
+        displayName={displayName}
+        locationStatus={locationStatus}
+        gpsSource={gpsSource}
+        isRecording={isRecording}
+        isTranscribing={isTranscribing}
+        isSpeaking={isSpeaking}
+        volume={volume}
+        fontSize={fontSize}
+        autoSpeak={autoSpeak}
+        onVoiceInput={toggleVoiceInput}
+        onSpeakGuidance={speakGuidance}
+        onHistory={onHistory}
+        onVolumeChange={setVolume}
+        onFontSizeChange={setFontSize}
+        onAutoSpeakChange={setAutoSpeak}
+        onClearConversation={() => setMessages([])}
+        onClearManuals={() => {
+          setManuals([]);
+          setSelectedDocumentIds([]);
+          setCatalogCandidates([]);
+          setVisionSummary("");
+          setManualStatus("매뉴얼 선택을 초기화했습니다.");
+        }}
+        onLogout={onLogout}
+      />
 
-      <section className="quick-toolbar" aria-label="현장 빠른 기능">
-        <label className="toolbar-upload"><InterfaceIcon name="image" />현장 사진<input type="file" accept="image/*" onChange={(event) => void analyzePhoto(event.target.files?.[0])} /></label>
-        <button type="button" onClick={toggleVoiceInput} disabled={isTranscribing}>
-          <InterfaceIcon name={isRecording ? "stop" : "microphone"} />{isRecording ? "녹음 중지" : isTranscribing ? "인식 중..." : "음성 입력"}
-        </button>
-        <button type="button" onClick={speakGuidance}><InterfaceIcon name={isSpeaking ? "stop" : "speaker"} />{isSpeaking ? "음성 중지" : "음성 안내"}</button>
-        <button type="button" onClick={onHistory}><InterfaceIcon name="history" />결과 기록</button>
-        <span>{locationStatus}</span>
-      </section>
+      <div className="workspace-content">
+        <section className="workflow-hero" aria-labelledby="workflow-title">
+          <div><span className="eyebrow">현장 작업 지원 워크스페이스</span><h1 id="workflow-title">매뉴얼을 선택하고, 근거가 있는 답변을 확인하세요.</h1><p>매뉴얼과 현장 사진을 바탕으로 부품 정보·작업 절차·TBM 항목을 바로 질문할 수 있습니다.</p></div>
+          <ol className="workflow-steps" aria-label="작업 진행 순서">
+            <li className={manuals.length ? "complete" : "active"}><span>1</span><strong>문서·사진</strong></li>
+            <li className={messages.length ? "complete" : manuals.length ? "active" : ""}><span>2</span><strong>AI 질문</strong></li>
+            <li className={result ? "complete" : messages.length ? "active" : ""}><span>3</span><strong>위험·TBM</strong></li>
+          </ol>
+        </section>
+
+      {error && <p className="workspace-error error-message" role="alert">{error}</p>}
 
       <details className="assessment-drawer gps-drawer">
         <summary>
-          📍 가상 GPS 자동 위치 추적 열기
+          <span className="gps-summary-title"><InterfaceIcon name="location" /><strong>가상 GPS 위치 도구</strong></span>
           <span className={isGpsChecking ? "status-pill active" : "status-pill"}>{locationStatus}</span>
           <span className="panel-tag muted">{gpsSource === "real" ? "실제 위치 사용 중" : "기본 테스트 좌표 사용 중"}</span>
         </summary>
@@ -1334,9 +1275,9 @@ function WorkspaceScreen({
       <section className="field-overview-grid">
         <article className={`risk-overview-card risk-${highestRisk}`}>
           <span className="eyebrow">현재 작업 판단</span>
-          <div className="risk-symbol">{highestRisk === "high" ? "🔴" : highestRisk === "medium" ? "🟡" : highestRisk === "low" ? "🟢" : "⚪"}</div>
-          <h1>{highestRisk === "high" ? "작업 중지 필요" : highestRisk === "medium" ? "관리자 확인 필요" : highestRisk === "low" ? "기본조치 확인" : "분석 전"}</h1>
-          <p>{result ? `위험요인 ${result.hazards.length}건이 분석되었습니다.` : "아래 작업정보와 자료를 입력한 뒤 분석을 시작하세요."}</p>
+          <div className="risk-symbol" aria-hidden="true"><span /></div>
+          <h1>{highestRisk === "high" ? "작업 중지 필요" : highestRisk === "medium" ? "관리자 확인 필요" : highestRisk === "low" ? "기본조치 확인" : "상담 대기"}</h1>
+          <p>{result ? `위험요인 ${result.hazards.length}건이 분석되었습니다.` : "매뉴얼을 선택하고 작업 내용을 질문하면 안전 근거를 확인할 수 있습니다."}</p>
           <div className="accident-chip-list">{accidentTypes.length ? accidentTypes.map((type) => <span key={type}>⚠ {type}</span>) : <span>사고 유형 대기</span>}</div>
           <small>AI는 작업을 승인하지 않으며 최종 판단은 안전관리자가 수행합니다.</small>
         </article>
@@ -1352,50 +1293,37 @@ function WorkspaceScreen({
         </article>
       </section>
 
-      <section className="manual-row upgraded-manual-row">
-        <label className="file-card">📄 작업 설비 매뉴얼 추가<input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
-        <div><strong>{manuals.length ? `${manuals.length}개 매뉴얼 등록됨` : "등록된 매뉴얼 없음"}</strong><span>{manualStatus || (sitePhotoName ? `현장 사진: ${sitePhotoName} · ${visionStatus}` : "현장 사진 없음")}</span></div>
-        <div className="document-chip-list">
-          {userDocuments.length > 0
-            ? userDocuments.map((document) => {
-                const isSelected = selectedDocumentIds.includes(document.document_id);
-                return <article className={`uploaded-document-chip ${isSelected ? "selected" : ""}`} key={document.document_version_id}>
-                  <div>
-                    <strong>📄 {document.original_filename}</strong>
-                    <small>버전 {document.version_number} · {DOCUMENT_STATUS_LABELS[document.status]}</small>
-                    {document.fallback_used && <small className="fallback-label">PyMuPDF 대체 처리됨</small>}
-                    {document.processing_warning && <small className="document-chip-warning">⚠ {document.processing_warning}</small>}
-                    {document.failure_reason && <small className="document-chip-warning">{document.failure_reason}</small>}
-                  </div>
-                  <button type="button" aria-label={`${document.original_filename} ${isSelected ? "선택 해제" : "검색에 선택"}`} onClick={() => {
-                    setSelectedDocumentIds((current) => isSelected
-                      ? current.filter((id) => id !== document.document_id)
-                      : [...current, document.document_id]);
-                    setCatalogCandidates([]);
-                    setVisionSummary("");
-                  }}>{isSelected ? "선택됨" : "선택"}</button>
-                </article>;
-              })
-            : manuals.map((name, index) => <span key={`${name}-${index}`}>📄 {name}<button type="button" aria-label={`${name} 선택 해제`} onClick={() => {
-                setManuals((current) => current.filter((_, itemIndex) => itemIndex !== index));
-                setSelectedDocumentIds((current) => current.filter((_, itemIndex) => itemIndex !== index));
-                setCatalogCandidates([]);
-                setVisionSummary("");
-              }}>×</button></span>)}
-        </div>
-      </section>
+      <div className="workspace-primary-grid">
+        <ManualManager
+          manuals={manuals}
+          documents={userDocuments}
+          selectedDocumentIds={selectedDocumentIds}
+          manualStatus={manualStatus}
+          sitePhotoName={sitePhotoName}
+          visionStatus={visionStatus}
+          isVisionLoading={isVisionLoading}
+          onAddManuals={(files) => void addManuals(files)}
+          onAddPhoto={(file) => void analyzePhoto(file)}
+          onToggleDocument={(documentId) => {
+            setSelectedDocumentIds((current) => current.includes(documentId)
+              ? current.filter((id) => id !== documentId)
+              : [...current, documentId]);
+            setCatalogCandidates([]);
+            setVisionSummary("");
+          }}
+          onRemoveLegacyManual={(index) => {
+            setManuals((current) => current.filter((_, itemIndex) => itemIndex !== index));
+            setSelectedDocumentIds((current) => current.filter((_, itemIndex) => itemIndex !== index));
+            setCatalogCandidates([]);
+            setVisionSummary("");
+          }}
+        />
 
-      <DocumentReviewPanel
-        apiBaseUrl={getApiBaseUrl()}
-        token={getAccessToken()}
-        onApproved={async () => refreshMyDocuments()}
-      />
-
-      <section className="chat-stage upgraded-chat">
-        <div className="chat-heading"><div><strong>SafeMaint AI 상담</strong><span>분석 결과와 등록 문서를 바탕으로 후속 질문을 입력하세요.</span></div><button type="button" onClick={() => setMessages([])}>대화 지우기</button></div>
+      <section className="chat-stage upgraded-chat" aria-labelledby="chat-title">
+        <div className="chat-heading"><div><span className="section-number">02</span><div><strong id="chat-title">SafeMaint AI 상담</strong><span>질문과 선택한 근거 문서를 바탕으로 답변합니다.</span></div></div><button type="button" onClick={() => setMessages([])}>대화 지우기</button></div>
         <div className="chat-history">
           {messages.length === 0 ? (
-            <div className="chat-empty">💬 작업 내용이나 부품 관련 질문을 입력하세요.</div>
+            <div className="chat-empty"><span className="chat-empty-icon"><InterfaceIcon name="document" /></span><strong>무엇을 확인할까요?</strong><p>문서 내용, 부품 용도, 설치·점검 방법을 질문해 보세요.</p><small>예: “라이트커튼 설치 시 주의사항을 알려줘”</small></div>
           ) : messages.map((message, index) => (
             <div className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}>
               <strong>{message.role === "user" ? "사용자" : "SafeMaint AI"}</strong>
@@ -1419,9 +1347,6 @@ function WorkspaceScreen({
                       answer={message.structuredAnswer}
                       checklistItems={message.checklistItems ?? []}
                       sources={message.sources ?? []}
-                      onPrepareAssessment={message.structuredAnswer.answer_type === "maintenance_guide"
-                        ? () => prepareAssessmentFromChat(message.sourceQuestion ?? "")
-                        : undefined}
                     />
                   : <SafetyAnswerView answer={message.text} />
                 : <p className="chat-answer-text">{message.text}</p>}
@@ -1446,36 +1371,7 @@ function WorkspaceScreen({
                 </div>
               )}
               {message.warning && <p className="chat-warning">⚠ {message.warning}</p>}
-              {message.sources && message.sources.length > 0 && (
-                <div className="chat-source-list">
-                  <strong>검색 근거 {message.sources.length}건</strong>
-                  {message.sources.map((source) => (
-                    <article key={source.chunk_id} className="chat-source-card">
-                      <div>
-                        <span>{source.source_type}</span>
-                        <span>유사도 {(source.similarity * 100).toFixed(1)}%</span>
-                      </div>
-                      <strong>{source.title}</strong>
-                      <small className="chat-source-location">
-                        {[
-                          source.original_filename || source.title,
-                          source.page_start
-                            ? `${source.page_start}${source.page_end && source.page_end !== source.page_start ? `–${source.page_end}` : ""}페이지`
-                            : source.page ? `${source.page}페이지` : "페이지 정보 없음",
-                          source.section ? `섹션: ${source.section}` : null,
-                          source.document_version ? `문서 버전 ${source.document_version}` : null,
-                        ].filter(Boolean).join(" · ")}
-                      </small>
-                      <small className="chat-source-location">
-                        문서 ID {source.document_id}
-                        {source.document_version_id ? ` · 문서 버전 ID ${source.document_version_id}` : ""}
-                      </small>
-                      <p>{source.excerpt}</p>
-                      {source.url && <a href={source.url} target="_blank" rel="noreferrer">원문 확인</a>}
-                    </article>
-                  ))}
-                </div>
-              )}
+              {message.sources && <ChatSources sources={message.sources} />}
             </div>
           ))}
           {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>안전자료를 검색하고 AI 답변을 생성하고 있습니다…</div>}
@@ -1488,41 +1384,33 @@ function WorkspaceScreen({
           <button type="submit" disabled={isChatLoading || isVisionLoading || !question.trim()}>{isVisionLoading ? "사진 분석 중..." : isChatLoading ? "답변 생성 중..." : "전송"}</button>
         </form>
       </section>
+      </div>
 
-      <details className="assessment-drawer" ref={assessmentDrawerRef}>
-        <summary>규칙 기반 위험성평가 미리보기 열기</summary>
+      <details className="admin-tools-drawer">
+        <summary><span><InterfaceIcon name="document" /><strong>문서 승인 관리</strong></span><small>관리자 권한이 있는 경우에만 내용이 표시됩니다.</small></summary>
+        <DocumentReviewPanel
+          apiBaseUrl={getApiBaseUrl()}
+          token={getAccessToken()}
+          onApproved={async () => refreshMyDocuments()}
+        />
+      </details>
+
+      {result && <details className="assessment-drawer">
+        <summary><span><span className="section-number">03</span><strong>위험성평가 및 TBM</strong></span><small>저장된 분석 결과와 체크리스트를 검토합니다.</small></summary>
         <section className="search-progress">
-          <div className="panel-heading compact-heading"><div><span className="section-number">진행</span><h2>분석 과정</h2></div><span className={isLoading ? "status-pill active" : "status-pill"}>{isLoading ? "진행 중" : result ? "완료" : "대기"}</span></div>
-          <div className="progress-steps">{["작업정보 분석", "사고사례 검색", "법령·KOSHA 검색", "매뉴얼 검색", "재정렬", "결과 생성"].map((step, index) => <div className={result ? "done" : isLoading && index < 3 ? "active" : ""} key={step}><span>{result ? "✓" : index + 1}</span><strong>{step}</strong></div>)}</div>
+          <div className="panel-heading compact-heading"><div><span className="section-number">진행</span><h2>분석 과정</h2></div><span className="status-pill">완료</span></div>
+          <div className="progress-steps">{["질문 분석", "사고사례 검색", "법령·KOSHA 검색", "매뉴얼 검색", "재정렬", "결과 생성"].map((step) => <div className="done" key={step}><span>✓</span><strong>{step}</strong></div>)}</div>
         </section>
-        <div className="workspace-grid embedded">
-          <section className="panel">
-            <div className="panel-heading"><div><span className="section-number">01</span><h2>작업정보 입력</h2></div><span className="panel-tag">필수</span></div>
-            <form onSubmit={handleAssessment}>
-              <div className="form-grid">
-                <Field label="사업장"><input value={form.site_name} onChange={(e) => updateField("site_name", e.target.value)} placeholder="사업장명을 입력하세요" required /></Field>
-                <Field label="설비명"><input value={form.equipment_name} onChange={(e) => updateField("equipment_name", e.target.value)} placeholder="설비명을 입력하세요" required /></Field>
-                <Field label="제조사"><input value={form.manufacturer} onChange={(e) => updateField("manufacturer", e.target.value)} placeholder="선택 입력" /></Field>
-                <Field label="모델·부품번호"><input value={form.model_number} onChange={(e) => updateField("model_number", e.target.value)} /></Field>
-                <Field label="부품"><input value={form.component_name} onChange={(e) => updateField("component_name", e.target.value)} /></Field>
-                <Field label="작업 종류"><input value={form.task_type} onChange={(e) => updateField("task_type", e.target.value)} placeholder="수행할 작업을 입력하세요" required /></Field>
-                <Field label="주요 에너지원"><select value={form.energy_source} onChange={(e) => updateField("energy_source", e.target.value)}><option value="">미확인</option><option value="전기">전기</option><option value="기계">기계</option><option value="압력">압력</option><option value="열">열</option></select></Field>
-              </div>
-              <Field label="작업 설명"><textarea value={form.description} onChange={(e) => updateField("description", e.target.value)} placeholder="수행할 작업 범위와 현재 상태를 입력해 주세요." minLength={5} rows={4} required /></Field>
-              {assessmentNotice && <p className="assessment-import-notice" role="status">{assessmentNotice}</p>}
-              {error && <p className="error-message">{error}</p>}
-              <button className="primary-button" disabled={isLoading} type="submit">{isLoading ? "분석 중..." : "위험성평가 초안 만들기"}</button>
-            </form>
-          </section>
+        <div className="assessment-result-layout">
           <section className="panel result-panel" aria-live="polite">
-            <div className="panel-heading"><div><span className="section-number">02</span><h2>분석 결과</h2></div><span className="panel-tag muted">초안</span></div>
+            <div className="panel-heading"><div><span className="section-number">결과</span><h2>위험성평가 결과</h2></div><span className="panel-tag muted">초안</span></div>
             <div className="result-tabs">
               <button type="button" className={activeTab === "summary" ? "active" : ""} onClick={() => setActiveTab("summary")}>위험요인</button>
               <button type="button" className={activeTab === "accidents" ? "active" : ""} onClick={() => setActiveTab("accidents")}>유사 사고</button>
               <button type="button" className={activeTab === "evidence" ? "active" : ""} onClick={() => setActiveTab("evidence")}>근거 문서</button>
               <button type="button" className={activeTab === "tbm" ? "active" : ""} onClick={() => setActiveTab("tbm")}>TBM 체크</button>
             </div>
-            {!result ? <div className="empty-state"><div className="empty-icon">!</div><h3>아직 분석 결과가 없습니다.</h3><p>왼쪽 작업정보를 확인하고 초안 만들기를 실행해 주세요.</p></div> : activeTab === "summary" ? <AssessmentResult result={result} mode="hazards" /> : activeTab === "accidents" ? <SimilarAccidentPanel result={result} /> : activeTab === "evidence" ? <EvidencePanel result={result} manuals={manuals} /> : (
+            {activeTab === "summary" ? <AssessmentResult result={result} mode="hazards" /> : activeTab === "accidents" ? <SimilarAccidentPanel result={result} /> : activeTab === "evidence" ? <EvidencePanel result={result} manuals={manuals} /> : (
               <AssessmentResult
                 result={result}
                 mode="tbm"
@@ -1536,9 +1424,10 @@ function WorkspaceScreen({
             )}
           </section>
         </div>
-      </details>
+      </details>}
 
       <footer className="safety-footer">본 결과는 작업 전 검토를 위한 초안이며, 현장 안전관리자의 최종 확인과 승인 없이 작업을 시작할 수 없습니다.</footer>
+      </div>
     </main>
   );
 }
@@ -1624,23 +1513,4 @@ function SecureCandidateImage({ candidate, alt }: { candidate: CatalogCandidate;
   }, [candidate.document_id, candidate.image_index, candidate.page]);
 
   return source ? <img src={source} alt={alt} loading="lazy" /> : <div className="catalog-image-placeholder">이미지 불러오는 중</div>;
-}
-
-type InterfaceIconName = "location" | "image" | "microphone" | "speaker" | "stop" | "history" | "paperclip";
-
-function InterfaceIcon({ name }: { name: InterfaceIconName }) {
-  const paths: Record<InterfaceIconName, React.ReactNode> = {
-    location: <><path d="M12 21s6-5.1 6-11a6 6 0 1 0-12 0c0 5.9 6 11 6 11Z" /><circle cx="12" cy="10" r="2" /></>,
-    image: <><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="8.5" cy="9" r="1.5" /><path d="m4 17 5-5 4 4 2-2 5 5" /></>,
-    microphone: <><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8" /></>,
-    speaker: <><path d="M5 9v6h4l5 4V5L9 9H5Z" /><path d="M17 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12" /></>,
-    stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
-    history: <><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8" /><path d="M4 4v4h4M12 8v5l3 2" /></>,
-    paperclip: <path d="m9 17 7.5-7.5a3 3 0 0 0-4.2-4.2L4.8 12.8a5 5 0 0 0 7.1 7.1l7-7" />,
-  };
-  return <svg className="interface-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return <label className="field"><span>{label}</span>{children}</label>;
 }

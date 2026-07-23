@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
 
 import SafetyAnswerView from "@/components/SafetyAnswerView";
 import StructuredChatAnswer from "@/components/StructuredChatAnswer";
@@ -76,7 +76,6 @@ describe("StructuredChatAnswer", () => {
   });
 
   it("renders maintenance summary, stop conditions and real checkboxes", () => {
-    const onPrepareAssessment = vi.fn();
     render(
       <StructuredChatAnswer
         answer={{
@@ -107,15 +106,12 @@ describe("StructuredChatAnswer", () => {
           evidence_chunk_ids: ["chunk-1"],
         }]}
         sources={[source]}
-        onPrepareAssessment={onPrepareAssessment}
       />,
     );
 
     expect(screen.getByText("예상 위험도")).toBeInTheDocument();
     expect(screen.getByText("4. 즉시 작업을 중지해야 하는 조건")).toBeInTheDocument();
     expect(screen.getByRole("checkbox")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "위험성평가 작성으로 가져오기" }));
-    expect(onPrepareAssessment).toHaveBeenCalledOnce();
   });
 
   it("renders no-evidence and clarification layouts", () => {
