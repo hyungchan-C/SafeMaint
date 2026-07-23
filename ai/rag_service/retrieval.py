@@ -30,16 +30,37 @@ GENERIC_QUERY_TERMS = frozenset(
         "방법",
         "안전",
         "관련",
+        "문서",
+        "요약",
+        "요약해",
+        "요약해줘",
+        "정리",
+        "정리해",
+        "정리해줘",
+        "내용",
+        "파일",
+        "첨부",
+        "첨부한",
+        "확인",
+        "확인해줘",
+        "확인해",
         "교체",
         "교체법",
         "교체작업",
+        "교체할",
         "청소",
         "청소법",
+        "청소할",
         "점검",
+        "점검할",
         "정비",
         "설치",
         "설치법",
         "설치시",
+        "설치할",
+        "설치하려",
+        "설치하려고",
+        "설치하기",
         "주의사항",
         "절차",
         "알려줘",
@@ -47,13 +68,80 @@ GENERIC_QUERY_TERMS = frozenset(
         "어디에",
         "쓰는",
         "거야",
+        "할거야",
+        "예정",
+        "예정이야",
         "해주세요",
         "하려고",
         "합니다",
+        "할게",
+        "내부",
+        "내부를",
         "어떻게",
         "replacement",
         "installation",
     }
+)
+MAINTENANCE_ACTION_TERMS = frozenset(
+    {
+        "교체",
+        "청소",
+        "점검",
+        "검사",
+        "정비",
+        "보수",
+        "설치",
+        "배선",
+        "세척",
+        "정렬",
+        "조정",
+        "해체",
+        "분리",
+        "연결",
+        "운반",
+        "차단",
+        "격리",
+        "잠금",
+        "replace",
+        "clean",
+        "inspect",
+        "check",
+        "maintain",
+        "install",
+        "wire",
+        "align",
+        "adjust",
+        "isolate",
+        "lock",
+    }
+)
+SAFETY_SIGNAL_TERMS = (
+    "위험",
+    "안전",
+    "주의",
+    "경고",
+    "금지",
+    "방호",
+    "보호",
+    "차단",
+    "격리",
+    "재가동",
+    "인터락",
+    "정지",
+    "승인",
+    "hazard",
+    "warning",
+    "caution",
+    "lockout",
+    "tagout",
+    "interlock",
+)
+DOCUMENT_CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("overview", ("개요", "소개", "목차", "표지", "overview", "introduction")),
+    ("safety", ("안전", "주의", "경고", "위험", "금지", "safety", "warning", "caution")),
+    ("procedure", ("설치", "점검", "검사", "정비", "보수", "배선", "설정", "교체", "절차", "install", "inspect", "maintenance", "wiring")),
+    ("specification", ("사양", "규격", "모델", "구성", "정격", "치수", "spec", "model", "configuration")),
+    ("troubleshooting", ("오류", "에러", "경고", "고장", "trouble", "error", "alarm")),
 )
 
 
@@ -137,8 +225,86 @@ def lexical_score(query_terms: Sequence[str], text: str) -> float:
     return matched / len(query_terms)
 
 
+def action_terms(value: str) -> tuple[str, ...]:
+    terms: list[str] = []
+    for token in tokenize(value):
+        for action in MAINTENANCE_ACTION_TERMS:
+            if token.startswith(action) or action in token:
+                terms.append(action)
+                break
+    return tuple(dict.fromkeys(terms))
+
+
+def safety_signal_score(text: str) -> float:
+    if not text:
+        return 0.0
+    matched = sum(1 for term in SAFETY_SIGNAL_TERMS if term.casefold() in text)
+    return min(1.0, matched / 3)
+
+
 def topic_terms(value: str) -> tuple[str, ...]:
     return tuple(term for term in tokenize(value) if term not in GENERIC_QUERY_TERMS)
+
+
+def _compact_for_phrase(value: str) -> str:
+    return re.sub(r"[\s_-]+", "", value.casefold())
+
+
+def _topic_phrase_terms(value: str) -> tuple[str, ...]:
+    return topic_terms(value)[:2]
+
+
+def _topic_phrase_matches(terms: Sequence[str], text: str) -> bool:
+    if len(terms) < 2:
+        return False
+    compact_phrase = "".join(_compact_for_phrase(term) for term in terms)
+    return bool(compact_phrase) and compact_phrase in _compact_for_phrase(text)
+
+
+def _combined_row_text(row: dict[str, Any]) -> str:
+    return " ".join(
+        str(value)
+        for value in (
+            row["title"],
+            row["section"],
+            row["original_filename"],
+            row["source_type"],
+            row["content"],
+        )
+        if value
+    )
+
+
+def _document_category(row: dict[str, Any]) -> str:
+    text = _combined_row_text(row).casefold()
+    page_values = (row.get("page_start"), row.get("page"))
+    if any(isinstance(page, int) and page <= 2 for page in page_values):
+        return "overview"
+    for category, keywords in DOCUMENT_CATEGORY_KEYWORDS:
+        if any(keyword.casefold() in text for keyword in keywords):
+            return category
+    return "general"
+
+
+def _diversify_document_ranked(
+    ranked: list[tuple[float, dict[str, Any], float, float]],
+) -> list[tuple[float, dict[str, Any], float, float]]:
+    selected: list[tuple[float, dict[str, Any], float, float]] = []
+    used_chunks: set[str] = set()
+    for category, _ in DOCUMENT_CATEGORY_KEYWORDS:
+        for item in ranked:
+            row = item[1]
+            chunk_id = str(row["chunk_id"])
+            if chunk_id not in used_chunks and _document_category(row) == category:
+                selected.append(item)
+                used_chunks.add(chunk_id)
+                break
+    for item in ranked:
+        chunk_id = str(item[1]["chunk_id"])
+        if chunk_id not in used_chunks:
+            selected.append(item)
+            used_chunks.add(chunk_id)
+    return selected
 
 
 def topics_overlap(left: Sequence[str], right: Sequence[str]) -> bool:
@@ -372,8 +538,24 @@ class PgvectorRetriever:
                           )
                       )
                   )
-                  AND (%s OR d.id = ANY(%s::uuid[]))
-                  AND (%s OR dv.id = ANY(%s::uuid[]))
+                  AND (
+                      %s
+                      OR d.id = ANY(%s::uuid[])
+                      OR (
+                          %s
+                          AND dt.scope = 'public'
+                          AND d.access_level = 'public'
+                      )
+                  )
+                  AND (
+                      %s
+                      OR dv.id = ANY(%s::uuid[])
+                      OR (
+                          %s
+                          AND dt.scope = 'public'
+                          AND d.access_level = 'public'
+                      )
+                  )
                   {scope_clause}
                   AND dc.embedding_status = 'ready'
                   AND dc.embedding IS NOT NULL
@@ -409,6 +591,10 @@ class PgvectorRetriever:
         selected_versions = tuple(request.context.selected_document_version_ids)
         include_all_documents = not selected_documents
         include_all_versions = not selected_versions
+        include_public_supplement = self._include_public_supplement(
+            request,
+            document_ids,
+        )
         parameters = (
             vector,
             search_query,
@@ -422,8 +608,10 @@ class PgvectorRetriever:
             request.access_scope.requester_user_id,
             include_all_documents,
             list(selected_documents),
+            include_public_supplement,
             include_all_versions,
             list(selected_versions),
+            include_public_supplement,
             *scope_parameters,
             self.settings.model_name,
             int(vector.shape[0]),
@@ -441,6 +629,19 @@ class PgvectorRetriever:
                 rows = cursor.fetchall()
         return self._rerank(request, rows)
 
+    @staticmethod
+    def _include_public_supplement(
+        request: InternalChatRequest,
+        document_ids: tuple[UUID, ...] | None,
+    ) -> bool:
+        intent = request.analysis.question_intent if request.analysis else None
+        return bool(
+            request.context.effective_document_ids()
+            and request.access_scope.allow_company
+            and document_ids is None
+            and intent == "maintenance_guide"
+        )
+
     def _rerank(
         self,
         request: InternalChatRequest,
@@ -448,7 +649,7 @@ class PgvectorRetriever:
     ) -> list[ChatSource]:
         query = self.build_search_query(request)
         query_terms = tokenize(query)
-        has_selected_documents = bool(request.context.effective_document_ids())
+        query_action_terms = action_terms(request.question)
         context_topic_values = [
             request.context.equipment_name,
             request.context.manufacturer,
@@ -467,6 +668,20 @@ class PgvectorRetriever:
             active_topic_terms = tuple(
                 term for term in query_terms if term not in GENERIC_QUERY_TERMS
             )
+        intent = request.analysis.question_intent if request.analysis else None
+        selected_document_ids = {
+            str(document_id) for document_id in request.context.effective_document_ids()
+        }
+        selected_topic_phrase_terms = _topic_phrase_terms(request.question)
+        selected_documents_match_topic_phrase = bool(
+            selected_document_ids
+            and selected_topic_phrase_terms
+            and any(
+                str(row["document_id"]) in selected_document_ids
+                and _topic_phrase_matches(selected_topic_phrase_terms, _combined_row_text(row))
+                for row in rows
+            )
+        )
 
         ranked: list[tuple[float, dict[str, Any], float, float]] = []
         seen_hashes: set[str] = set()
@@ -483,9 +698,22 @@ class PgvectorRetriever:
                 if value
             )
             combined = f"{metadata_text} {content}".casefold()
-            if not has_selected_documents and active_topic_terms and not any(
-                _term_matches(term, combined) for term in active_topic_terms
+            row_document_id = str(row["document_id"])
+            document_scope = str(row["document_scope"] or "").casefold()
+            source_type = str(row["source_type"] or "").casefold()
+            if (
+                intent == "maintenance_guide"
+                and selected_documents_match_topic_phrase
+                and row_document_id not in selected_document_ids
+                and document_scope == "public"
+                and not _topic_phrase_matches(selected_topic_phrase_terms, combined)
             ):
+                continue
+            has_topic_match = (
+                not active_topic_terms
+                or any(_term_matches(term, combined) for term in active_topic_terms)
+            )
+            if active_topic_terms and not has_topic_match:
                 continue
             keyword = lexical_score(query_terms, combined)
             similarity = float(row["similarity"])
@@ -501,10 +729,10 @@ class PgvectorRetriever:
             metadata_score = lexical_score(
                 active_topic_terms, metadata_text.casefold()
             )
+            action_score = lexical_score(query_action_terms, combined)
+            safety_score = safety_signal_score(combined)
             retrieval_score = max(0.0, similarity) * 0.7 + keyword * 0.3
             reranker_score = retrieval_score * 0.9 + metadata_score * 0.1
-            intent = request.analysis.question_intent if request.analysis else None
-            source_type = str(row["source_type"] or "").casefold()
             if intent == "maintenance_guide":
                 if source_type in {
                     "manual",
@@ -515,6 +743,9 @@ class PgvectorRetriever:
                     reranker_score += 0.08
                 elif source_type in {"public_guide", "public_incident", "regulation"}:
                     reranker_score += 0.03
+                reranker_score += action_score * 0.12 + safety_score * 0.04
+                if query_action_terms and action_score == 0.0 and document_scope == "public":
+                    reranker_score = max(0.0, reranker_score - 0.06)
             elif intent == "component_info":
                 if source_type in {
                     "manual",
@@ -528,11 +759,16 @@ class PgvectorRetriever:
             ranked.append((reranker_score, row, keyword, retrieval_score))
 
         ranked.sort(key=lambda item: (-item[0], item[1]["chunk_id"]))
+        if intent == "document_qa":
+            ranked = _diversify_document_ranked(ranked)
         per_document: dict[str, int] = {}
         sources: list[ChatSource] = []
+        max_chunks_per_document = self.settings.max_chunks_per_document
+        if intent == "document_qa":
+            max_chunks_per_document = max(max_chunks_per_document, min(4, self.settings.top_k))
         for reranker_score, row, keyword, retrieval_score in ranked:
             document_id = row["document_id"]
-            if per_document.get(document_id, 0) >= self.settings.max_chunks_per_document:
+            if per_document.get(document_id, 0) >= max_chunks_per_document:
                 continue
             per_document[document_id] = per_document.get(document_id, 0) + 1
             sources.append(
