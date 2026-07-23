@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ApproveDocumentResponse, ReviewQueueDocument } from "@/types/documents";
 import { DOCUMENT_STATUS_LABELS } from "@/types/documents";
@@ -51,6 +51,7 @@ export default function DocumentReviewPanel({
   const [confirmingDocument, setConfirmingDocument] = useState<ReviewQueueDocument | null>(null);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
 
   const loadQueue = useCallback(async (silent = false) => {
     if (!token) {
@@ -102,6 +103,16 @@ export default function DocumentReviewPanel({
     const timer = window.setInterval(() => void loadQueue(true), pollingIntervalMs);
     return () => window.clearInterval(timer);
   }, [accessState, hasProcessingDocuments, loadQueue, pollingIntervalMs]);
+
+  useEffect(() => {
+    if (!confirmingDocument) return;
+    cancelButtonRef.current?.focus();
+    const closeWithEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !approvingVersionId) setConfirmingDocument(null);
+    };
+    window.addEventListener("keydown", closeWithEscape);
+    return () => window.removeEventListener("keydown", closeWithEscape);
+  }, [approvingVersionId, confirmingDocument]);
 
   async function approveDocument(document: ReviewQueueDocument) {
     if (approvingVersionId || document.version_status !== "review_required") return;
@@ -198,14 +209,14 @@ export default function DocumentReviewPanel({
 
       {confirmingDocument && (
         <div className="document-confirm-backdrop" role="presentation">
-          <div className="document-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="document-approve-title">
+          <div className="document-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="document-approve-title" aria-describedby="document-approve-description">
             <h3 id="document-approve-title">문서 승인 확인</h3>
-            <p>
+            <p id="document-approve-description">
               <strong>{confirmingDocument.original_filename}</strong>의 버전 {confirmingDocument.version_number}을 승인하시겠습니까?
               승인하면 일반 RAG 검색에서 사용할 수 있습니다.
             </p>
             <div>
-              <button type="button" onClick={() => setConfirmingDocument(null)} disabled={Boolean(approvingVersionId)}>취소</button>
+              <button ref={cancelButtonRef} type="button" onClick={() => setConfirmingDocument(null)} disabled={Boolean(approvingVersionId)}>취소</button>
               <button
                 className="confirm-approve"
                 type="button"
