@@ -231,6 +231,296 @@ def test_selected_manual_allows_referential_question_without_literal_topic_match
     assert "위험 영역" in results[0].excerpt
 
 
+def test_selected_manual_topic_mismatch_is_filtered() -> None:
+    document_id = uuid4()
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "프레스 설비 내부를 청소할 예정이야.",
+            "context": {"selected_document_ids": [str(document_id)]},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(min_similarity=0.1), embedder=object()  # type: ignore[arg-type]
+    )
+    unrelated_selected = {
+        "document_id": str(document_id),
+        "chunk_id": "chunk-light-curtain",
+        "title": "라이트커튼 사용 설명서",
+        "source_type": "equipment_manual",
+        "document_scope": "company",
+        "original_filename": "light-curtain.pdf",
+        "document_version": 1,
+        "section": "제품 개요",
+        "content": "라이트커튼은 광축 차단을 감지하는 안전장치입니다.",
+        "content_hash": "e" * 64,
+        "page": 4,
+        "page_start": 4,
+        "page_end": 4,
+        "publisher": None,
+        "url": None,
+        "similarity": 0.9,
+        "postgres_keyword_score": 0.0,
+    }
+
+    assert retriever._rerank(request, [unrelated_selected]) == []
+
+
+def test_public_supplement_requires_selected_maintenance_intent() -> None:
+    document_id = uuid4()
+    retriever = PgvectorRetriever(Settings(), embedder=object())  # type: ignore[arg-type]
+
+    maintenance_request = InternalChatRequest.model_validate(
+        {
+            "question": "프레스 설비 내부를 청소할 예정이야.",
+            "context": {"selected_document_ids": [str(document_id)]},
+            "analysis": {"question_intent": "maintenance_guide"},
+            "access_scope": {"allow_company": True},
+        }
+    )
+    document_request = InternalChatRequest.model_validate(
+        {
+            "question": "라이트 커튼 문서 요약해줘.",
+            "context": {"selected_document_ids": [str(document_id)]},
+            "analysis": {"question_intent": "document_qa"},
+            "access_scope": {"allow_company": True},
+        }
+    )
+    component_request = InternalChatRequest.model_validate(
+        {
+            "question": "라이트 커튼이 뭐야?",
+            "context": {"selected_document_ids": [str(document_id)]},
+            "analysis": {"question_intent": "component_info"},
+            "access_scope": {"allow_company": True},
+        }
+    )
+
+    assert retriever._include_public_supplement(maintenance_request, None)
+    assert not retriever._include_public_supplement(document_request, None)
+    assert not retriever._include_public_supplement(component_request, None)
+    assert not retriever._include_public_supplement(
+        maintenance_request,
+        (document_id,),
+    )
+
+
+def test_public_source_can_supplement_selected_manual_when_topic_matches() -> None:
+    document_id = uuid4()
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "프레스 설비 내부를 청소할 예정이야.",
+            "context": {"selected_document_ids": [str(document_id)]},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(min_similarity=0.1, top_k=5), embedder=object()  # type: ignore[arg-type]
+    )
+    selected_unrelated = {
+        "document_id": str(document_id),
+        "chunk_id": "chunk-light-curtain",
+        "title": "라이트커튼 사용 설명서",
+        "source_type": "equipment_manual",
+        "document_scope": "company",
+        "original_filename": "light-curtain.pdf",
+        "document_version": 1,
+        "section": "제품 개요",
+        "content": "라이트커튼은 광축 차단을 감지하는 안전장치입니다.",
+        "content_hash": "f" * 64,
+        "page": 4,
+        "page_start": 4,
+        "page_end": 4,
+        "publisher": None,
+        "url": None,
+        "similarity": 0.9,
+        "postgres_keyword_score": 0.0,
+    }
+    public_relevant = {
+        "document_id": "public-doc",
+        "chunk_id": "chunk-press-cleaning",
+        "title": "프레스 설비 청소 안전 지침",
+        "source_type": "public_guide",
+        "document_scope": "public",
+        "original_filename": "press-cleaning.pdf",
+        "document_version": 1,
+        "section": "프레스 청소",
+        "content": "프레스 설비 내부 청소 전에는 전원을 차단하고 재가동 방지 조치를 확인한다.",
+        "content_hash": "g" * 64,
+        "page": 2,
+        "page_start": 2,
+        "page_end": 2,
+        "publisher": "public source",
+        "url": None,
+        "similarity": 0.8,
+        "postgres_keyword_score": 0.1,
+    }
+
+    results = retriever._rerank(request, [selected_unrelated, public_relevant])
+
+    assert [result.chunk_id for result in results] == ["chunk-press-cleaning"]
+
+
+def test_public_curtain_wall_does_not_supplement_selected_light_curtain_manual() -> None:
+    document_id = uuid4()
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "라이트 커튼 설치할 거야.",
+            "context": {"selected_document_ids": [str(document_id)]},
+            "analysis": {"question_intent": "maintenance_guide"},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(min_similarity=0.1, top_k=5), embedder=object()  # type: ignore[arg-type]
+    )
+    selected_manual = {
+        "document_id": str(document_id),
+        "chunk_id": "chunk-light-curtain-install",
+        "title": "라이트 커튼 사용자 매뉴얼",
+        "source_type": "equipment_manual",
+        "document_scope": "company",
+        "original_filename": "light-curtain.pdf",
+        "document_version": 1,
+        "section": "안전을 위한 주의사항",
+        "content": "라이트 커튼 설치 시 기능 설정 후 의도한 대로 동작하는지 확인한다.",
+        "content_hash": "h" * 64,
+        "page": 7,
+        "page_start": 7,
+        "page_end": 9,
+        "publisher": None,
+        "url": None,
+        "similarity": 0.8,
+        "postgres_keyword_score": 0.1,
+    }
+    public_curtain_wall = {
+        "document_id": "public-curtain-wall",
+        "chunk_id": "chunk-curtain-wall",
+        "title": "금속 커튼월(Curtain wall) 안전작업 지침 - 설치 시 안전조치 사항",
+        "source_type": "public_guide",
+        "document_scope": "public",
+        "original_filename": "curtain-wall.pdf",
+        "document_version": 1,
+        "section": "설치 시 안전조치 사항",
+        "content": "커튼월 설치 작업 전 양중용 로프의 이상 유무를 점검하여야 한다.",
+        "content_hash": "i" * 64,
+        "page": 3,
+        "page_start": 3,
+        "page_end": 3,
+        "publisher": "public source",
+        "url": None,
+        "similarity": 0.9,
+        "postgres_keyword_score": 0.1,
+    }
+
+    results = retriever._rerank(request, [selected_manual, public_curtain_wall])
+
+    assert [result.chunk_id for result in results] == ["chunk-light-curtain-install"]
+
+
+def test_document_summary_allows_diverse_chunks_from_same_document() -> None:
+    document_id = uuid4()
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "이 문서 요약해줘.",
+            "context": {"selected_document_ids": [str(document_id)]},
+            "analysis": {"question_intent": "document_qa"},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(min_similarity=0.1, top_k=4, max_chunks_per_document=2),
+        embedder=object(),  # type: ignore[arg-type]
+    )
+
+    def row(chunk_id: str, section: str, content: str, page: int) -> dict:
+        return {
+            "document_id": str(document_id),
+            "chunk_id": chunk_id,
+            "title": "장비 사용자 매뉴얼",
+            "source_type": "equipment_manual",
+            "document_scope": "company",
+            "original_filename": "manual.pdf",
+            "document_version": 1,
+            "section": section,
+            "content": content,
+            "content_hash": chunk_id[-1] * 64,
+            "page": page,
+            "page_start": page,
+            "page_end": page,
+            "publisher": None,
+            "url": None,
+            "similarity": 0.8,
+            "postgres_keyword_score": 0.0,
+        }
+
+    results = retriever._rerank(
+        request,
+        [
+            row("chunk-overview", "개요", "제품 개요와 적용 범위를 설명한다.", 1),
+            row("chunk-safety", "안전 주의사항", "작업 전 안전 주의사항과 위험요인을 확인한다.", 5),
+            row("chunk-procedure", "설치 절차", "설치 및 점검 절차를 설명한다.", 12),
+            row("chunk-spec", "모델 구성", "모델 구성과 사양 정보를 설명한다.", 20),
+        ],
+    )
+
+    assert [result.chunk_id for result in results] == [
+        "chunk-overview",
+        "chunk-safety",
+        "chunk-procedure",
+        "chunk-spec",
+    ]
+
+
+def test_maintenance_action_match_is_ranked_above_generic_topic_match() -> None:
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "프레스 설비 내부를 청소할 예정이야.",
+            "analysis": {"question_intent": "maintenance_guide"},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(min_similarity=0.1, top_k=2), embedder=object()  # type: ignore[arg-type]
+    )
+    noise = {
+        "document_id": "public-noise",
+        "chunk_id": "chunk-noise",
+        "title": "설비 소음 제어 지침",
+        "source_type": "public_guide",
+        "document_scope": "public",
+        "original_filename": "noise.pdf",
+        "document_version": 1,
+        "section": "소음 제어",
+        "content": "프레스 설비 주변의 소음 노출을 줄이기 위한 흡음 대책을 설명한다.",
+        "content_hash": "j" * 64,
+        "page": 2,
+        "page_start": 2,
+        "page_end": 2,
+        "publisher": "public source",
+        "url": None,
+        "similarity": 0.95,
+        "postgres_keyword_score": 0.0,
+    }
+    action_match = {
+        "document_id": "public-action",
+        "chunk_id": "chunk-cleaning",
+        "title": "설비 정비 안전 지침",
+        "source_type": "public_guide",
+        "document_scope": "public",
+        "original_filename": "maintenance.pdf",
+        "document_version": 1,
+        "section": "청소 작업 전 확인",
+        "content": "프레스 설비 청소 전 전원 차단과 재가동 방지 상태를 확인한다.",
+        "content_hash": "k" * 64,
+        "page": 6,
+        "page_start": 6,
+        "page_end": 6,
+        "publisher": "public source",
+        "url": None,
+        "similarity": 0.75,
+        "postgres_keyword_score": 0.0,
+    }
+
+    results = retriever._rerank(request, [noise, action_match])
+
+    assert results[0].chunk_id == "chunk-cleaning"
+
+
 def test_multiple_relevant_chunks_per_document_are_allowed_and_bounded() -> None:
     request = InternalChatRequest(question="conveyor bearing replacement")
     retriever = PgvectorRetriever(
