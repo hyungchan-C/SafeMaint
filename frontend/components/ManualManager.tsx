@@ -11,9 +11,11 @@ type Props = {
   manualStatus: string;
   sitePhotoName: string;
   visionStatus: string;
+  visionElapsedLabel?: string | null;
   isVisionLoading: boolean;
   onAddManuals: (files: FileList | null) => void;
   onAddPhoto: (file: File | undefined) => void;
+  onReindexDocument?: (documentId: string, filename: string) => void;
   onToggleDocument: (documentId: string) => void;
   onRemoveLegacyManual: (index: number) => void;
 };
@@ -33,9 +35,11 @@ export default function ManualManager({
   manualStatus,
   sitePhotoName,
   visionStatus,
+  visionElapsedLabel,
   isVisionLoading,
   onAddManuals,
   onAddPhoto,
+  onReindexDocument,
   onToggleDocument,
   onRemoveLegacyManual,
 }: Props) {
@@ -59,7 +63,9 @@ export default function ManualManager({
 
       <div className="resource-status" role="status" aria-live="polite">
         <strong>{manuals.length ? `${manuals.length}개 매뉴얼 등록` : "등록된 매뉴얼 없음"}</strong>
-        <span>{manualStatus || (sitePhotoName ? `현장 사진: ${sitePhotoName} · ${visionStatus}` : "문서를 추가하거나 기존 문서를 선택해 주세요.")}</span>
+        <span>{manualStatus || "문서를 추가하거나 기존 문서를 선택해 주세요."}</span>
+        {sitePhotoName && <span>현장 사진: {sitePhotoName} · {visionStatus}</span>}
+        {visionElapsedLabel && <small className="vision-elapsed">분석 소요 시간: {visionElapsedLabel}</small>}
       </div>
 
       <div className="document-selection-list">
@@ -79,9 +85,16 @@ export default function ManualManager({
                   </div>
                   {document.processing_warning && <p className="document-chip-warning">{document.processing_warning}</p>}
                   {document.failure_reason && <p className="document-chip-warning" role="alert">{document.failure_reason}</p>}
-                  <button type="button" className={isSelected ? "document-select-button selected" : "document-select-button"} aria-pressed={isSelected} onClick={() => onToggleDocument(document.document_id)}>
-                    {isSelected ? "검색 범위에 포함됨" : "검색 범위에 추가"}
-                  </button>
+                  <div className="document-selection-actions">
+                    <button type="button" className={isSelected ? "document-select-button selected" : "document-select-button"} aria-pressed={isSelected} onClick={() => onToggleDocument(document.document_id)}>
+                      {isSelected ? "검색 범위에 포함됨" : "검색 범위에 추가"}
+                    </button>
+                    {onReindexDocument && (
+                      <button type="button" className="document-reindex-button" onClick={() => onReindexDocument(document.document_id, document.original_filename)}>
+                        비전 재인덱싱
+                      </button>
+                    )}
+                  </div>
                 </article>
               );
             })

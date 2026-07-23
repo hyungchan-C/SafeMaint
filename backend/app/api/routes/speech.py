@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, File, HTTPException, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 
 from app.schemas.speech import SpeechRequest, TranscribeResponse
 from app.services.speech import speech_service
@@ -23,6 +24,17 @@ async def synthesize_speech(payload: SpeechRequest) -> Response:
         content=audio,
         media_type="audio/wav",
         headers={"Content-Disposition": 'inline; filename="safemaint-voice.wav"'},
+    )
+
+
+@router.post("/synthesize/stream")
+async def synthesize_speech_stream(payload: SpeechRequest) -> StreamingResponse:
+    """Same synthesis as /synthesize, but returns a stream of length-prefixed WAV
+    frames (one per text chunk) as soon as each chunk is ready, so playback can
+    start well before the whole answer has finished generating."""
+    return StreamingResponse(
+        speech_service.synthesize_stream(payload.text, payload.speed),
+        media_type="application/octet-stream",
     )
 
 

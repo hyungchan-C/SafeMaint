@@ -638,6 +638,7 @@ a {
 .file-card input { display: none; }
 .manual-row > div { display: grid; }
 .manual-row span { color: var(--muted); font-size: 12px; }
+.manual-row .vision-elapsed { color: #087f73; font-weight: 700; margin-top: 3px; }
 .chat-stage { background: white; border: 2px solid #132b3b; border-top: 0; }
 .chat-history { min-height: 250px; overflow-y: auto; padding: 22px; }
 .chat-empty { color: var(--muted); padding: 90px 0; text-align: center; }
@@ -763,6 +764,7 @@ a {
 .gps-manual-fields input { border: 1px solid #ccd9df; border-radius: 8px; padding: 8px 10px; width: 120px; }
 .gps-manual-fields button { background: #f7fafb; border: 1px solid #cfdde3; border-radius: 8px; color: var(--navy); cursor: pointer; font-weight: 700; padding: 8px 12px; }
 .gps-map-marker { position: absolute; font-size: 22px; transform: translate(-50%, -100%); pointer-events: none; }
+.gps-map-marker-clamped { filter: grayscale(40%); opacity: 0.75; }
 .field-overview-grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1.3fr) minmax(290px, .7fr); margin: 0 auto 18px; max-width: 1500px; }
 .risk-overview-card { align-items: center; background: white; border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 280px; padding: 25px; text-align: center; }
 .risk-overview-card.risk-high { border-top: 6px solid var(--danger); }
@@ -1163,6 +1165,7 @@ a {
 .resource-status { background: var(--info-soft); border-left: 4px solid var(--info); border-radius: 8px; display: grid; gap: 4px; padding: 11px 12px; }
 .resource-status strong { font-size: 12px; }
 .resource-status span { color: #456679; font-size: 11px; line-height: 1.55; }
+.resource-status .vision-elapsed { color: var(--success); font-size: 10px; font-weight: 800; }
 .document-selection-list { display: grid; gap: 9px; max-height: 460px; overflow-y: auto; padding-right: 2px; }
 .document-selection-card { background: #fff; border: 1px solid var(--line); border-radius: 11px; display: grid; gap: 9px; padding: 11px; }
 .document-selection-card.selected { background: #f0f9f7; border-color: #79bdb1; box-shadow: inset 3px 0 var(--teal); }
@@ -1180,6 +1183,9 @@ a {
 .document-select-button { background: #fff; border: 1px solid #b9cad2; border-radius: 8px; color: var(--navy); cursor: pointer; font-size: 11px; font-weight: 800; min-height: 38px; }
 .document-select-button:hover { border-color: var(--teal); color: var(--teal); }
 .document-select-button.selected { background: var(--teal); border-color: var(--teal); color: #fff; }
+.document-selection-actions { display: grid; gap: 7px; grid-template-columns: minmax(0, 1fr) auto; }
+.document-reindex-button { background: var(--orange-soft); border: 1px solid #e8bd80; border-radius: 8px; color: var(--orange-dark); cursor: pointer; font-size: 10px; font-weight: 800; min-height: 38px; padding: 7px 9px; }
+.document-reindex-button:hover { background: var(--orange); color: var(--ink); }
 .legacy-document-chip { align-items: center; background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 9px; display: flex; font-size: 11px; gap: 7px; padding: 8px 9px; }
 .legacy-document-chip .interface-icon { height: 16px; width: 16px; }
 .legacy-document-chip button { background: transparent; border: 0; color: var(--danger); cursor: pointer; margin-left: auto; }

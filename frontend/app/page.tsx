@@ -68,7 +68,6 @@ const initialForm = {
 
 const levelLabel = { low: "낮음", medium: "보통", high: "높음" } as const;
 const ppeItems = ["안전모", "보호장갑", "보안경", "안전화"] as const;
-
 // 위경도 ↔ 미터 변환(근사). 위경도 1도당 거리는 위도에 따라 달라지므로
 // 경도는 현재 위도의 코사인으로 보정한다. 좁은 지역(수백m 이내) 가정.
 const METERS_PER_DEG_LAT = 111_320;
@@ -79,12 +78,20 @@ function metersPerDegLon(latDeg: number) {
 const GPS_MAP_SIZE_PX = 320;
 const GPS_MAP_SCALE_PX_PER_M = 2;
 const GPS_EQUIPMENT_RADIUS_M = 30;
+const GPS_MAP_MARKER_EDGE_PADDING_PX = 20;
 
 function metersOffsetFromCenter(center: { lat: number; lon: number }, lat: number, lon: number) {
   return {
     x: (lon - center.lon) * metersPerDegLon(center.lat),
     y: (center.lat - lat) * METERS_PER_DEG_LAT,
   };
+}
+
+// 지도 박스는 overflow: hidden이라, 표시 범위(기준점에서 반경 약 80m) 밖의 좌표는
+// 그냥 안 보이게 잘려서 "마커가 사라진" 것처럼 보인다. 박스 가장자리에 붙여서라도
+// 항상 어느 방향에 있는지는 보이도록 좌표를 박스 안쪽으로 눌러 담는다.
+function clampToMapBounds(px: number) {
+  return Math.min(GPS_MAP_SIZE_PX - GPS_MAP_MARKER_EDGE_PADDING_PX, Math.max(GPS_MAP_MARKER_EDGE_PADDING_PX, px));
 }
 
 const STORAGE_KEYS = {
@@ -155,7 +162,20 @@ function normalizeAssessmentResponse(payload: AssessmentResponse): AssessmentRes
 }
 
 function refersToAttachedPhoto(question: string): boolean {
-  return /(이건|이게|이것|이거|저건|저게|그건|그게|뭐야|무엇|어디에\s*쓰|용도|쓰이는|사용하는|어떤\s*(부품|제품)|비슷한|같은\s*(부품|제품)|후보)/i.test(question);
+  const normalized = question.replace(/\s+/g, "");
+  return /(이것|이거|이게|이건|저것|저거|그것|그거|사진|이미지|방금|첨부|보낸|찍은|뭐야|무엇|어디에쓰|용도|어떤(?:부품|제품)|비슷한(?:부품|제품)|후보)/i.test(normalized);
+}
+
+function formatElapsedTime(elapsedMs: number): string {
+  const totalSeconds = Math.max(1, Math.round(elapsedMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [
+    hours ? `${hours}시간` : "",
+    minutes ? `${minutes}분` : "",
+    `${seconds}초`,
+  ].filter(Boolean).join(" ");
 }
 
 export default function HomePage() {
@@ -386,6 +406,7 @@ function WorkspaceScreen({
   const [volume, setVolume] = useState(70);
   const [fontSize, setFontSize] = useState<FontSize>("medium");
   const [autoSpeak, setAutoSpeak] = useState(false);
+  const autoSpeakRef = useRef(autoSpeak);
   const [manuals, setManuals] = useState<string[]>([]);
   const [userDocuments, setUserDocuments] = useState<UserDocumentSummary[]>([]);
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
@@ -393,7 +414,10 @@ function WorkspaceScreen({
   const [sitePhotoName, setSitePhotoName] = useState("");
   const [visionSummary, setVisionSummary] = useState("");
   const [visionStatus, setVisionStatus] = useState("");
+  const [visionElapsedMs, setVisionElapsedMs] = useState<number | null>(null);
   const [catalogCandidates, setCatalogCandidates] = useState<CatalogCandidate[]>([]);
+  const [visualCategories, setVisualCategories] = useState<string[]>([]);
+  const [visualFeatures, setVisualFeatures] = useState<string[]>([]);
   const [ppeChecks, setPpeChecks] = useState<Record<string, boolean>>({});
   const [locationStatus, setLocationStatus] = useState("위치 미확인");
   const [gpsOrigin, setGpsOrigin] = useState<{ latitude: number; longitude: number } | null>(null);
@@ -408,6 +432,10 @@ function WorkspaceScreen({
   const gpsWatchIdRef = useRef<number | null>(null);
   const gpsOriginRef = useRef<{ latitude: number; longitude: number } | null>(null);
   const gpsOriginLockedRef = useRef(false);
+  const gpsManualOverrideRef = useRef(false);
+  const latestRealPositionRef = useRef<{ latitude: number; longitude: number } | null>(null);
+  const [hasRealFix, setHasRealFix] = useState(false);
+  const calibratedRequestIdRef = useRef(0);
   const [activeTab, setActiveTab] = useState<"summary" | "accidents" | "evidence" | "tbm">("summary");
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -421,11 +449,13 @@ function WorkspaceScreen({
   const [isVisionLoading, setIsVisionLoading] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const audioSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const speechAbortRef = useRef<AbortController | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  const visionRequestIdRef = useRef(0);
   const [error, setError] = useState("");
   const [workspaceRestored, setWorkspaceRestored] = useState(false);
   const myDocumentsInitializedRef = useRef(false);
@@ -549,6 +579,10 @@ function WorkspaceScreen({
   }, [volume, fontSize, autoSpeak]);
 
   useEffect(() => {
+    autoSpeakRef.current = autoSpeak;
+  }, [autoSpeak]);
+
+  useEffect(() => {
     // 실제 GPS 권한/응답을 기다리지 않고, 기본 좌표로 즉시 한 번 확인해 화면에
     // "자동으로 위치가 잡혀 있는" 상태를 바로 보여준다. 실제 위치 추적이 성공하면
     // 아래 효과가 이어서 이 값을 진짜 위치로 갱신하고, 화면에 어느 쪽인지 표시한다.
@@ -569,12 +603,23 @@ function WorkspaceScreen({
       (position) => {
         setGpsPermissionDenied(false);
         const current = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+        // override 중에도(수동 확인 결과를 화면에 띄워둔 동안에도) 최신 실제 위치는
+        // 계속 기록해 둔다. "실제 위치로 돌아가기"를 누르면 다음 업데이트를 기다릴
+        // 필요 없이 이 값을 바로 보여줄 수 있다.
+        latestRealPositionRef.current = current;
+        setHasRealFix(true);
         if (!gpsOriginLockedRef.current) {
-          gpsOriginLockedRef.current = true;
-          gpsOriginRef.current = current;
-          setGpsOrigin(current);
-          void loadCalibratedEquipment(current);
+          // 실제 위치가 처음 잡히는 순간으로, "이 위치로 다시 보정"과 완전히 같은
+          // 경로(recalibrateTo)로 기준점을 실제 위치로 승격한다. 이후 코드는 이미
+          // 여기서 다 처리됐으므로 더 실행할 게 없다.
+          recalibrateTo(current, { lockOrigin: true, source: "real" });
+          return;
         }
+        // "이 위치로 확인"(수동 1회 확인) 직후에는, 뒤이어 들어오는 실제 위치
+        // 업데이트가 화면에 띄워둔 수동 확인 결과를 조용히 덮어쓰지 않도록 건너뛴다.
+        // "실제 위치로 돌아가기"나 "이 위치로 다시 보정"이 이 override를 해제하므로
+        // 그 이후엔 다시 실시간 반영된다.
+        if (gpsManualOverrideRef.current) return;
         // 기준점(설비 배치)을 옮기는 것과 별개로, 이 결과가 "실제 위치"에서 온
         // 것이라는 표시는 실제 위치 업데이트가 올 때마다 매번 갱신한다.
         setGpsSource("real");
@@ -594,12 +639,13 @@ function WorkspaceScreen({
   }, []);
 
   useEffect(() => () => {
-    const source = audioSourceRef.current;
-    if (source) {
+    speechAbortRef.current?.abort();
+    for (const source of audioSourcesRef.current) {
       source.onended = null;
       try { source.stop(); } catch { /* already stopped */ }
       source.disconnect();
     }
+    audioSourcesRef.current = [];
     void audioContextRef.current?.close();
   }, []);
 
@@ -616,7 +662,24 @@ function WorkspaceScreen({
   const highestRisk = result?.hazards.some((hazard) => hazard.risk_level === "high") ? "high" : result?.hazards.some((hazard) => hazard.risk_level === "medium") ? "medium" : result ? "low" : "pending";
   const accidentTypes = result ? Array.from(new Set(result.hazards.map((hazard) => hazard.accident_type))) : [];
 
+  function requireActiveSession(response: Response) {
+    if (response.status !== 401) return;
+    onLogout();
+    throw new Error("로그인 세션이 만료되었습니다. 다시 로그인해 주세요.");
+  }
+
   const gpsMapCenter = gpsOrigin ? { lat: gpsOrigin.latitude, lon: gpsOrigin.longitude } : null;
+  const gpsLiveOffset =
+    gpsMapCenter && gpsLivePosition
+      ? metersOffsetFromCenter(gpsMapCenter, gpsLivePosition.latitude, gpsLivePosition.longitude)
+      : null;
+  const gpsLiveDistanceM = gpsLiveOffset ? Math.round(Math.hypot(gpsLiveOffset.x, gpsLiveOffset.y)) : 0;
+  // 지도 박스가 실제로 표시하는 반경(대략 GPS_MAP_SIZE_PX/2 ÷ GPS_MAP_SCALE_PX_PER_M, m
+  // 단위)보다 멀면 마커가 박스 밖으로 밀려서 overflow:hidden에 잘려 안 보이게 된다.
+  const gpsLiveIsOffMap =
+    gpsLiveOffset !== null &&
+    (Math.abs(gpsLiveOffset.x) * GPS_MAP_SCALE_PX_PER_M > GPS_MAP_SIZE_PX / 2 - GPS_MAP_MARKER_EDGE_PADDING_PX ||
+      Math.abs(gpsLiveOffset.y) * GPS_MAP_SCALE_PX_PER_M > GPS_MAP_SIZE_PX / 2 - GPS_MAP_MARKER_EDGE_PADDING_PX);
 
   function saveHistory(questionText: string, summary: string, riskLabel: string) {
     const current = readStorage<HistoryItem[]>(STORAGE_KEYS.history, []);
@@ -717,7 +780,22 @@ function WorkspaceScreen({
     event.preventDefault();
     const submittedQuestion = question.trim();
     if (!submittedQuestion || isChatLoading || isVisionLoading) return;
-    const candidatesForAnswer = refersToAttachedPhoto(submittedQuestion) ? catalogCandidates : [];
+    const isPhotoQuestion = refersToAttachedPhoto(submittedQuestion);
+    const candidatesForAnswer = isPhotoQuestion ? catalogCandidates : [];
+
+    if (isPhotoQuestion && sitePhotoName && visualCategories.length === 0) {
+      setQuestion("");
+      setMessages((current) => [
+        ...current,
+        { role: "user", text: submittedQuestion },
+        {
+          role: "ai",
+          text: "현재 사진에서 신뢰할 수 있는 제품 종류를 확인하지 못했습니다. 관련 없는 매뉴얼 검색 결과로 대체하지 않습니다. 대상을 더 가까이 촬영하거나 정면 사진을 다시 첨부해 주세요.",
+          warning: "사진 분류 결과 없음",
+        },
+      ]);
+      return;
+    }
 
     // Create the AudioContext synchronously within this user-gesture handler so
     // browsers don't block autoplay once the answer arrives after the awaits below.
@@ -750,10 +828,13 @@ function WorkspaceScreen({
             energy_source: null,
             task_description: null,
             visual_summary: visionSummary || null,
+            visual_categories: visualCategories,
+            visual_features: visualFeatures,
             selected_document_ids: selectedDocumentIds,
           },
         }),
       });
+      requireActiveSession(response);
       const payload = (await response.json()) as ChatResponse & { detail?: string };
       if (!response.ok || !payload.answer) {
         throw new Error(payload.detail || "안전자료 검색에 실패했습니다.");
@@ -784,7 +865,7 @@ function WorkspaceScreen({
           "검토 필요",
         );
       }
-      if (autoSpeak) {
+      if (autoSpeakRef.current) {
         void playSpeech(payload.answer);
       }
     } catch (requestError) {
@@ -799,6 +880,10 @@ function WorkspaceScreen({
   async function addManuals(files: FileList | null) {
     if (!files) return;
     const token = getAccessToken();
+    if (!token) {
+      onLogout();
+      return;
+    }
     setManualStatus("문서를 등록하고 로컬 이미지 인덱스를 생성하는 중...");
     let uploadedCount = 0;
     const uploadFailures: string[] = [];
@@ -817,6 +902,7 @@ function WorkspaceScreen({
           headers: { Authorization: `Bearer ${token}` },
           body: uploadBody,
         });
+        requireActiveSession(uploadResponse);
         const uploadPayload = await uploadResponse.json().catch(() => null) as { document_id?: string; detail?: string } | null;
         if (!uploadResponse.ok || !uploadPayload?.document_id) throw new Error(uploadPayload?.detail || `${file.name} 문서 등록 실패`);
 
@@ -859,46 +945,124 @@ function WorkspaceScreen({
     }
   }
 
+  async function reindexManual(documentId: string, filename: string) {
+    const token = getAccessToken();
+    if (!token) {
+      onLogout();
+      return;
+    }
+    setManualStatus(`${filename} 비전 인덱스를 다시 생성하는 중...`);
+    const body = new FormData();
+    body.append("document_id", documentId);
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/index`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body,
+      });
+      requireActiveSession(response);
+      const payload = await response.json().catch(() => null) as { document_id?: string; detail?: string } | null;
+      if (!response.ok || payload?.document_id !== documentId) {
+        throw new Error(payload?.detail || `${filename} 비전 인덱스 재생성 실패`);
+      }
+      setCatalogCandidates([]);
+      setVisionSummary("");
+      setManualStatus(`${filename} 비전 인덱스를 최신 형식으로 다시 생성했습니다.`);
+    } catch (requestError) {
+      setManualStatus(requestError instanceof Error ? requestError.message : `${filename} 비전 인덱스 재생성 실패`);
+    }
+  }
+
   async function analyzePhoto(file: File | undefined) {
     if (!file) return;
+    const analysisStartedAt = performance.now();
     setIsVisionLoading(true);
     const token = getAccessToken();
+    if (!token) {
+      setIsVisionLoading(false);
+      onLogout();
+      return;
+    }
     setSitePhotoName(file.name);
     setVisionStatus("로컬 이미지 분석 중...");
+    setVisionElapsedMs(null);
+    setVisionSummary("");
     setCatalogCandidates([]);
-    const body = new FormData();
-    body.append("file", file);
-    body.append("document_ids", JSON.stringify(selectedDocumentIds));
-    try {
+    setVisualCategories([]);
+    setVisualFeatures([]);
+    const requestId = ++visionRequestIdRef.current;
+    type VisionPayload = {
+      items?: Array<{
+        equipment_type?: string | null;
+        component_name?: string | null;
+        description?: string | null;
+        visible_conditions?: string[];
+      }>;
+      raw_visual_description?: string;
+      extracted_markdown?: string;
+      catalog_candidates?: CatalogCandidate[];
+      warnings?: string[];
+      detail?: string;
+    };
+    const requestAnalysis = async () => {
+      const body = new FormData();
+      body.append("file", file);
+      body.append("document_ids", JSON.stringify(selectedDocumentIds));
+      body.append("analysis_mode", "deep");
       const response = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/match`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body,
       });
-      const payload = await response.json().catch(() => null) as {
-        raw_visual_description?: string;
-        extracted_markdown?: string;
-        catalog_candidates?: CatalogCandidate[];
-        warnings?: string[];
-        detail?: string;
-      } | null;
+      requireActiveSession(response);
+      const payload = await response.json().catch(() => null) as VisionPayload | null;
       if (!response.ok) throw new Error(payload?.detail || "이미지 분석 실패");
+      return payload;
+    };
+    const applyPayload = (payload: VisionPayload | null) => {
+      if (visionRequestIdRef.current !== requestId) return;
       const candidates = payload?.catalog_candidates ?? [];
+      const items = payload?.items ?? [];
+      const categories = Array.from(new Set([
+        ...candidates.map((item) => item.visual_category),
+        ...items.flatMap((item) => [item.component_name, item.equipment_type]),
+      ].filter((value): value is string => Boolean(value?.trim()))));
+      const features = Array.from(new Set([
+        ...candidates.flatMap((item) => item.visual_features || []),
+        ...items.flatMap((item) => [item.description, ...(item.visible_conditions || [])]),
+      ].filter((value): value is string => Boolean(value?.trim()))));
+      setVisualCategories(categories);
+      setVisualFeatures(features);
       setCatalogCandidates(candidates);
       setVisionSummary([
+        items.length ? `로컬 VLM 관찰 결과:\n${items.map((item, index) => `${index + 1}. ${item.component_name || item.equipment_type || "종류 확인 불가"}${item.description ? ` · ${item.description}` : ""}`).join("\n")}` : "",
         candidates.length ? `카탈로그 외형 유사 후보(동일 제품 확정 아님):\n${candidates.map((item, index) => `${index + 1}. ${item.visual_category || "종류 확인 불가"}, ${item.filename} ${item.page}페이지, 유사도 ${(item.similarity * 100).toFixed(1)}%, 특징 ${item.visual_features?.join(", ") || "확인 불가"}`).join("\n")}` : "신뢰 임계값을 넘는 카탈로그 후보 없음",
         payload?.extracted_markdown ? `로컬 OCR 확인 내용:\n${payload.extracted_markdown}` : "",
         payload?.raw_visual_description ? `로컬 비전 참고 설명(각인·규격 확정 근거 아님):\n${payload.raw_visual_description}` : "",
       ].filter(Boolean).join("\n\n"));
-      setVisionStatus(payload?.warnings?.length ? `분석 완료 · ${payload.warnings.join(" · ")}` : "로컬 분석 완료");
+      setVisionStatus(payload?.warnings?.length ? `정밀 분석 완료 · ${payload.warnings.join(" · ")}` : "정밀 분석 완료");
+    };
+    try {
+      const payload = await requestAnalysis();
+      applyPayload(payload);
+      if (visionRequestIdRef.current === requestId) {
+        setVisionElapsedMs(performance.now() - analysisStartedAt);
+      }
     } catch (requestError) {
-      setVisionStatus(requestError instanceof Error ? requestError.message : "로컬 비전 서비스 연결 실패");
+      if (visionRequestIdRef.current === requestId) {
+        setVisionStatus(requestError instanceof Error ? requestError.message : "로컬 비전 서비스 연결 실패");
+      }
     } finally {
-      setIsVisionLoading(false);
+      if (visionRequestIdRef.current === requestId) setIsVisionLoading(false);
     }
   }
 
   async function loadCalibratedEquipment(origin: { latitude: number; longitude: number }) {
+    // 마운트 시 기본 좌표 확인과 실제 GPS 최초 확인이 거의 동시에 이 함수를 호출할 수
+    // 있는데, 두 요청의 응답 순서는 보장되지 않는다. 나중에 시작된 요청보다 먼저
+    // 시작된(=원점이 이미 낡은) 요청의 응답이 더 늦게 와서 최신 상태를 덮어쓰는 걸
+    // 막기 위해, 가장 마지막으로 시작된 요청의 결과만 반영한다.
+    const requestId = ++calibratedRequestIdRef.current;
     try {
       const params = new URLSearchParams({
         origin_latitude: String(origin.latitude),
@@ -906,7 +1070,9 @@ function WorkspaceScreen({
       });
       const response = await fetch(`${getApiBaseUrl()}/api/v1/gps/equipment?${params.toString()}`);
       if (!response.ok) return;
-      setCalibratedEquipment((await response.json()) as VirtualEquipment[]);
+      const data = (await response.json()) as VirtualEquipment[];
+      if (requestId !== calibratedRequestIdRef.current) return;
+      setCalibratedEquipment(data);
     } catch {
       // 지도 표시용 목록을 못 불러와도 위치 추적 자체는 계속 진행
     }
@@ -956,85 +1122,193 @@ function WorkspaceScreen({
     return { latitude, longitude };
   }
 
+  // 기준점(설비 배치)을 point로 재설정하는 유일한 경로. 마운트 시 기본값 표시,
+  // 실제 GPS 최초 확인, "이 위치로 다시 보정" 버튼이 모두 이 함수 하나만 거치게
+  // 해서, 원점을 옮기는 로직이 여러 곳에 비슷하게 중복되며 조금씩 어긋나는 걸 막는다.
   // lockOrigin=true(기본값)는 사용자가 명시적으로 기준점을 다시 잡는 경우로,
   // 이후 실제 GPS가 잡혀도 이 기준점을 몰래 덮어쓰지 않도록 잠근다.
   // mount 시 자동 기본값 설정만 lockOrigin=false로 호출해, 실제 GPS가 처음
   // 잡히면 그쪽으로 자동 승격될 수 있게 열어둔다.
+  function recalibrateTo(point: { latitude: number; longitude: number }, options: { lockOrigin: boolean; source: "default" | "real" }) {
+    gpsOriginRef.current = point;
+    if (options.lockOrigin) gpsOriginLockedRef.current = true;
+    // 기준점을 다시 잡는 것이므로, 이 시점부터는 실제 위치 변화가 이 기준점
+    // 대비로 다시 실시간 반영되도록 수동 override를 해제한다.
+    gpsManualOverrideRef.current = false;
+    setGpsOrigin(point);
+    setGpsLivePosition(point);
+    setGpsSource(options.source);
+    // 입력창을 이 기준점으로 동기화해 둔다. 안 그러면 실제 GPS가 잡혀 기준점이
+    // 사용자의 실제 위치로 옮겨간 뒤에도 입력창엔 옛날 기본값이 그대로 남아서,
+    // "조금만 옮겨서 테스트"해도 실제로는 기준점에서 수백~수천m 떨어진 값을
+    // 건드리는 셈이 되어 매번 반경 밖으로 나온다.
+    setManualLatitude(point.latitude.toFixed(6));
+    setManualLongitude(point.longitude.toFixed(6));
+    void loadCalibratedEquipment(point);
+    void checkLocation(point.latitude, point.longitude, point);
+  }
+
   function recalibrateManualLocation(lockOrigin = true) {
     const point = parseManualCoordinates();
     if (!point) return;
-    gpsOriginRef.current = point;
-    if (lockOrigin) gpsOriginLockedRef.current = true;
-    setGpsOrigin(point);
-    setGpsLivePosition(point);
-    setGpsSource("default");
-    void loadCalibratedEquipment(point);
-    void checkLocation(point.latitude, point.longitude, point);
+    recalibrateTo(point, { lockOrigin, source: "default" });
   }
 
   function checkManualLocation() {
     const point = parseManualCoordinates();
     if (!point) return;
-    if (!gpsOriginRef.current) {
-      gpsOriginRef.current = point;
-      gpsOriginLockedRef.current = true;
-      setGpsOrigin(point);
-      void loadCalibratedEquipment(point);
-    }
     // 수동 입력으로 확인한 결과이므로, 직전에 실제 위치로 표시돼 있었더라도
-    // 지금 보여주는 결과의 출처는 "기본 테스트 좌표"로 명확히 되돌린다.
+    // 지금 보여주는 결과의 출처는 "기본 테스트 좌표"로 명확히 되돌린다. 이어서
+    // 들어오는 실제 위치 업데이트가 이 결과를 곧바로 덮어쓰지 않도록 잠근다.
+    // (기준점은 마운트 시 recalibrateTo로 항상 먼저 설정돼 있으므로 건드리지 않는다.)
+    gpsManualOverrideRef.current = true;
     setGpsSource("default");
     setGpsLivePosition(point);
-    void checkLocation(point.latitude, point.longitude, gpsOriginRef.current);
+    void checkLocation(point.latitude, point.longitude, gpsOriginRef.current ?? point);
+  }
+
+  // "이 위치로 확인"으로 실제 위치 반영을 잠가둔 뒤, 기준점(설비 배치)은 그대로 둔 채
+  // 실시간 위치 표시만 재개한다. 기준점까지 옮기고 싶다면 recalibrateManualLocation을 쓴다.
+  function switchToRealPosition() {
+    gpsManualOverrideRef.current = false;
+    const real = latestRealPositionRef.current;
+    if (!real) {
+      setLocationStatus("아직 확인된 실제 위치가 없습니다");
+      return;
+    }
+    setGpsSource("real");
+    setGpsLivePosition(real);
+    // 여기서도 입력창을 실제 위치로 맞춰둬야, 이어서 "조금 옮겨서" 테스트할 때
+    // 기준점 근처의 의미 있는 값에서 시작한다.
+    setManualLatitude(real.latitude.toFixed(6));
+    setManualLongitude(real.longitude.toFixed(6));
+    void checkLocation(real.latitude, real.longitude, gpsOriginRef.current ?? real);
   }
 
   function stopSpeech() {
-    const source = audioSourceRef.current;
-    if (!source) return false;
-    source.onended = null;
-    try { source.stop(); } catch { /* already stopped */ }
-    source.disconnect();
-    audioSourceRef.current = null;
+    const wasActive = audioSourcesRef.current.length > 0 || speechAbortRef.current !== null;
+    speechAbortRef.current?.abort();
+    speechAbortRef.current = null;
+    for (const source of audioSourcesRef.current) {
+      source.onended = null;
+      try { source.stop(); } catch { /* already stopped */ }
+      source.disconnect();
+    }
+    audioSourcesRef.current = [];
     setIsSpeaking(false);
-    return true;
+    return wasActive;
   }
 
   async function playSpeech(text: string) {
     stopSpeech();
     setIsSpeaking(true);
     setError("");
+    const controller = new AbortController();
+    speechAbortRef.current = controller;
+    let scheduledCount = 0;
+    let streamDone = false;
     try {
       // Unlock audio playback while the triggering click/submit is still an active user gesture.
       const audioContext = audioContextRef.current ?? new AudioContext();
       audioContextRef.current = audioContext;
       await audioContext.resume();
 
-      const response = await fetch(`${getApiBaseUrl()}/api/v1/speech/synthesize`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/speech/synthesize/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, speed: 0.92 }),
+        body: JSON.stringify({ text, speed: 1.0 }),
+        signal: controller.signal,
       });
-      if (!response.ok) {
+      if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => null) as { detail?: string } | null;
         throw new Error(payload?.detail || "음성 안내를 생성하지 못했습니다.");
       }
-      const audioBuffer = await audioContext.decodeAudioData(await response.arrayBuffer());
-      const source = audioContext.createBufferSource();
-      const gain = audioContext.createGain();
-      gain.gain.value = volume / 100;
-      source.buffer = audioBuffer;
-      source.connect(gain);
-      gain.connect(audioContext.destination);
-      source.onended = () => {
-        source.disconnect();
-        gain.disconnect();
-        if (audioSourceRef.current === source) audioSourceRef.current = null;
-        setIsSpeaking(false);
+
+      // Chunks arrive as they finish synthesizing (length-prefixed WAV frames), so
+      // playback of the first sentence can start long before the rest is ready
+      // instead of waiting for the entire answer to be generated.
+      let nextStartTime = audioContext.currentTime;
+      let buffer = new Uint8Array(0);
+
+      // Scheduling a chunk the instant it decodes leaves zero cushion: if the next
+      // chunk's synthesis is even slightly slower than this chunk's playback
+      // duration, playback catches up to nextStartTime and an audible gap opens up.
+      // Holding back the first couple of chunks before starting playback gives the
+      // synthesis pipeline a head start so brief slowdowns don't cause audible stalls.
+      const LEAD_CHUNKS = 2;
+      const pendingBuffers: AudioBuffer[] = [];
+      let started = false;
+
+      const playBuffer = (audioBuffer: AudioBuffer) => {
+        if (controller.signal.aborted) return;
+        const source = audioContext.createBufferSource();
+        const gain = audioContext.createGain();
+        gain.gain.value = volume / 100;
+        source.buffer = audioBuffer;
+        source.connect(gain);
+        gain.connect(audioContext.destination);
+        const startAt = Math.max(nextStartTime, audioContext.currentTime);
+        source.onended = () => {
+          source.disconnect();
+          gain.disconnect();
+          audioSourcesRef.current = audioSourcesRef.current.filter((s) => s !== source);
+          if (streamDone && audioSourcesRef.current.length === 0) setIsSpeaking(false);
+        };
+        audioSourcesRef.current.push(source);
+        source.start(startAt);
+        nextStartTime = startAt + audioBuffer.duration;
+        scheduledCount += 1;
       };
-      audioSourceRef.current = source;
-      source.start(0);
+
+      const flushPending = () => {
+        started = true;
+        nextStartTime = audioContext.currentTime;
+        for (const audioBuffer of pendingBuffers.splice(0)) playBuffer(audioBuffer);
+      };
+
+      const scheduleFrame = async (frameBytes: Uint8Array) => {
+        const audioBuffer = await audioContext.decodeAudioData(frameBytes.buffer as ArrayBuffer);
+        if (controller.signal.aborted) return;
+        if (!started) {
+          pendingBuffers.push(audioBuffer);
+          if (pendingBuffers.length >= LEAD_CHUNKS) flushPending();
+          return;
+        }
+        playBuffer(audioBuffer);
+      };
+
+      const drainFrames = async () => {
+        for (;;) {
+          if (buffer.length < 4) return;
+          const frameLength = new DataView(buffer.buffer, buffer.byteOffset, 4).getUint32(0);
+          if (buffer.length < 4 + frameLength) return;
+          const frameBytes = buffer.slice(4, 4 + frameLength);
+          buffer = buffer.slice(4 + frameLength);
+          await scheduleFrame(frameBytes);
+        }
+      };
+
+      const reader = response.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (controller.signal.aborted) return;
+        if (value) {
+          const merged = new Uint8Array(buffer.length + value.length);
+          merged.set(buffer);
+          merged.set(value, buffer.length);
+          buffer = merged;
+          await drainFrames();
+        }
+        if (done) break;
+      }
+      streamDone = true;
+      // Short answers may finish with fewer than LEAD_CHUNKS chunks total, in which
+      // case playback never started while waiting for a lead that will never come.
+      if (!started && pendingBuffers.length > 0) flushPending();
+      if (scheduledCount === 0) setIsSpeaking(false);
     } catch (speechError) {
-      audioSourceRef.current = null;
+      if (controller.signal.aborted) return;
+      audioSourcesRef.current = [];
       setIsSpeaking(false);
       setError(speechError instanceof Error ? speechError.message : "음성 안내 중 오류가 발생했습니다.");
     }
@@ -1155,8 +1429,10 @@ function WorkspaceScreen({
         </summary>
         <section className="panel gps-map-panel" aria-label="가상 GPS 자동 위치 추적">
         <p className="muted-copy">
-          브라우저가 실제 위치를 확인하면 자동으로 그 위치 기준으로 전환되고, 실패하면 기본 테스트 좌표를 사용합니다.
-          아래 위경도 값을 바꿔서 "이동"을 시뮬레이션할 수도 있습니다(수동으로 확인하면 실제 위치 대신 그 값이 기준이 됩니다).
+          브라우저가 실제 위치를 확인하면 자동으로 그 위치를 보여주고, 실패하면 기본 테스트 좌표를 사용합니다.
+          아래 위경도 값을 바꿔 <strong>이 위치로 확인</strong>을 누르면 설비 배치 기준점은 그대로 둔 채 그 좌표에서의 결과만
+          1회성으로 미리볼 수 있고, <strong>실제 위치로 돌아가기</strong>로 다시 실시간 위치 표시로 돌아갈 수 있습니다.
+          <strong>이 위치로 다시 보정</strong>은 설비 배치 자체의 기준점을 그 좌표로 옮깁니다.
           (점선 원은 설비별 근접 판정 반경 {GPS_EQUIPMENT_RADIUS_M}m)
         </p>
         {gpsPermissionDenied && (
@@ -1180,21 +1456,26 @@ function WorkspaceScreen({
                 </div>
               );
             })}
-            {gpsLivePosition && (() => {
-              const offset = metersOffsetFromCenter(gpsMapCenter, gpsLivePosition.latitude, gpsLivePosition.longitude);
+            {gpsLivePosition && gpsLiveOffset && (() => {
+              const rawLeft = GPS_MAP_SIZE_PX / 2 + gpsLiveOffset.x * GPS_MAP_SCALE_PX_PER_M;
+              const rawTop = GPS_MAP_SIZE_PX / 2 + gpsLiveOffset.y * GPS_MAP_SCALE_PX_PER_M;
               return (
                 <span
-                  className="gps-map-marker"
-                  style={{
-                    left: GPS_MAP_SIZE_PX / 2 + offset.x * GPS_MAP_SCALE_PX_PER_M,
-                    top: GPS_MAP_SIZE_PX / 2 + offset.y * GPS_MAP_SCALE_PX_PER_M,
-                  }}
+                  className={gpsLiveIsOffMap ? "gps-map-marker gps-map-marker-clamped" : "gps-map-marker"}
+                  style={{ left: clampToMapBounds(rawLeft), top: clampToMapBounds(rawTop) }}
+                  title={gpsLiveIsOffMap ? `기준점에서 약 ${gpsLiveDistanceM}m 떨어져 있어 방향만 표시됩니다` : undefined}
                 >📍</span>
               );
             })()}
           </div>
         ) : (
           <p className="muted-copy">위치 권한을 허용하면 지도가 표시됩니다.</p>
+        )}
+        {gpsLiveIsOffMap && (
+          <p className="muted-copy">
+            📍 지금 확인 중인 위치는 지도에 보이는 범위(기준점에서 약 {Math.round(GPS_MAP_SIZE_PX / 2 / GPS_MAP_SCALE_PX_PER_M)}m
+            이내) 밖이라, 방향만 가장자리에 표시됩니다. 실제 거리는 약 {gpsLiveDistanceM}m입니다.
+          </p>
         )}
         <div className="gps-manual-input">
           <p className="muted-copy">기본 좌표로 이미 자동 확인되어 있습니다. 다른 위치를 테스트하려면 값을 바꿔서 확인해 보세요.</p>
@@ -1217,6 +1498,9 @@ function WorkspaceScreen({
             </label>
             <button type="button" onClick={checkManualLocation} disabled={isGpsChecking}>
               이 위치로 확인
+            </button>
+            <button type="button" onClick={switchToRealPosition} disabled={isGpsChecking || !hasRealFix}>
+              실제 위치로 돌아가기
             </button>
             <button type="button" onClick={() => recalibrateManualLocation()} disabled={isGpsChecking}>
               이 위치로 다시 보정
@@ -1301,9 +1585,13 @@ function WorkspaceScreen({
           manualStatus={manualStatus}
           sitePhotoName={sitePhotoName}
           visionStatus={visionStatus}
+          visionElapsedLabel={visionElapsedMs !== null && visionStatus.startsWith("정밀 분석 완료")
+            ? formatElapsedTime(visionElapsedMs)
+            : null}
           isVisionLoading={isVisionLoading}
           onAddManuals={(files) => void addManuals(files)}
           onAddPhoto={(file) => void analyzePhoto(file)}
+          onReindexDocument={(documentId, filename) => void reindexManual(documentId, filename)}
           onToggleDocument={(documentId) => {
             setSelectedDocumentIds((current) => current.includes(documentId)
               ? current.filter((id) => id !== documentId)

@@ -82,7 +82,7 @@ class Settings:
     qwen_provider: str = getenv("QWEN_PROVIDER", "local")
     qwen_service_url: str | None = getenv("QWEN_SERVICE_URL", "http://qwen:8020") or None
     qwen_api_key: str = getenv("QWEN_API_KEY", "")
-    qwen_timeout_seconds: float = float(getenv("QWEN_TIMEOUT_SECONDS", "300"))
+    qwen_timeout_seconds: float = float(getenv("QWEN_TIMEOUT_SECONDS", "600"))
     qwen_allow_company_context: bool = _bool_env("QWEN_ALLOW_COMPANY_CONTEXT", False)
     qwen_classifier_enabled: bool = _bool_env(
         "QWEN_CLASSIFIER_ENABLED", False
@@ -106,6 +106,7 @@ class Settings:
     tts_voice: str = getenv("TTS_VOICE", "F1")
     tts_language: str = getenv("TTS_LANGUAGE", "ko")
     tts_steps: int = int(getenv("TTS_STEPS", "8"))
+    tts_num_threads: int = int(getenv("TTS_NUM_THREADS", "4"))
     stt_model: str = getenv("STT_MODEL", "small")
     stt_language: str = getenv("STT_LANGUAGE", "ko")
     stt_device: str = getenv("STT_DEVICE", "cpu")

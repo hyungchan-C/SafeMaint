@@ -37,6 +37,7 @@ class CatalogAnalysisResponse(BaseModel):
 
 class CatalogIndexResponse(BaseModel):
     catalog_id: str
+    index_version: str = "legacy"
     filename: str
     page_count: int
     image_count: int

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import re
 from typing import Any
 
 import httpx
@@ -26,6 +28,12 @@ class QwenGeneratedAnswer:
     structured_answer: StructuredAnswer | None = None
     checklist_items: tuple[ChatChecklistItem, ...] = ()
     used_source_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class QwenAnswerFailure:
+    reason: str
+    detail: str | None = None
 
 
 class QwenClient:
@@ -91,9 +99,12 @@ class QwenClient:
         self,
         request: ChatRequest,
         retrieval_response: ChatResponse,
-    ) -> QwenGeneratedAnswer | None:
+    ) -> QwenGeneratedAnswer | QwenAnswerFailure | None:
         if not self.service_url:
-            return None
+            return QwenAnswerFailure(
+                reason="not_configured",
+                detail="Qwen service URL is not configured.",
+            )
         try:
             async with httpx.AsyncClient(
                 timeout=self.timeout_seconds,
@@ -117,35 +128,97 @@ class QwenClient:
                         ],
                     },
                 )
-                response.raise_for_status()
-                body = response.json()
-        except (httpx.HTTPError, ValueError, TypeError):
-            return None
+        except httpx.TimeoutException as exc:
+            return QwenAnswerFailure(
+                reason="timeout",
+                detail=f"Qwen /v1/answer timed out after {self.timeout_seconds:g}s: {exc}",
+            )
+        except httpx.RequestError as exc:
+            return QwenAnswerFailure(
+                reason="connection_error",
+                detail=str(exc),
+            )
+        except TypeError as exc:
+            return QwenAnswerFailure(
+                reason="request_error",
+                detail=str(exc),
+            )
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            return QwenAnswerFailure(
+                reason=f"http_{exc.response.status_code}",
+                detail=self._compact_error_text(exc.response.text),
+            )
+
+        try:
+            raw_body = response.json()
+        except ValueError as exc:
+            return QwenAnswerFailure(
+                reason="invalid_json",
+                detail=str(exc),
+            )
+        if not isinstance(raw_body, dict):
+            return QwenAnswerFailure(
+                reason="invalid_response",
+                detail=f"Expected JSON object, got {type(raw_body).__name__}.",
+            )
+        body = self._extract_answer_payload(raw_body)
 
         answer = str(body.get("answer") or "").strip()
         if not answer:
-            return None
+            return QwenAnswerFailure(
+                reason="empty_answer",
+                detail="Qwen /v1/answer returned an empty answer.",
+            )
         model = str(body.get("model") or "").strip() or None
         structured_answer = None
         if isinstance(body.get("structured_answer"), dict):
+            structured_payload = self._normalize_evidence_references(
+                body["structured_answer"],
+                retrieval_response.sources,
+            )
             try:
                 structured_answer = _STRUCTURED_ANSWER_ADAPTER.validate_python(
-                    body["structured_answer"]
+                    structured_payload
                 )
             except ValidationError:
                 structured_answer = None
         checklist_items: list[ChatChecklistItem] = []
         if isinstance(body.get("checklist_items"), list):
-            for item in body["checklist_items"]:
+            for index, item in enumerate(body["checklist_items"], start=1):
+                if isinstance(item, dict):
+                    item = {
+                        **item,
+                        "id": None,
+                        "sequence": index,
+                        "is_completed": False,
+                        "completed_by_user_id": None,
+                        "completed_at": None,
+                        "evidence_chunk_ids": self._normalize_source_id_list(
+                            item.get("evidence_chunk_ids"),
+                            retrieval_response.sources,
+                        ),
+                    }
                 try:
                     checklist_items.append(ChatChecklistItem.model_validate(item))
                 except ValidationError:
                     continue
         used_source_ids = tuple(
-            str(value)
-            for value in body.get("used_source_ids", [])
-            if isinstance(value, str) and value.strip()
+            self._normalize_source_id_list(
+                body.get("used_source_ids"),
+                retrieval_response.sources,
+            )
         )
+        if not used_source_ids and structured_answer is not None:
+            used_source_ids = tuple(
+                sorted(
+                    self._collect_evidence_ids(
+                        structured_answer.model_dump(mode="python")
+                    )
+                )
+            )
         return QwenGeneratedAnswer(
             answer=answer,
             model=model,
@@ -154,11 +227,137 @@ class QwenClient:
             used_source_ids=used_source_ids,
         )
 
+    @classmethod
+    def _extract_answer_payload(cls, body: dict[str, Any]) -> dict[str, Any]:
+        nested = body.get("answer")
+        if isinstance(nested, str):
+            nested_payload = cls._extract_json(nested)
+            if nested_payload and (
+                isinstance(nested_payload.get("structured_answer"), dict)
+                or "checklist_items" in nested_payload
+                or "used_source_ids" in nested_payload
+            ):
+                merged = dict(nested_payload)
+                if body.get("model") and not merged.get("model"):
+                    merged["model"] = body["model"]
+                return merged
+            nested_answer = cls._extract_json_string_field(nested, "answer")
+            if nested_answer:
+                merged = dict(body)
+                merged["answer"] = nested_answer
+                return merged
+        return body
+
+    @staticmethod
+    def _extract_json(text: str) -> dict[str, Any] | None:
+        stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\{", stripped):
+            try:
+                value, _ = decoder.raw_decode(stripped[match.start() :])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+        return None
+
+    @staticmethod
+    def _extract_json_string_field(text: str, key: str) -> str | None:
+        stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+        match = re.search(rf'"{re.escape(key)}"\s*:\s*', stripped)
+        if not match:
+            return None
+        try:
+            value, _ = json.JSONDecoder().raw_decode(stripped[match.end() :])
+        except json.JSONDecodeError:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return None
+
+    @classmethod
+    def _normalize_evidence_references(
+        cls,
+        value: Any,
+        sources: list[Any],
+    ) -> Any:
+        if isinstance(value, dict):
+            normalized: dict[str, Any] = {}
+            for key, nested in value.items():
+                if key in {"evidence_chunk_ids", "used_source_ids"}:
+                    normalized[key] = cls._normalize_source_id_list(nested, sources)
+                else:
+                    normalized[key] = cls._normalize_evidence_references(
+                        nested,
+                        sources,
+                    )
+            return normalized
+        if isinstance(value, list):
+            return [cls._normalize_evidence_references(item, sources) for item in value]
+        return value
+
+    @classmethod
+    def _normalize_source_id_list(
+        cls,
+        value: Any,
+        sources: list[Any],
+    ) -> list[str]:
+        values = value if isinstance(value, list) else []
+        normalized: list[str] = []
+        for item in values:
+            chunk_id = cls._normalize_source_id(item, sources)
+            if chunk_id and chunk_id not in normalized:
+                normalized.append(chunk_id)
+        return normalized
+
+    @staticmethod
+    def _normalize_source_id(value: Any, sources: list[Any]) -> str | None:
+        source_ids = [str(source.chunk_id) for source in sources]
+        if isinstance(value, int):
+            index = value
+        elif isinstance(value, str):
+            stripped = value.strip()
+            if stripped in source_ids:
+                return stripped
+            match = re.fullmatch(r"\[?\s*(\d+)\s*\]?", stripped)
+            if not match:
+                return None
+            index = int(match.group(1))
+        else:
+            return None
+        if 1 <= index <= len(source_ids):
+            return source_ids[index - 1]
+        return None
+
+    @classmethod
+    def _collect_evidence_ids(cls, value: Any) -> set[str]:
+        found: set[str] = set()
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if key == "evidence_chunk_ids" and isinstance(nested, list):
+                    found.update(str(item) for item in nested if item)
+                else:
+                    found.update(cls._collect_evidence_ids(nested))
+        elif isinstance(value, list):
+            for nested in value:
+                found.update(cls._collect_evidence_ids(nested))
+        return found
+
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
+
+    @staticmethod
+    def _compact_error_text(text: str, limit: int = 300) -> str | None:
+        compacted = " ".join(text.split())
+        if not compacted:
+            return None
+        if len(compacted) > limit:
+            return compacted[: limit - 3].rstrip() + "..."
+        return compacted
 
     @staticmethod
     def _safe_context(request: ChatRequest) -> dict[str, Any]:
@@ -169,6 +368,8 @@ class QwenClient:
                 "selected_document_ids",
                 "selected_document_version_ids",
                 "visual_summary",
+                "visual_categories",
+                "visual_features",
             },
         )
 

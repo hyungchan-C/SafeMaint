@@ -135,7 +135,11 @@ class CatalogAnalyzer:
         messages = [{
             "role": "user",
             "content": [
-                {"type": "image", "image": str(image_path)},
+                {
+                    "type": "image",
+                    "image": str(image_path),
+                    "max_pixels": self.settings.qwen_max_pixels,
+                },
                 {"type": "text", "text": CATALOG_PROMPT},
             ],
         }]
@@ -161,8 +165,16 @@ class CatalogAnalyzer:
         from qwen_vl_utils import process_vision_info
 
         model, processor = self._load_qwen()
-        content: list[dict[str, str]] = [{"type": "image", "image": str(field_image)}]
-        content.extend({"type": "image", "image": str(path)} for path in candidate_paths)
+        content: list[dict[str, Any]] = [{
+            "type": "image",
+            "image": str(field_image),
+            "max_pixels": self.settings.qwen_max_pixels,
+        }]
+        content.extend({
+            "type": "image",
+            "image": str(path),
+            "max_pixels": self.settings.qwen_max_pixels,
+        } for path in candidate_paths)
         content.append({
             "type": "text",
             "text": (
@@ -180,7 +192,10 @@ class CatalogAnalyzer:
         prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         images, videos = process_vision_info(messages)
         inputs = processor(text=[prompt], images=images, videos=videos, padding=True, return_tensors="pt").to(model.device)
-        generated = model.generate(**inputs, max_new_tokens=128)
+        generated = model.generate(
+            **inputs,
+            max_new_tokens=self.settings.max_new_tokens,
+        )
         trimmed = [output[len(source):] for source, output in zip(inputs.input_ids, generated)]
         parsed = _json_object(processor.batch_decode(trimmed, skip_special_tokens=True)[0])
         matches = parsed.get("matches", []) if isinstance(parsed.get("matches"), list) else []
@@ -214,24 +229,11 @@ class CatalogAnalyzer:
         if accepted:
             return sorted(accepted, key=lambda item: item.similarity, reverse=True)[:3]
 
-        # The VLM can be overly conservative on small catalog thumbnails. Preserve only
-        # strong semantic-search hits as explicitly unverified exploration candidates.
-        fallback: list[CatalogCandidate] = []
-        for candidate in candidates:
-            if candidate.similarity < 0.65:
-                continue
-            category = (
-                f"{fallback_category}와 외형이 유사한 제품"
-                if fallback_category
-                else "현장 사진과 외형이 유사한 제품"
-            )
-            fallback.append(candidate.model_copy(update={
-                "visual_category": category,
-                "visual_features": ["로컬 이미지 임베딩에서 외형 유사도가 높게 계산됨"],
-                "confidence": "낮음",
-                "note": "Qwen3-VL 재검토에서 확정되지 않은 탐색 후보입니다. 동일 제품·모델·규격으로 사용할 수 없습니다.",
-            }))
-        return fallback[:3]
+        # Embedding similarity alone is not sufficient to prove that the object type
+        # matches (for example, bearings and screws can share a circular silhouette).
+        # If the local VLM does not accept a candidate, showing none is safer than
+        # filling the UI with misleading low-confidence cards.
+        return []
 
     def _load_paddle(self) -> Any:
         if self._paddle_pipeline is None:
@@ -258,13 +260,21 @@ class CatalogAnalyzer:
         results = self._load_paddle().predict(str(image_path))
         return "\n\n".join(self._paddle_markdown(result) for result in results)
 
-    def analyze(self, image_path: Path, filename: str, catalog_candidates: list[Any] | None = None) -> CatalogAnalysisResponse:
+    def analyze(
+        self,
+        image_path: Path,
+        filename: str,
+        catalog_candidates: list[Any] | None = None,
+        *,
+        include_ocr: bool = True,
+        include_qwen: bool = True,
+    ) -> CatalogAnalysisResponse:
         warnings: list[str] = []
         models: list[str] = []
         markdown: str | None = None
         visual: str | None = None
 
-        if self.settings.enable_paddle:
+        if self.settings.enable_paddle and include_ocr:
             try:
                 markdown = self._analyze_with_paddle(image_path)
                 models.append(self.settings.paddle_model)
@@ -273,7 +283,7 @@ class CatalogAnalyzer:
                     f"PaddleOCR-VL 분석 실패: {type(exc).__name__}: {str(exc)[:200]}"
                 )
 
-        if self.settings.enable_qwen:
+        if self.settings.enable_qwen and include_qwen:
             try:
                 visual = self._analyze_with_qwen(image_path)
                 models.append(self.settings.qwen_model)

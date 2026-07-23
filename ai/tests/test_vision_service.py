@@ -8,7 +8,7 @@ from vision_service.analyzer import (
 )
 from vision_service.schemas import CatalogItem
 from vision_service.config import Settings
-from vision_service.catalog_matcher import _feature
+from vision_service.catalog_matcher import CatalogImageMatcher, _feature
 from PIL import Image, ImageDraw
 import numpy as np
 
@@ -33,6 +33,21 @@ def test_analyzer_can_run_with_models_disabled() -> None:
     assert response.items == []
     assert response.models == []
     assert response.warnings
+
+
+def test_analyzer_can_skip_document_ocr_for_field_photo(monkeypatch) -> None:
+    analyzer = CatalogAnalyzer(
+        Settings(enable_paddle=True, enable_qwen=False, device="cpu")
+    )
+    monkeypatch.setattr(
+        analyzer,
+        "_analyze_with_paddle",
+        lambda _path: (_ for _ in ()).throw(AssertionError("document OCR called")),
+    )
+
+    response = analyzer.analyze(Path("field.jpg"), "field.jpg", include_ocr=False)
+
+    assert response.filename == "field.jpg"
 
 
 def test_image_only_layout_does_not_count_as_verified_ocr_text() -> None:
@@ -65,3 +80,15 @@ def test_offline_catalog_feature_is_stable_across_white_margins() -> None:
     similarity = float(np.dot(_feature(small), _feature(large)))
 
     assert similarity > 0.98
+
+
+def test_small_part_search_uses_overlapping_detail_views() -> None:
+    image = Image.new("RGB", (1000, 800), "black")
+
+    views = CatalogImageMatcher._query_views(image)
+
+    assert len(views) == 7
+    assert views[0].size == (1000, 800)
+    assert len({view.size for view in views[1:]}) == 1
+    assert views[1].width < image.width
+    assert views[1].height < image.height
