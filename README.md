@@ -725,7 +725,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 ## Colab A100 비전 서버
 
-[`notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb`](notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb)은 A100에 `Qwen/Qwen3-VL-4B-Instruct`와 `google/siglip2-base-patch16-naflex`를 올리고 기존 `ai/vision_service` API를 ngrok으로 제공합니다. 두 모델은 서버 시작 전에 다운로드하고 GPU에 미리 로드합니다. 노트북이 출력한 `VISION_SERVICE_URL`과 `VISION_API_KEY`를 로컬 `.env`에 설정하고 백엔드를 재시작하세요. Colab 저장소는 일시적이므로 런타임이 재시작되면 기존 문서의 **비전 재인덱싱**을 실행해야 합니다.
+[`notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb`](notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb)은 기본적으로 `google/siglip2-base-patch16-naflex`만 사용하는 벡터 전용 실험 서버를 ngrok으로 제공합니다. PDF 페이지 전체, 겹치는 4개 영역과 PDF 내부 이미지를 벡터화하고, 현장 사진과 유사한 PDF 페이지를 반환합니다. Qwen3-VL 코드는 삭제하지 않았으며 `VISION_ENABLE_QWEN=true`로 되돌리면 정밀 검증 경로를 다시 사용할 수 있습니다. 노트북이 출력한 `VISION_SERVICE_URL`과 `VISION_API_KEY`를 로컬 `.env`에 설정하고 백엔드를 재시작하세요. 기본 비전 인덱싱 한도는 대형 장비 카탈로그를 위해 2,000페이지이며 `VISION_PDF_MAX_PAGES`로 조정할 수 있습니다. 인덱스 형식이 페이지 기반 v5로 변경되었으므로 기존 문서는 **비전 재인덱싱**이 필요합니다. Colab 저장소는 일시적이므로 런타임 재시작 후에도 다시 인덱싱해야 합니다.
 
 ## 팀 Qwen3.5-9B LoRA 로컬 실행
 

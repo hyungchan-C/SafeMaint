@@ -179,6 +179,29 @@ def match_catalog(
                 models=[settings.embedding_model],
                 catalog_candidates=candidates[:3],
             )
+        if not settings.enable_qwen:
+            # Vector-only experiment: retrieve visually similar PDF pages and
+            # never promote the nearest vector to a verified product identity.
+            page_candidates = [
+                candidate.model_copy(update={
+                    "visual_category": None,
+                    "visual_features": [],
+                    "note": (
+                        "사진과 시각적으로 유사한 PDF 페이지 후보입니다. "
+                        "VLM 검증을 사용하지 않았으므로 제품명·모델 확정 결과가 아닙니다."
+                    ),
+                })
+                for candidate in candidates[:3]
+            ]
+            return CatalogAnalysisResponse(
+                filename=file.filename or path.name,
+                items=[],
+                warnings=[
+                    "벡터 전용 실험 결과입니다. 후보 페이지 원문을 직접 확인해 주세요."
+                ],
+                models=[settings.embedding_model],
+                catalog_candidates=page_candidates,
+            )
         # Adaptive pipeline: SigLIP always runs first. A strong, clearly separated
         # match avoids loading the VLM. Ambiguous matches use one Qwen pass only.
         confident_match = signals.top_similarity >= settings.adaptive_confidence_threshold and (

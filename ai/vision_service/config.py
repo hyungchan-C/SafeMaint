@@ -16,6 +16,8 @@ class Settings:
     paddle_device: str = getenv("VISION_PADDLE_DEVICE", "cpu")
     load_in_4bit: bool = _as_bool("VISION_LOAD_IN_4BIT", True)
     enable_paddle: bool = _as_bool("VISION_ENABLE_PADDLE", True)
+    # The implementation remains available. The experiment disables it through
+    # .env / Compose / Colab so setting this flag back to true restores it.
     enable_qwen: bool = _as_bool("VISION_ENABLE_QWEN", True)
     preload_models: bool = _as_bool("VISION_PRELOAD_MODELS", False)
     max_new_tokens: int = int(getenv("VISION_MAX_NEW_TOKENS", "96"))
@@ -38,8 +40,8 @@ class Settings:
     image_max_upload_bytes: int = int(getenv("VISION_IMAGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
     pdf_max_upload_bytes: int = int(getenv("VISION_PDF_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
     image_max_pixels: int = int(getenv("VISION_IMAGE_MAX_PIXELS", "40000000"))
-    pdf_max_pages: int = int(getenv("VISION_PDF_MAX_PAGES", "500"))
-    catalog_max_images: int = int(getenv("VISION_CATALOG_MAX_IMAGES", "5000"))
+    pdf_max_pages: int = int(getenv("VISION_PDF_MAX_PAGES", "2000"))
+    catalog_max_images: int = int(getenv("VISION_CATALOG_MAX_IMAGES", "12000"))
 
 
 settings = Settings()

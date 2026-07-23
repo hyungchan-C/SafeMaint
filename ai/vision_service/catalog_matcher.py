@@ -176,8 +176,8 @@ class CatalogImageMatcher:
         root: str,
         threshold: float,
         *,
-        max_pages: int = 500,
-        max_images: int = 5000,
+        max_pages: int = 2000,
+        max_images: int = 12000,
         max_image_pixels: int = 40_000_000,
         embedding_model: str = "google/siglip2-base-patch16-naflex",
         embedding_device: str = "cpu",
@@ -218,9 +218,29 @@ class CatalogImageMatcher:
             for left, top in positions
         )]
 
+    @staticmethod
+    def _page_views(
+        image: Image.Image,
+    ) -> list[tuple[Image.Image, tuple[int, int, int, int] | None]]:
+        """Return a full PDF page and four overlapping page regions."""
+        width, height = image.size
+        if width < 128 or height < 128:
+            return [(image, None)]
+        overlap_x = max(16, int(width * 0.08))
+        overlap_y = max(16, int(height * 0.08))
+        middle_x = width // 2
+        middle_y = height // 2
+        boxes = (
+            (0, 0, min(width, middle_x + overlap_x), min(height, middle_y + overlap_y)),
+            (max(0, middle_x - overlap_x), 0, width, min(height, middle_y + overlap_y)),
+            (0, max(0, middle_y - overlap_y), min(width, middle_x + overlap_x), height),
+            (max(0, middle_x - overlap_x), max(0, middle_y - overlap_y), width, height),
+        )
+        return [(image, None), *((image.crop(box), box) for box in boxes)]
+
     def index_pdf(self, pdf_path: Path, filename: str) -> CatalogIndexResponse:
         data = pdf_path.read_bytes()
-        index_version = f"safemaint-matrix-v4:{self.embedding_model}"
+        index_version = f"safemaint-page-matrix-v5:{self.embedding_model}"
         catalog_id = hashlib.sha256(data + index_version.encode()).hexdigest()[:20]
         target = self.root / catalog_id
         manifest_path = target / "manifest.json"
@@ -240,11 +260,51 @@ class CatalogImageMatcher:
         entries: list[dict[str, object]] = []
         embeddings: list[np.ndarray] = []
         warnings: list[str] = []
+        try:
+            import pypdfium2 as pdfium
+
+            rendered_pdf = pdfium.PdfDocument(str(pdf_path))
+        except (ImportError, OSError, ValueError) as error:
+            raise ValueError(
+                "PDF 페이지 렌더러를 시작하지 못했습니다. pypdfium2 설치 상태를 확인해 주세요."
+            ) from error
         for page_number, page in enumerate(reader.pages, start=1):
             if len(entries) >= self.max_images:
                 warnings.append(f"이미지는 최대 {self.max_images}개까지만 인덱싱했습니다.")
                 break
             page_text = " ".join((page.extract_text() or "").split())[:1600]
+            page_image: Image.Image | None = None
+            page_image_name = f"page-{page_number:04d}.jpg"
+            try:
+                rendered_page = rendered_pdf[page_number - 1]
+                page_image = rendered_page.render(scale=1.5).to_pil().convert("RGB")
+                rendered_page.close()
+                if page_image.width * page_image.height > self.max_image_pixels:
+                    page_image.thumbnail((2400, 2400))
+                page_image.save(target / page_image_name, format="JPEG", quality=88)
+                page_views = self._page_views(page_image)
+                page_vectors = self.embedder.encode_many([view for view, _ in page_views])
+                for view_number, ((_, box), vector) in enumerate(
+                    zip(page_views, page_vectors),
+                    start=1,
+                ):
+                    if len(entries) >= self.max_images:
+                        break
+                    vector_index = len(embeddings)
+                    embeddings.append(vector)
+                    entries.append({
+                        "page": page_number,
+                        "image_index": view_number,
+                        "image": page_image_name,
+                        "vector_index": vector_index,
+                        "entry_kind": "page" if box is None else "page_region",
+                        "bounding_box": list(box) if box is not None else None,
+                        "page_text": page_text,
+                    })
+            except Exception as exc:
+                warnings.append(
+                    f"{page_number}페이지 렌더링 실패: {type(exc).__name__}"
+                )
             try:
                 page_images = list(page.images)
             except Exception as exc:
@@ -259,17 +319,20 @@ class CatalogImageMatcher:
                     image = source_image.convert("RGB")
                     if image.width < 64 or image.height < 64:
                         continue
-                    image_name = f"p{page_number:04d}-i{image_index:03d}.jpg"
-                    image.save(target / image_name, format="JPEG", quality=90)
+                    extracted_name = f"p{page_number:04d}-i{image_index:03d}.jpg"
+                    image.save(target / extracted_name, format="JPEG", quality=90)
                     vector_index = len(embeddings)
                     embeddings.append(self.embedder.encode(image))
                     entries.append({
-                        "page": page_number, "image_index": image_index,
-                        "image": image_name, "vector_index": vector_index,
+                        "page": page_number, "image_index": 1000 + image_index,
+                        "image": page_image_name if page_image is not None else extracted_name,
+                        "vector_index": vector_index,
+                        "entry_kind": "embedded_image",
                         "page_text": page_text,
                     })
                 except Exception:
                     continue
+        rendered_pdf.close()
         summary = {
             "catalog_id": catalog_id, "index_version": index_version, "filename": filename,
             "page_count": len(reader.pages), "image_count": len(entries),
@@ -339,7 +402,16 @@ class CatalogImageMatcher:
                     visual_features=visual_features,
                     page_excerpt=str(entry.get("page_text") or "") or None,
                 ))
-        candidates = sorted(scored, key=lambda item: item.similarity, reverse=True)[:limit]
+        candidates: list[CatalogCandidate] = []
+        seen_pages: set[tuple[str, int]] = set()
+        for candidate in sorted(scored, key=lambda item: item.similarity, reverse=True):
+            page_key = (candidate.catalog_id, candidate.page)
+            if page_key in seen_pages:
+                continue
+            seen_pages.add(page_key)
+            candidates.append(candidate)
+            if len(candidates) >= limit:
+                break
         top_similarity = candidates[0].similarity if candidates else 0.0
         second_similarity = candidates[1].similarity if len(candidates) > 1 else 0.0
         return CatalogMatchSignals(
