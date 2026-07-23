@@ -60,6 +60,18 @@ describe("DocumentReviewPanel", () => {
     expect(screen.getByText("Docling")).toBeInTheDocument();
   });
 
+  it("focuses the confirmation dialog and closes it with Escape", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse([reviewDocument])));
+    renderPanel();
+
+    fireEvent.click(await screen.findByRole("button", { name: "문서 버전 승인" }));
+    expect(screen.getByRole("dialog", { name: "문서 승인 확인" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "취소" })).toHaveFocus();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "문서 승인 확인" })).not.toBeInTheDocument();
+  });
+
   it("keeps processing documents disabled and labels fallback processing", async () => {
     const processingDocument: ReviewQueueDocument = {
       ...reviewDocument,
