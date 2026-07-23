@@ -192,6 +192,13 @@ class CatalogImageMatcher:
         self.embedding_model = embedding_model
         self.embedder = _SemanticEmbedder(embedding_model, embedding_device, model_cache_dir)
 
+    def warmup(self) -> None:
+        """Load the embedding model and its small text-classification cache."""
+        image = Image.new("RGB", (256, 256), "white")
+        vectors = self.embedder.encode_many([image])
+        self.embedder.classify(vectors)
+        self.embedder.has_visible_text(vectors)
+
     @staticmethod
     def _query_views(image: Image.Image) -> list[Image.Image]:
         """Return full image plus overlapping detail views for hand-held small parts."""

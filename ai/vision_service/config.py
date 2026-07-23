@@ -8,6 +8,7 @@ def _as_bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class Settings:
+    api_key: str = getenv("VISION_API_KEY", "")
     qwen_model: str = getenv("VISION_QWEN_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
     paddle_model: str = getenv("VISION_PADDLE_MODEL", "PaddlePaddle/PaddleOCR-VL")
     model_cache_dir: str = getenv("VISION_MODEL_CACHE_DIR", "/models")
@@ -16,6 +17,7 @@ class Settings:
     load_in_4bit: bool = _as_bool("VISION_LOAD_IN_4BIT", True)
     enable_paddle: bool = _as_bool("VISION_ENABLE_PADDLE", True)
     enable_qwen: bool = _as_bool("VISION_ENABLE_QWEN", True)
+    preload_models: bool = _as_bool("VISION_PRELOAD_MODELS", False)
     max_new_tokens: int = int(getenv("VISION_MAX_NEW_TOKENS", "96"))
     qwen_max_pixels: int = int(getenv("VISION_QWEN_MAX_PIXELS", str(512 * 1024)))
     embedding_model: str = getenv(

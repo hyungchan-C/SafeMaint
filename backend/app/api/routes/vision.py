@@ -113,11 +113,13 @@ def _forward_content(
     data: dict[str, str] | None = None,
 ) -> dict[str, object]:
     try:
+        headers = {"Authorization": f"Bearer {settings.vision_api_key}"} if settings.vision_api_key else None
         with Client(timeout=900.0) as client:
             response = client.post(
                 f"{settings.vision_service_url.rstrip('/')}{path}",
                 files={"file": (filename, content, content_type)},
                 data=data,
+                headers=headers,
             )
         if response.is_error:
             raise HTTPException(response.status_code, _detail(response, fallback))
@@ -150,10 +152,12 @@ def catalog_image(
     if not catalog_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "카탈로그 인덱스를 찾을 수 없습니다.")
     try:
+        headers = {"Authorization": f"Bearer {settings.vision_api_key}"} if settings.vision_api_key else None
         with Client(timeout=30.0) as client:
             response = client.get(
                 f"{settings.vision_service_url.rstrip('/')}/v1/catalog/image/"
-                f"{catalog_id}/{page}/{image_index}"
+                f"{catalog_id}/{page}/{image_index}",
+                headers=headers,
             )
         if response.is_error:
             raise HTTPException(response.status_code, _detail(response, "후보 이미지를 찾을 수 없습니다."))

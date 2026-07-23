@@ -92,3 +92,25 @@ def test_small_part_search_uses_overlapping_detail_views() -> None:
     assert len({view.size for view in views[1:]}) == 1
     assert views[1].width < image.width
     assert views[1].height < image.height
+
+
+def test_analyzer_warmup_preloads_qwen_when_enabled(monkeypatch) -> None:
+    analyzer = CatalogAnalyzer(Settings(enable_qwen=True))
+    calls: list[str] = []
+    monkeypatch.setattr(analyzer, "_load_qwen", lambda: calls.append("qwen"))
+
+    analyzer.warmup()
+
+    assert calls == ["qwen"]
+
+
+def test_catalog_matcher_warmup_initializes_image_and_text_paths(tmp_path, monkeypatch) -> None:
+    matcher = CatalogImageMatcher(str(tmp_path), 0.5)
+    calls: list[str] = []
+    monkeypatch.setattr(matcher.embedder, "encode_many", lambda _images: np.ones((1, 4)))
+    monkeypatch.setattr(matcher.embedder, "classify", lambda _vectors: calls.append("classify"))
+    monkeypatch.setattr(matcher.embedder, "has_visible_text", lambda _vectors: calls.append("text"))
+
+    matcher.warmup()
+
+    assert calls == ["classify", "text"]

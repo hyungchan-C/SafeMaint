@@ -1,11 +1,13 @@
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from io import BytesIO
+from contextlib import asynccontextmanager
+import secrets
 
 import json
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image, UnidentifiedImageError
 
 from vision_service.analyzer import CatalogAnalyzer
@@ -15,7 +17,6 @@ from vision_service.catalog_matcher import CatalogImageMatcher
 from vision_service.schemas import CatalogIndexResponse
 
 
-app = FastAPI(title="SafeMaint Offline Vision Service", version="0.1.0")
 analyzer = CatalogAnalyzer(settings)
 matcher = CatalogImageMatcher(
     settings.catalog_index_dir,
@@ -27,7 +28,28 @@ matcher = CatalogImageMatcher(
     embedding_device=settings.embedding_device,
     model_cache_dir=settings.model_cache_dir,
 )
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    if settings.preload_models:
+        matcher.warmup()
+        analyzer.warmup()
+    yield
+
+
+app = FastAPI(title="SafeMaint Offline Vision Service", version="0.1.0", lifespan=lifespan)
 SUPPORTED_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    if settings.api_key and request.url.path != "/health/live":
+        authorization = request.headers.get("Authorization", "")
+        expected = f"Bearer {settings.api_key}"
+        if not secrets.compare_digest(authorization, expected):
+            return JSONResponse(status_code=401, content={"detail": "Invalid vision API token."})
+    return await call_next(request)
 
 
 def _read_limited(file: UploadFile, limit: int) -> bytes:

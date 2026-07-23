@@ -723,6 +723,10 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 별도 운영 작업 필요: 고객사 HTTPS 인증서/reverse proxy, Ed25519 키 수명주기와 오프라인 전달 절차, 실제 백업·PITR 자동화, 스캔 PDF용 검증된 로컬 OCR 엔진, 악성 PDF 안티바이러스/CDR, 로그 보존·모니터링 정책. 이 항목들은 동작하는 것처럼 화면에 표시하지 않습니다.
 
+## Colab A100 비전 서버
+
+[`notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb`](notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb)은 A100에 `Qwen/Qwen3-VL-4B-Instruct`와 `google/siglip2-base-patch16-naflex`를 올리고 기존 `ai/vision_service` API를 ngrok으로 제공합니다. 두 모델은 서버 시작 전에 다운로드하고 GPU에 미리 로드합니다. 노트북이 출력한 `VISION_SERVICE_URL`과 `VISION_API_KEY`를 로컬 `.env`에 설정하고 백엔드를 재시작하세요. Colab 저장소는 일시적이므로 런타임이 재시작되면 기존 문서의 **비전 재인덱싱**을 실행해야 합니다.
+
 ## 팀 Qwen3.5-9B LoRA 로컬 실행
 
 팀 파인튜닝 모델은 일반 채팅 모델이 아니라 작업 설명을 14개 산업재해 발생형태로
