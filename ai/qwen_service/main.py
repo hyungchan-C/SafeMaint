@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -16,6 +18,7 @@ from qwen_service.schemas import (
 app = FastAPI(title="SafeMaint Qwen Service", version="0.1.0")
 security = HTTPBearer(auto_error=False)
 engine = QwenEngine(settings)
+logger = logging.getLogger(__name__)
 
 
 def require_api_key(
@@ -57,4 +60,8 @@ async def answer(
     payload: AnswerRequest,
     _: None = Depends(require_api_key),
 ) -> AnswerResponse:
-    return await engine.answer(payload)
+    try:
+        return await engine.answer(payload)
+    except Exception:
+        logger.exception("Qwen answer generation failed; returning safe fallback.")
+        return engine._fallback_answer(payload, "")
