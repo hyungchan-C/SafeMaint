@@ -591,9 +591,32 @@ pending → processing → review_required → active
 
 worker가 고객사 서버 안에서 Docling을 우선 사용해 구조와 표를 추출하고 BGE-M3 1024차원 임베딩을 생성합니다. Docling 패키지나 필수 오프라인 모델이 없으면 worker는 배포 오류를 기록하고 시작하지 않습니다. Docling이 정상 설치됐지만 특정 PDF 변환만 실패하거나 결과가 비어 있을 때는 `DOCLING_ALLOW_PYMUPDF_FALLBACK=true`인 경우에만 PyMuPDF로 폴백합니다. 텍스트가 없는 스캔 PDF는 내용을 꾸며내지 않고 `ocr_required`로 표시합니다. 처리된 문서는 `review_required`에서 대기하며 `document.approve` 권한 사용자가 승인 API를 호출해야 `active/current_version`이 됩니다. 승인은 row lock과 단일 트랜잭션으로 실행되고 이전 활성 버전을 `superseded`로 바꾸며 감사 이벤트를 남깁니다. 검색은 승인된 현재 버전만 대상으로 합니다.
 
+업로드 화면은 브라우저가 전송한 실제 바이트 비율을 0~10%로 표시하고, 서버가 작업을 만든 뒤에는 worker가 DB에 기록한 처리 상태를 15~100%로 조회합니다. 추출 중에는 실제 페이지 수, 청킹 완료 후에는 실제 청크 수, 임베딩 중에는 완료된 배치와 청크 수를 함께 표시합니다. 처리량을 알 수 없는 구간은 임의로 퍼센트를 증가시키지 않고 현재 단계의 활동 표시만 갱신합니다.
+
+```text
+업로드 0~10% → 대기·검사 15~20% → 추출 20~50%
+→ 청킹 50~65% → 임베딩 65~90% → 저장·검증 90~98%
+→ 승인 대기 100% → 승인 완료·RAG 검색 가능 100%
+```
+
+인증된 사용자는 `GET /api/v1/documents/{document_id}/processing-progress`에서 최신 버전의 처리 단계, 퍼센트, 안전한 사용자 메시지, 페이지·청크·임베딩 카운터와 RAG 준비 여부를 확인할 수 있습니다. 프런트는 처리 중인 문서만 2초 간격으로 조회하고, 터미널 상태에 도달하거나 연속 네트워크 오류가 발생하면 자동 조회를 중지합니다. 화면의 새로고침 버튼으로 언제든 DB 상태를 다시 불러올 수 있습니다.
+
 #### Docling 처리 정책과 확인
 
-기본 PDF 제한은 200MiB, Docling 페이지 제한은 500쪽입니다. worker는 처리 중 heartbeat를 갱신하므로 큰 PDF가 기본 stale 시간 안에 끝나지 않더라도 다른 worker가 같은 작업을 중복 회수하지 않습니다. 실제 추출 결과는 `document_versions.processing_metadata`와 `DOCUMENT_PROCESSING_COMPLETED` 감사 이벤트에 저장됩니다.
+기본 PDF 제한은 200MiB, Docling 페이지 제한은 500쪽입니다. `DOCUMENT_MAX_UPLOAD_BYTES`, `DOCLING_MAX_FILE_BYTES`, `DOCLING_MAX_PAGES`에 양수를 설정하면 기존 제한과 413/처리 실패 동작이 유지되고, 명시적으로 `0`을 설정하면 해당 애플리케이션 제한만 해제됩니다. worker는 처리 중 heartbeat를 갱신하므로 큰 PDF가 기본 stale 시간 안에 끝나지 않더라도 다른 worker가 같은 작업을 중복 회수하지 않습니다. 실제 추출 결과는 `document_versions.processing_metadata`와 `DOCUMENT_PROCESSING_COMPLETED` 감사 이벤트에 저장됩니다.
+
+무제한 처리가 필요한 개발·데모 환경에서는 다음처럼 설정할 수 있습니다. 안전한 신규 설치를 위해 `.env.example`의 기본값은 유한값으로 유지합니다.
+
+```dotenv
+DOCUMENT_MAX_UPLOAD_BYTES=0
+DOCLING_MAX_FILE_BYTES=0
+DOCLING_MAX_PAGES=0
+VISION_PDF_MAX_UPLOAD_BYTES=0
+VISION_PDF_MAX_PAGES=0
+VISION_CATALOG_MAX_IMAGES=0
+```
+
+`0`은 서버의 물리적 한계를 없애지 않습니다. 실제 최대치는 디스크, RAM, GPU 메모리, Docker 자원, Colab/ngrok 요청 제한과 처리 시간에 의해 결정됩니다. 이미지 업로드 크기와 이미지 픽셀 제한은 PDF 무제한 설정과 별개로 계속 적용됩니다.
 
 ```json
 {
@@ -611,7 +634,7 @@ worker가 고객사 서버 안에서 Docling을 우선 사용해 구조와 표�
 - `DOCLING_OFFLINE=true`인데 artifacts 경로 누락·비어 있음: worker 시작 실패
 - 개별 PDF의 Docling 변환 오류: 설정이 허용하면 PyMuPDF 폴백
 - Docling 결과가 빈 섹션: 설정이 허용하면 PyMuPDF 폴백
-- 파일 크기·페이지 제한 초과: 명확한 제한 오류로 처리하고 폴백하지 않음
+- 양수로 설정된 파일 크기·페이지 제한 초과: 명확한 제한 오류로 처리하고 폴백하지 않음
 
 개발 환경에서는 `DOCLING_ARTIFACTS_PATH`를 비워 두면 Docling의 기본 모델 준비 동작을 사용합니다. 인터넷이 차단된 고객사에 배포할 모델은 인터넷이 되는 준비 PC에서 Docker named volume에 내려받습니다.
 
@@ -729,7 +752,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 ## Colab A100 비전 서버
 
-[`notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb`](notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb)은 기본적으로 `google/siglip2-base-patch16-naflex`만 사용하는 벡터 전용 실험 서버를 ngrok으로 제공합니다. PDF 페이지 전체, 겹치는 4개 영역과 PDF 내부 이미지를 벡터화하고, 현장 사진과 유사한 PDF 페이지를 반환합니다. Qwen3-VL 코드는 삭제하지 않았으며 `VISION_ENABLE_QWEN=true`로 되돌리면 정밀 검증 경로를 다시 사용할 수 있습니다. 노트북이 출력한 `VISION_SERVICE_URL`과 `VISION_API_KEY`를 로컬 `.env`에 설정하고 백엔드를 재시작하세요. 기본 비전 인덱싱 한도는 대형 장비 카탈로그를 위해 2,000페이지이며 `VISION_PDF_MAX_PAGES`로 조정할 수 있습니다. 인덱스 형식이 페이지 기반 v5로 변경되었으므로 기존 문서는 **비전 재인덱싱**이 필요합니다. Colab 저장소는 일시적이므로 런타임 재시작 후에도 다시 인덱싱해야 합니다.
+[`notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb`](notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb)은 기본적으로 `google/siglip2-base-patch16-naflex`만 사용하는 벡터 전용 실험 서버를 ngrok으로 제공합니다. PDF 페이지 전체, 겹치는 4개 영역과 PDF 내부 이미지를 벡터화하고, 현장 사진과 유사한 PDF 페이지를 반환합니다. Qwen3-VL 코드는 삭제하지 않았으며 `VISION_ENABLE_QWEN=true`로 되돌리면 정밀 검증 경로를 다시 사용할 수 있습니다. 노트북이 출력한 `VISION_SERVICE_URL`과 `VISION_API_KEY`를 로컬 `.env`에 설정하고 백엔드를 재시작하세요. 기본 비전 인덱싱 한도는 대형 장비 카탈로그를 위해 2,000페이지이며 `VISION_PDF_MAX_PAGES`로 조정할 수 있습니다. PDF 크기·페이지·인덱스 개수 환경변수에 `0`을 설정하면 각 제한을 해제할 수 있지만 Colab/ngrok의 물리적·전송 제한은 계속 적용됩니다. 인덱스 형식이 페이지 기반 v5로 변경되었으므로 기존 문서는 **비전 재인덱싱**이 필요합니다. Colab 저장소는 일시적이므로 런타임 재시작 후에도 다시 인덱싱해야 합니다.
 
 ## 팀 Qwen3.5-9B LoRA 로컬 실행
 
@@ -858,6 +881,7 @@ Qwen3가 OpenAI 호환 API로 준비되면 애플리케이션 코드를 수정�
 DOCUMENT_WORKER_MAX_ATTEMPTS=3
 DOCUMENT_WORKER_RETRY_DELAY_SECONDS=10
 DOCUMENT_WORKER_STALE_AFTER_SECONDS=1800
+DOCUMENT_WORKER_EMBEDDING_BATCH_SIZE=16
 RAG_CANDIDATE_K=30
 RAG_DOCUMENT_TOP_K=6
 RAG_DOCUMENT_NEIGHBOR_WINDOW=1

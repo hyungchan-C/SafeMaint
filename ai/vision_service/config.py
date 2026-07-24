@@ -6,6 +6,14 @@ def _as_bool(name: str, default: bool) -> bool:
     return getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _limit_env(name: str, default: int) -> int | None:
+    """Parse a size/count limit where zero explicitly means unlimited."""
+    value = int(getenv(name, str(default)))
+    if value < 0:
+        raise ValueError(f"{name} must be zero or greater")
+    return None if value == 0 else value
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     api_key: str = getenv("VISION_API_KEY", "")
@@ -38,10 +46,14 @@ class Settings:
         getenv("VISION_FALLBACK_CANDIDATE_THRESHOLD", "0.78")
     )
     image_max_upload_bytes: int = int(getenv("VISION_IMAGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
-    pdf_max_upload_bytes: int = int(getenv("VISION_PDF_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+    pdf_max_upload_bytes: int | None = _limit_env(
+        "VISION_PDF_MAX_UPLOAD_BYTES", 25 * 1024 * 1024
+    )
     image_max_pixels: int = int(getenv("VISION_IMAGE_MAX_PIXELS", "40000000"))
-    pdf_max_pages: int = int(getenv("VISION_PDF_MAX_PAGES", "2000"))
-    catalog_max_images: int = int(getenv("VISION_CATALOG_MAX_IMAGES", "12000"))
+    pdf_max_pages: int | None = _limit_env("VISION_PDF_MAX_PAGES", 2000)
+    catalog_max_images: int | None = _limit_env(
+        "VISION_CATALOG_MAX_IMAGES", 12000
+    )
 
 
 settings = Settings()

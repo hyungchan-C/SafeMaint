@@ -104,7 +104,7 @@ def test_schema_extension_and_alembic_head() -> None:
         )
 
     assert extension_version
-    assert alembic_revision == "0009_processing_metadata"
+    assert alembic_revision == "0010_processing_progress"
     assert "ck_assessment_hazards_likelihood_range" in constraints
     assert "ck_assessment_hazards_severity_range" in constraints
     assert "ck_assessments_status" in constraints
@@ -501,6 +501,28 @@ def test_upload_requires_permission_and_creates_processing_job() -> None:
     assert upload_body["version_number"] == 1
     assert upload_body["status"] == "pending"
 
+    anonymous_progress = asyncio.run(
+        _request(
+            "GET",
+            f"/api/v1/documents/{upload_body['document_id']}/processing-progress",
+        )
+    )
+    assert anonymous_progress.status_code == 401
+
+    queued_progress = asyncio.run(
+        _request(
+            "GET",
+            f"/api/v1/documents/{upload_body['document_id']}/processing-progress",
+            headers=headers,
+        )
+    )
+    assert queued_progress.status_code == 200
+    assert queued_progress.json()["status"] == "pending"
+    assert queued_progress.json()["stage"] == "queued"
+    assert queued_progress.json()["progress_percent"] == 15
+    assert queued_progress.json()["is_terminal"] is False
+    assert queued_progress.json()["rag_ready"] is False
+
     with SessionLocal() as session:
         document = session.get(Document, UUID(upload_body["document_id"]))
         version = session.get(
@@ -779,7 +801,13 @@ def test_document_approval_activates_and_supersedes_versions() -> None:
             "/api/v1/documents/upload",
             headers=manager_headers,
             data=upload_data,
-            files=upload_file,
+            files={
+                "file": (
+                    "approval-manual.pdf",
+                    b"%PDF-1.4\nversion two\n%%EOF\n",
+                    "application/pdf",
+                )
+            },
         )
     )
     assert second_upload.status_code == 201
@@ -793,7 +821,13 @@ def test_document_approval_activates_and_supersedes_versions() -> None:
             "/api/v1/documents/upload",
             headers=manager_headers,
             data=upload_data,
-            files=upload_file,
+            files={
+                "file": (
+                    "approval-manual.pdf",
+                    b"%PDF-1.4\nversion three\n%%EOF\n",
+                    "application/pdf",
+                )
+            },
         )
     )
     assert third_upload.status_code == 201
@@ -857,6 +891,14 @@ def test_document_approval_activates_and_supersedes_versions() -> None:
         assert third_version.is_active is True
         assert third_version.approved_by_user_id is not None
         assert third_version.approved_at is not None
+        third_job = session.scalar(
+            select(DocumentProcessingJob).where(
+                DocumentProcessingJob.document_version_id == third_version_id
+            )
+        )
+        assert third_job is not None
+        assert third_job.processing_stage == "completed"
+        assert third_job.progress_percent == 100
         assert session.scalar(
             select(func.count(AuditEvent.id)).where(
                 AuditEvent.entity_id == document_id,

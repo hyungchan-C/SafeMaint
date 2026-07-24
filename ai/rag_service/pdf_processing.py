@@ -7,7 +7,11 @@ from typing import Any, Literal
 
 import fitz
 
-from preprocessing.pdf_pipeline import DoclingRuntimeSettings, process_pdf
+from preprocessing.pdf_pipeline import (
+    DoclingRuntimeSettings,
+    ProcessingProgressCallback,
+    process_pdf,
+)
 
 
 PdfKind = Literal["text", "scanned", "empty"]
@@ -49,6 +53,7 @@ def process_document_pdf(
     overlap: int = 150,
     docling_settings: DoclingRuntimeSettings | None = None,
     log_context: dict[str, Any] | None = None,
+    progress_callback: ProcessingProgressCallback | None = None,
 ) -> ProcessedPdf:
     """Normalize the shared PDF pipeline output for database storage.
 
@@ -61,6 +66,16 @@ def process_document_pdf(
         raise FileNotFoundError(f"Stored PDF does not exist: {path}")
 
     page_count, has_raster_images = _inspect_pdf(path)
+    if progress_callback is not None:
+        progress_callback(
+            "inspecting",
+            20,
+            f"PDF 검사를 완료했습니다. 총 {page_count}페이지",
+            {
+                "processed_pages": 0,
+                "total_pages": page_count,
+            },
+        )
     if page_count == 0:
         return ProcessedPdf(
             kind="empty",
@@ -75,6 +90,16 @@ def process_document_pdf(
             },
         )
 
+    if progress_callback is not None:
+        progress_callback(
+            "extracting",
+            20,
+            "PDF 내용을 추출하고 있습니다.",
+            {
+                "processed_pages": 0,
+                "total_pages": page_count,
+            },
+        )
     pipeline_result = process_pdf(
         str(path),
         product_type=product_type,
@@ -84,6 +109,8 @@ def process_document_pdf(
         overlap=overlap,
         docling_settings=docling_settings,
         log_context=log_context,
+        total_pages=page_count,
+        progress_callback=progress_callback,
     )
     processing_metadata = dict(pipeline_result.get("processing_metadata") or {})
     normalized: list[ProcessedChunk] = []

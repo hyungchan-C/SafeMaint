@@ -73,6 +73,10 @@ def test_completion_status_update_never_resurrects_deleted_document(
         def execute(self, statement: str, _params=None) -> None:
             executed_sql.append(" ".join(statement.split()))
 
+        @staticmethod
+        def fetchone():
+            return {"stored_count": 1, "ready_count": 1}
+
     class FakeConnection:
         def __enter__(self):
             return self

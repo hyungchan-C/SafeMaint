@@ -58,6 +58,9 @@ class Settings:
     worker_chunk_overlap: int = int(
         getenv("DOCUMENT_WORKER_CHUNK_OVERLAP", "150")
     )
+    worker_embedding_batch_size: int = int(
+        getenv("DOCUMENT_WORKER_EMBEDDING_BATCH_SIZE", "16")
+    )
     worker_max_attempts: int = int(
         getenv("DOCUMENT_WORKER_MAX_ATTEMPTS", "3")
     )

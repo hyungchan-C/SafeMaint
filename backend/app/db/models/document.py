@@ -309,6 +309,16 @@ class DocumentProcessingJob(UuidPrimaryKeyMixin, TimestampMixin, Base):
             "status IN ('queued', 'processing', 'completed', 'failed')",
             name="status",
         ),
+        CheckConstraint(
+            "processing_stage IN ('queued', 'inspecting', 'extracting', "
+            "'chunking', 'embedding', 'persisting', 'validating', "
+            "'review_required', 'completed', 'failed', 'ocr_required')",
+            name="processing_stage",
+        ),
+        CheckConstraint(
+            "progress_percent >= 0 AND progress_percent <= 100",
+            name="progress_percent_range",
+        ),
         CheckConstraint("attempts >= 0", name="attempts_nonnegative"),
     )
 
@@ -320,6 +330,26 @@ class DocumentProcessingJob(UuidPrimaryKeyMixin, TimestampMixin, Base):
     )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, server_default=text("'queued'"), index=True
+    )
+    processing_stage: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default=text("'queued'"), index=True
+    )
+    progress_percent: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("15")
+    )
+    progress_message: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+        server_default=text("'PDF 처리 대기 중'"),
+    )
+    progress_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    progress_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
     )
     attempts: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")

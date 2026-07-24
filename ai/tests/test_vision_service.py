@@ -11,6 +11,7 @@ from vision_service.config import Settings
 from vision_service.catalog_matcher import CatalogImageMatcher, _feature
 from PIL import Image, ImageDraw
 import numpy as np
+import pytest
 from pypdf import PdfWriter
 
 
@@ -133,6 +134,95 @@ def test_pdf_index_renders_three_pages_for_vector_search(tmp_path, monkeypatch) 
     assert summary.image_count == 15
     assert summary.index_version.startswith("safemaint-page-matrix-v5:")
     assert matcher.resolve_image(summary.catalog_id, 2, 1).name == "page-0002.jpg"
+
+
+def test_unlimited_pdf_index_does_not_truncate_entries(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    pdf_path = tmp_path / "unlimited-pages.pdf"
+    writer = PdfWriter()
+    for _ in range(3):
+        writer.add_blank_page(width=600, height=800)
+    with pdf_path.open("wb") as output:
+        writer.write(output)
+
+    matcher = CatalogImageMatcher(
+        str(tmp_path / "unlimited-index"),
+        0.5,
+        max_pages=None,
+        max_images=None,
+    )
+    monkeypatch.setattr(
+        matcher.embedder,
+        "encode_many",
+        lambda images: np.ones((len(images), 4), dtype=np.float32) / 2,
+    )
+    monkeypatch.setattr(
+        matcher.embedder,
+        "encode",
+        lambda _image: np.ones(4, dtype=np.float32) / 2,
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("PDF hashing must not use read_bytes")
+        ),
+    )
+
+    summary = matcher.index_pdf(pdf_path, pdf_path.name)
+
+    assert summary.page_count == 3
+    assert summary.image_count == 15
+
+
+def test_positive_catalog_image_limit_is_preserved(tmp_path, monkeypatch) -> None:
+    pdf_path = tmp_path / "limited-images.pdf"
+    writer = PdfWriter()
+    for _ in range(3):
+        writer.add_blank_page(width=600, height=800)
+    with pdf_path.open("wb") as output:
+        writer.write(output)
+
+    matcher = CatalogImageMatcher(
+        str(tmp_path / "limited-index"),
+        0.5,
+        max_images=6,
+    )
+    monkeypatch.setattr(
+        matcher.embedder,
+        "encode_many",
+        lambda images: np.ones((len(images), 4), dtype=np.float32) / 2,
+    )
+    monkeypatch.setattr(
+        matcher.embedder,
+        "encode",
+        lambda _image: np.ones(4, dtype=np.float32) / 2,
+    )
+
+    summary = matcher.index_pdf(pdf_path, pdf_path.name)
+
+    assert summary.image_count == 6
+    assert any("최대 6개" in warning for warning in summary.warnings)
+
+
+def test_positive_pdf_page_limit_is_preserved(tmp_path) -> None:
+    pdf_path = tmp_path / "limited-pages.pdf"
+    writer = PdfWriter()
+    for _ in range(3):
+        writer.add_blank_page(width=600, height=800)
+    with pdf_path.open("wb") as output:
+        writer.write(output)
+
+    matcher = CatalogImageMatcher(
+        str(tmp_path / "page-limit-index"),
+        0.5,
+        max_pages=2,
+    )
+
+    with pytest.raises(ValueError, match="2개"):
+        matcher.index_pdf(pdf_path, pdf_path.name)
 
 
 def test_analyzer_warmup_preloads_qwen_when_enabled(monkeypatch) -> None:

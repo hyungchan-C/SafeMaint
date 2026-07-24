@@ -50,6 +50,23 @@ def test_stream_rejects_one_byte_over_limit_and_cleans_temp(tmp_path: Path) -> N
     assert _parts(tmp_path) == []
 
 
+def test_stream_accepts_unlimited_file_and_keeps_hash_and_size(
+    tmp_path: Path,
+) -> None:
+    content = b"%PDF-" + (b"x" * 1024)
+
+    staged = stage_pdf_upload(
+        BytesIO(content),
+        tmp_path,
+        max_bytes=None,
+        chunk_bytes=7,
+    )
+
+    assert staged.file_size == len(content)
+    assert staged.sha256 == hashlib.sha256(content).hexdigest()
+    assert staged.move_to(tmp_path / "unlimited.pdf").read_bytes() == content
+
+
 def test_stream_rejects_empty_file_and_cleans_temp(tmp_path: Path) -> None:
     with pytest.raises(EmptyPdfUploadError):
         stage_pdf_upload(BytesIO(b""), tmp_path, max_bytes=16)
@@ -110,3 +127,8 @@ def test_move_failure_preserves_owned_temp_until_cleanup(
 
     staged.cleanup()
     assert _parts(tmp_path) == []
+
+
+def test_zero_direct_limit_is_rejected_in_favor_of_none(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        stage_pdf_upload(BytesIO(b"%PDF-valid"), tmp_path, max_bytes=0)

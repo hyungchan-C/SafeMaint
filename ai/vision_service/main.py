@@ -40,6 +40,8 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="SafeMaint Offline Vision Service", version="0.1.0", lifespan=lifespan)
 SUPPORTED_TYPES = {"image/jpeg", "image/png", "image/webp"}
+PDF_MAGIC = b"%PDF-"
+PDF_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 
 
 @app.middleware("http")
@@ -62,6 +64,54 @@ def _read_limited(file: UploadFile, limit: int) -> bytes:
             detail=f"파일 크기는 {limit} 바이트를 넘을 수 없습니다.",
         )
     return content
+
+
+def _stage_pdf_upload(file: UploadFile, limit: int | None) -> Path:
+    """Stream an uploaded PDF to a temporary file without buffering it in RAM."""
+    path: Path | None = None
+    file_size = 0
+    header = bytearray()
+    try:
+        with NamedTemporaryFile(suffix=".pdf", delete=False) as temporary:
+            path = Path(temporary.name)
+            while True:
+                chunk = file.file.read(PDF_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if len(header) < len(PDF_MAGIC):
+                    remaining = len(PDF_MAGIC) - len(header)
+                    header.extend(chunk[:remaining])
+                    if len(header) == len(PDF_MAGIC) and bytes(header) != PDF_MAGIC:
+                        raise HTTPException(
+                            status_code=422,
+                            detail="PDF 파일 헤더가 올바르지 않습니다.",
+                        )
+                file_size += len(chunk)
+                if limit is not None and file_size > limit:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                        detail=f"파일 크기는 {limit} 바이트를 넘을 수 없습니다.",
+                    )
+                temporary.write(chunk)
+        if file_size == 0:
+            raise HTTPException(status_code=422, detail="빈 파일은 처리할 수 없습니다.")
+        if bytes(header) != PDF_MAGIC:
+            raise HTTPException(
+                status_code=422,
+                detail="PDF 파일 헤더가 올바르지 않습니다.",
+            )
+        return path
+    except HTTPException:
+        if path is not None:
+            path.unlink(missing_ok=True)
+        raise
+    except OSError as error:
+        if path is not None:
+            path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PDF 임시 파일을 저장하지 못했습니다.",
+        ) from error
 
 
 def _validate_image(content: bytes) -> None:
@@ -112,12 +162,7 @@ def analyze_catalog(file: UploadFile = File(...)) -> CatalogAnalysisResponse:
 def index_catalog(file: UploadFile = File(...)) -> CatalogIndexResponse:
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=415, detail="PDF 카탈로그만 등록할 수 있습니다.")
-    content = _read_limited(file, settings.pdf_max_upload_bytes)
-    if not content.startswith(b"%PDF-"):
-        raise HTTPException(status_code=422, detail="PDF 파일 헤더가 올바르지 않습니다.")
-    with NamedTemporaryFile(suffix=".pdf", delete=False) as temporary:
-        temporary.write(content)
-        path = Path(temporary.name)
+    path = _stage_pdf_upload(file, settings.pdf_max_upload_bytes)
     try:
         try:
             return matcher.index_pdf(path, file.filename or "catalog.pdf")
