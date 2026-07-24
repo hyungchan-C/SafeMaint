@@ -4,17 +4,22 @@ function SourceCard({
   source,
   number,
   onOpenDocument,
+  idPrefix,
 }: {
   source: ChatSource;
   number: number;
   onOpenDocument: (source: ChatSource) => void;
+  idPrefix: string;
 }) {
   const pageLabel = source.page_start
     ? `${source.page_start}${source.page_end && source.page_end !== source.page_start ? `–${source.page_end}` : ""}페이지`
     : source.page ? `${source.page}페이지` : "페이지 정보 없음";
 
   return (
-    <article className="chat-source-card" id={`chat-source-${number}`}>
+    <article
+      className="chat-source-card"
+      id={`${idPrefix ? `${idPrefix}-` : ""}chat-source-${number}`}
+    >
       <div className="chat-source-heading">
         <span className="source-number">근거 {number}</span>
         <span>{source.source_type} · 유사도 {(source.similarity * 100).toFixed(1)}%</span>
@@ -34,9 +39,11 @@ function SourceCard({
 export default function ChatSources({
   sources,
   onOpenDocument,
+  idPrefix = "",
 }: {
   sources: ChatSource[];
   onOpenDocument: (source: ChatSource) => void;
+  idPrefix?: string;
 }) {
   if (!sources.length) return null;
   const visible = sources.slice(0, 2);
@@ -45,11 +52,11 @@ export default function ChatSources({
   return (
     <section className="chat-source-list" aria-label={`검색 근거 ${sources.length}건`}>
       <div className="chat-source-list-heading"><strong>검색 근거</strong><span>{sources.length}건</span></div>
-      {visible.map((source, index) => <SourceCard key={source.chunk_id} source={source} number={index + 1} onOpenDocument={onOpenDocument} />)}
+      {visible.map((source, index) => <SourceCard key={source.chunk_id} source={source} number={index + 1} onOpenDocument={onOpenDocument} idPrefix={idPrefix} />)}
       {hidden.length > 0 && (
         <details className="additional-sources">
           <summary>나머지 근거 {hidden.length}건 보기</summary>
-          <div>{hidden.map((source, index) => <SourceCard key={source.chunk_id} source={source} number={index + 3} onOpenDocument={onOpenDocument} />)}</div>
+          <div>{hidden.map((source, index) => <SourceCard key={source.chunk_id} source={source} number={index + 3} onOpenDocument={onOpenDocument} idPrefix={idPrefix} />)}</div>
         </details>
       )}
     </section>

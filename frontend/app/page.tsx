@@ -3,7 +3,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import DocumentReviewPanel from "@/components/DocumentReviewPanel";
-import ChatSources from "@/components/ChatSources";
 import ChatAnswerContent from "@/components/ChatAnswerContent";
 import DocumentViewerModal, { type DocumentViewerTarget } from "@/components/DocumentViewerModal";
 import InterfaceIcon from "@/components/InterfaceIcon";
@@ -2178,9 +2177,11 @@ function WorkspaceScreen({
                     structuredAnswer={message.structuredAnswer}
                     checklistItems={message.checklistItems ?? []}
                     sources={message.sources ?? []}
+                    warning={message.warning}
                     savedAssessmentId={message.savedAssessmentId ?? null}
                     isSavingChecklist={savingChecklistIndex === index}
                     onSaveChecklist={(checkedIndices) => void saveChatChecklist(index, message, checkedIndices)}
+                    onOpenDocument={openDocumentViewer}
                   />
                 : <p className="chat-answer-text">{message.text}</p>}
               {message.catalogCandidates && message.catalogCandidates.length > 0 && (
@@ -2203,8 +2204,6 @@ function WorkspaceScreen({
                   <p className="catalog-candidate-caution">벡터 유사도 후보이며 제품명·동일 모델·규격을 확정한 결과가 아닙니다. PDF 원문을 직접 확인해 주세요.</p>
                 </div>
               )}
-              {message.sources && <ChatSources sources={message.sources} onOpenDocument={openDocumentViewer} />}
-              {message.warning && <p className="chat-warning">⚠ {message.warning}</p>}
             </div>
           ))}
           {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>안전자료를 검색하고 AI 답변을 생성하고 있습니다…</div>}
