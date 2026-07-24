@@ -29,7 +29,16 @@ const source: ChatSource = {
 };
 
 function renderAnswer(answer: StructuredAnswer) {
-  return render(<StructuredChatAnswer answer={answer} checklistItems={[]} sources={[source]} />);
+  return render(
+    <StructuredChatAnswer
+      answer={answer}
+      checklistItems={[]}
+      sources={[source]}
+      savedAssessmentId={null}
+      isSavingChecklist={false}
+      onSaveChecklist={() => {}}
+    />,
+  );
 }
 
 describe("StructuredChatAnswer", () => {
@@ -106,6 +115,9 @@ describe("StructuredChatAnswer", () => {
           evidence_chunk_ids: ["chunk-1"],
         }]}
         sources={[source]}
+        savedAssessmentId={null}
+        isSavingChecklist={false}
+        onSaveChecklist={() => {}}
       />,
     );
 
@@ -126,6 +138,9 @@ describe("StructuredChatAnswer", () => {
         }}
         checklistItems={[]}
         sources={[]}
+        savedAssessmentId={null}
+        isSavingChecklist={false}
+        onSaveChecklist={() => {}}
       />,
     );
     expect(screen.getByText("검증 근거 부족")).toBeInTheDocument();
@@ -139,6 +154,9 @@ describe("StructuredChatAnswer", () => {
         }}
         checklistItems={[]}
         sources={[]}
+        savedAssessmentId={null}
+        isSavingChecklist={false}
+        onSaveChecklist={() => {}}
       />,
     );
     expect(screen.getByText("질문 목적 확인")).toBeInTheDocument();

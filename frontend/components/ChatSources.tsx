@@ -1,6 +1,14 @@
 import type { ChatSource } from "@/types/chat";
 
-function SourceCard({ source, number }: { source: ChatSource; number: number }) {
+function SourceCard({
+  source,
+  number,
+  onOpenDocument,
+}: {
+  source: ChatSource;
+  number: number;
+  onOpenDocument: (source: ChatSource) => void;
+}) {
   const pageLabel = source.page_start
     ? `${source.page_start}${source.page_end && source.page_end !== source.page_start ? `–${source.page_end}` : ""}페이지`
     : source.page ? `${source.page}페이지` : "페이지 정보 없음";
@@ -15,6 +23,7 @@ function SourceCard({ source, number }: { source: ChatSource; number: number }) 
       <small className="chat-source-location">{[pageLabel, source.section ? `섹션: ${source.section}` : null, source.document_version ? `버전 ${source.document_version}` : null].filter(Boolean).join(" · ")}</small>
       <p>{source.excerpt}</p>
       <div className="source-card-footer">
+        <button type="button" className="chat-source-open" onClick={() => onOpenDocument(source)}>문서 원문 보기</button>
         {source.url && <a href={source.url} target="_blank" rel="noreferrer">원문 확인</a>}
         <details className="source-technical"><summary>식별 정보</summary><small>문서 ID {source.document_id}{source.document_version_id ? ` · 버전 ID ${source.document_version_id}` : ""}</small></details>
       </div>
@@ -22,7 +31,13 @@ function SourceCard({ source, number }: { source: ChatSource; number: number }) 
   );
 }
 
-export default function ChatSources({ sources }: { sources: ChatSource[] }) {
+export default function ChatSources({
+  sources,
+  onOpenDocument,
+}: {
+  sources: ChatSource[];
+  onOpenDocument: (source: ChatSource) => void;
+}) {
   if (!sources.length) return null;
   const visible = sources.slice(0, 2);
   const hidden = sources.slice(2);
@@ -30,11 +45,11 @@ export default function ChatSources({ sources }: { sources: ChatSource[] }) {
   return (
     <section className="chat-source-list" aria-label={`검색 근거 ${sources.length}건`}>
       <div className="chat-source-list-heading"><strong>검색 근거</strong><span>{sources.length}건</span></div>
-      {visible.map((source, index) => <SourceCard key={source.chunk_id} source={source} number={index + 1} />)}
+      {visible.map((source, index) => <SourceCard key={source.chunk_id} source={source} number={index + 1} onOpenDocument={onOpenDocument} />)}
       {hidden.length > 0 && (
         <details className="additional-sources">
           <summary>나머지 근거 {hidden.length}건 보기</summary>
-          <div>{hidden.map((source, index) => <SourceCard key={source.chunk_id} source={source} number={index + 3} />)}</div>
+          <div>{hidden.map((source, index) => <SourceCard key={source.chunk_id} source={source} number={index + 3} onOpenDocument={onOpenDocument} />)}</div>
         </details>
       )}
     </section>

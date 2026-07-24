@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.db.models import Document, DocumentVersion, User
 from app.db.session import get_db
 from app.schemas.chat import RetrievalAccessScope
+from app.services.document_access import require_accessible_document
 
 
 router = APIRouter(prefix="/vision", tags=["vision"])
@@ -37,38 +38,6 @@ def _detail(response: object, fallback: str) -> str:
         return str(payload.get("detail") or fallback)
     except (AttributeError, TypeError, ValueError):
         return fallback
-
-
-def _can_access_document(
-    document: Document,
-    current_user: User,
-    access_scope: RetrievalAccessScope,
-) -> bool:
-    if document.lifecycle_status == "deleted":
-        return False
-    if document.created_by_user_id == current_user.id:
-        return True
-    if document.access_level == "public":
-        return True
-    if document.access_level == "private" or not access_scope.allow_company:
-        return False
-    return access_scope.all_sites or (
-        document.site_id is not None
-        and str(document.site_id) in access_scope.site_ids
-    )
-
-
-def _require_accessible_document(
-    db: Session,
-    document_id: UUID,
-    current_user: User,
-    access_scope: RetrievalAccessScope,
-) -> Document:
-    document = db.get(Document, document_id)
-    if document is None or not _can_access_document(document, current_user, access_scope):
-        # Do not reveal whether an inaccessible document exists.
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "문서를 찾을 수 없습니다.")
-    return document
 
 
 def _catalog_id_for_match(document: Document) -> str:
@@ -145,7 +114,7 @@ def catalog_image(
 ) -> Response:
     if page < 1 or image_index < 1:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "후보 이미지를 찾을 수 없습니다.")
-    document = _require_accessible_document(db, document_id, current_user, access_scope)
+    document = require_accessible_document(db, document_id, current_user, access_scope)
     catalog_id = str((document.metadata_json or {}).get(CATALOG_METADATA_KEY) or "")
     if not catalog_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "카탈로그 인덱스를 찾을 수 없습니다.")
@@ -175,7 +144,7 @@ def index_catalog(
     db: Annotated[Session, Depends(get_db)],
     document_id: Annotated[UUID, Form()],
 ) -> dict[str, object]:
-    document = _require_accessible_document(db, document_id, current_user, access_scope)
+    document = require_accessible_document(db, document_id, current_user, access_scope)
     if document.created_by_user_id != current_user.id and not access_scope.all_sites:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "문서를 찾을 수 없습니다.")
     version = db.scalar(
@@ -246,7 +215,7 @@ def match_catalog(
     selected_ids = _parse_document_ids(document_ids)
     catalog_to_document: dict[str, str] = {}
     for document_id in selected_ids:
-        document = _require_accessible_document(db, document_id, current_user, access_scope)
+        document = require_accessible_document(db, document_id, current_user, access_scope)
         catalog_id = _catalog_id_for_match(document)
         catalog_to_document[catalog_id] = str(document.id)
 

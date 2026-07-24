@@ -698,6 +698,8 @@ a {
 .chat-checklist-items label span { line-height: 1.5; overflow-wrap: anywhere; }
 .chat-checklist-items label strong { color: #a2462f; font-size: 10px; }
 .structured-note { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.chat-checklist-save { background: var(--teal); border: 0; border-radius: 8px; color: #fff; cursor: pointer; font-weight: 700; margin: 8px 0; padding: 8px 14px; }
+.chat-checklist-save:disabled { background: #a9c4bd; cursor: not-allowed; }
 .catalog-candidate-list { border-top: 1px solid #bfd9ca; display: grid; gap: 9px; margin-top: 8px; padding-top: 10px; }
 .catalog-candidate-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
 .catalog-candidate-card { background: #fff; border: 1px solid #bfd4c8; border-radius: 10px; overflow: hidden; }
@@ -740,6 +742,11 @@ a {
 .history-card > div { display: flex; gap: 12px; justify-content: space-between; }
 .history-card span { color: var(--muted); font-size: 12px; }
 .history-card p { color: #536773; }
+.assessment-card-meta { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; }
+.assessment-card .chat-checklist-items { margin-top: 12px; }
+.assessment-groups { display: grid; gap: 22px; }
+.assessment-groups-toolbar { display: flex; justify-content: flex-end; }
+.assessment-group h3 { color: var(--navy); font-size: 14px; margin: 0 0 10px; }
 
 /* 현장형 UI 확장 */
 .quick-toolbar { align-items: center; background: white; border: 1px solid var(--line); border-radius: 14px; display: flex; flex-wrap: wrap; gap: 10px; margin: 18px auto; max-width: 1500px; padding: 12px 14px; }
@@ -849,6 +856,8 @@ a {
 .icon-action .interface-icon { height: 18px; width: 18px; }
 .search-progress { background: #f8fafb; border: 1px solid var(--line); border-radius: 14px; margin-bottom: 18px; padding: 16px; }
 .status-pill.active { animation: status-pulse 1.2s ease-in-out infinite; }
+.status-pill.complete { background: var(--success-soft); border-color: #77bd9d; color: var(--success); }
+.status-pill.incomplete { background: var(--yellow-soft); border-color: #dfb932; color: #6b5300; }
 @keyframes status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 .progress-steps { display: grid; gap: 9px; grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .progress-steps div { align-items: center; background: #fff; border: 1px solid #dce5e9; border-radius: 10px; display: flex; flex-direction: column; gap: 7px; min-height: 78px; padding: 11px 6px; text-align: center; }
@@ -1183,9 +1192,12 @@ a {
 .document-select-button { background: #fff; border: 1px solid #b9cad2; border-radius: 8px; color: var(--navy); cursor: pointer; font-size: 11px; font-weight: 800; min-height: 38px; }
 .document-select-button:hover { border-color: var(--teal); color: var(--teal); }
 .document-select-button.selected { background: var(--teal); border-color: var(--teal); color: #fff; }
-.document-selection-actions { display: grid; gap: 7px; grid-template-columns: minmax(0, 1fr) auto; }
+.document-selection-actions { display: grid; gap: 7px; grid-template-columns: minmax(0, 1fr) auto auto; }
 .document-reindex-button { background: var(--orange-soft); border: 1px solid #e8bd80; border-radius: 8px; color: var(--orange-dark); cursor: pointer; font-size: 10px; font-weight: 800; min-height: 38px; padding: 7px 9px; }
 .document-reindex-button:hover { background: var(--orange); color: var(--ink); }
+.document-delete-button { background: var(--danger-soft); border: 1px solid #f0b8b4; border-radius: 8px; color: var(--danger); cursor: pointer; font-size: 10px; font-weight: 800; min-height: 38px; padding: 7px 9px; }
+.document-delete-button:hover { background: var(--danger); color: #fff; }
+.document-confirm-dialog .confirm-delete { background: var(--danger); border-color: var(--danger); color: #fff; }
 .legacy-document-chip { align-items: center; background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 9px; display: flex; font-size: 11px; gap: 7px; padding: 8px 9px; }
 .legacy-document-chip .interface-icon { height: 16px; width: 16px; }
 .legacy-document-chip button { background: transparent; border: 0; color: var(--danger); cursor: pointer; margin-left: auto; }
@@ -1229,9 +1241,18 @@ a {
 .chat-source-card > strong { color: var(--navy); font-size: 12px; }
 .chat-source-card p { color: #435d69; line-height: 1.6; }
 .source-card-footer { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; }
+.chat-source-open { background: none; border: 1px solid var(--teal); border-radius: 999px; color: var(--teal); cursor: pointer; font-size: 12px; font-weight: 700; padding: 4px 10px; }
+.chat-source-open:hover { background: var(--teal-soft); }
 .source-technical { color: var(--muted); font-size: 9px; }
 .source-technical summary { cursor: pointer; }
 .source-technical small { display: block; margin-top: 4px; overflow-wrap: anywhere; }
+
+.document-viewer-backdrop { align-items: center; background: rgba(9, 28, 40, .55); display: flex; inset: 0; justify-content: center; padding: 18px; position: fixed; z-index: 1200; }
+.document-viewer-dialog { background: #fff; border-radius: 14px; box-shadow: 0 18px 60px rgba(0, 0, 0, .24); display: flex; flex-direction: column; gap: 12px; height: min(90vh, 900px); max-width: 900px; padding: 16px; width: 100%; }
+.document-viewer-header { align-items: center; display: flex; justify-content: space-between; }
+.document-viewer-header strong { color: var(--navy); overflow-wrap: anywhere; }
+.document-viewer-header button { background: none; border: 1px solid #c4d2d8; border-radius: 8px; cursor: pointer; font-weight: 700; padding: 6px 12px; }
+.document-viewer-frame { border: 1px solid var(--line); border-radius: 10px; flex: 1; width: 100%; }
 .additional-sources { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
 .additional-sources > summary { background: var(--surface-subtle); color: var(--navy); cursor: pointer; font-size: 11px; font-weight: 800; list-style-position: inside; padding: 10px 11px; }
 .additional-sources > div { display: grid; gap: 8px; padding: 9px; }

@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import InterfaceIcon from "@/components/InterfaceIcon";
 import type { UserDocumentSummary } from "@/types/documents";
 import { DOCUMENT_STATUS_LABELS } from "@/types/documents";
@@ -16,6 +18,7 @@ type Props = {
   onAddManuals: (files: FileList | null) => void;
   onAddPhoto: (file: File | undefined) => void;
   onReindexDocument?: (documentId: string, filename: string) => void;
+  onDeleteDocument?: (documentId: string, filename: string) => void;
   onToggleDocument: (documentId: string) => void;
   onRemoveLegacyManual: (index: number) => void;
 };
@@ -40,9 +43,12 @@ export default function ManualManager({
   onAddManuals,
   onAddPhoto,
   onReindexDocument,
+  onDeleteDocument,
   onToggleDocument,
   onRemoveLegacyManual,
 }: Props) {
+  const [confirmingDelete, setConfirmingDelete] = useState<{ documentId: string; filename: string } | null>(null);
+
   return (
     <section className="panel manual-manager" aria-labelledby="manual-manager-title">
       <div className="panel-heading workflow-panel-heading">
@@ -94,6 +100,15 @@ export default function ManualManager({
                         비전 재인덱싱
                       </button>
                     )}
+                    {onDeleteDocument && (
+                      <button
+                        type="button"
+                        className="document-delete-button"
+                        onClick={() => setConfirmingDelete({ documentId: document.document_id, filename: document.original_filename })}
+                      >
+                        삭제
+                      </button>
+                    )}
                   </div>
                 </article>
               );
@@ -105,6 +120,31 @@ export default function ManualManager({
           <div className="resource-empty"><InterfaceIcon name="document" /><strong>선택된 문서가 없습니다.</strong><span>매뉴얼 없이도 공용 안전자료로 질문할 수 있습니다.</span></div>
         )}
       </div>
+
+      {confirmingDelete && (
+        <div className="document-confirm-backdrop" role="presentation">
+          <div className="document-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="document-delete-title" aria-describedby="document-delete-description">
+            <h3 id="document-delete-title">문서 삭제 확인</h3>
+            <p id="document-delete-description">
+              <strong>{confirmingDelete.filename}</strong>을(를) 삭제하시겠습니까?
+              삭제하면 검색·승인 대상에서 제외되며, 되돌리려면 관리자에게 문의해야 합니다.
+            </p>
+            <div>
+              <button type="button" onClick={() => setConfirmingDelete(null)}>취소</button>
+              <button
+                className="confirm-delete"
+                type="button"
+                onClick={() => {
+                  onDeleteDocument?.(confirmingDelete.documentId, confirmingDelete.filename);
+                  setConfirmingDelete(null);
+                }}
+              >
+                삭제하기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

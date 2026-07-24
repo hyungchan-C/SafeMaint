@@ -143,3 +143,4 @@ def require_permission(permission_code: str) -> Callable[..., User]:
 require_document_upload = require_permission("document.upload")
 require_document_read = require_permission("document.read")
 require_document_approve = require_permission("document.approve")
+require_document_delete = require_permission("document.delete")

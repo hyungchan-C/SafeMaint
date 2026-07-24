@@ -83,6 +83,23 @@ class ChecklistItemUpdateResponse(ChecklistItemResponse):
     assessment_id: UUID
 
 
+class ChatChecklistSaveRequest(BaseModel):
+    """채팅이나 GPS 근접 안내에서 이미 만들어진 체크리스트를 그대로 저장할 때 쓰는 요청.
+
+    site_name/equipment_name/task_type를 안 보내면(채팅처럼 정식 입력 폼이 없는
+    경우) 고정 기본값으로 채우고, description(질문 원문 등)과 checklist_items
+    (화면에 보이는 항목 그대로)만 필수로 받는다. GPS 근접 안내처럼 실제 사업장·설비
+    정보가 있는 경우에는 이 필드들을 그대로 넘겨서 정확한 값으로 저장할 수 있다.
+    규칙 엔진으로 새로 계산하지 않고 받은 값 그대로 저장한다.
+    """
+
+    site_name: str | None = Field(default=None, max_length=100)
+    equipment_name: str | None = Field(default=None, max_length=100)
+    task_type: str | None = Field(default=None, max_length=100)
+    description: str = Field(min_length=5, max_length=2000)
+    checklist_items: list[str] = Field(min_length=1, max_length=50)
+
+
 class AssessmentResponse(BaseModel):
     assessment_id: str
     status: AssessmentStatus
@@ -93,3 +110,19 @@ class AssessmentResponse(BaseModel):
     evidence: list[EvidenceItem]
     evidence_status: Literal["not_connected", "connected"]
     disclaimer: str
+
+
+class AssessmentSummaryResponse(BaseModel):
+    """목록 화면용 요약. 체크리스트 상세 항목 대신 진행 건수만 담아 가볍게 유지한다."""
+
+    assessment_id: str
+    status: AssessmentStatus
+    created_at: datetime
+    created_by_user_id: UUID | None
+    created_by_name: str | None
+    site_name: str
+    equipment_name: str
+    task_type: str
+    description: str
+    checklist_total: int
+    checklist_completed: int

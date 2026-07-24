@@ -137,6 +137,11 @@ class SupertonicSpeechService:
             )
         return self._encode_wav(samples)
 
+    async def warmup(self) -> None:
+        """서버 시작 시 미리 한 번 호출해 TTS 모델을 메모리에 올려 둔다. 그렇지 않으면
+        재시작 이후 첫 사용자가 모델 로딩 지연(수 초~수십 초)을 그대로 겪게 된다."""
+        await asyncio.to_thread(self._get_tts)
+
     async def synthesize(self, text: str, speed: float) -> bytes:
         return await asyncio.to_thread(self._synthesize_sync, text, speed)
 

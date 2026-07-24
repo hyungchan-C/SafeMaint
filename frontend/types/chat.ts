@@ -165,4 +165,5 @@ export interface ChatMessage {
   warning?: string | null;
   accidentClassification?: AccidentClassification | null;
   catalogCandidates?: CatalogCandidate[];
+  savedAssessmentId?: string | null;
 }

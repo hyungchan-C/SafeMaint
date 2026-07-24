@@ -17,6 +17,7 @@ type Props = {
   onVoiceInput: () => void;
   onSpeakGuidance: () => void;
   onHistory: () => void;
+  onAssessments: () => void;
   onVolumeChange: (value: number) => void;
   onFontSizeChange: (value: FontSize) => void;
   onAutoSpeakChange: (value: boolean) => void;
@@ -38,6 +39,7 @@ export default function WorkspaceHeader({
   onVoiceInput,
   onSpeakGuidance,
   onHistory,
+  onAssessments,
   onVolumeChange,
   onFontSizeChange,
   onAutoSpeakChange,
@@ -68,6 +70,9 @@ export default function WorkspaceHeader({
         </button>
         <button type="button" className="header-action" onClick={onHistory}>
           <InterfaceIcon name="history" /><span>기록</span>
+        </button>
+        <button type="button" className="header-action" onClick={onAssessments}>
+          <InterfaceIcon name="document" /><span>체크리스트</span>
         </button>
         <details className="settings-control">
           <summary className="header-action" aria-label="환경 설정"><InterfaceIcon name="settings" /><span>설정</span></summary>

@@ -6,12 +6,13 @@ from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 
 from app.api.deps import require_document_upload
-from app.api.routes.documents import upload_document
+from app.api.routes.documents import delete_document, upload_document
 from app.core.config import settings
 from app.db.models import (
+    AuditEvent,
     Document,
     DocumentProcessingJob,
     DocumentType,
@@ -193,6 +194,7 @@ def test_successful_upload_persists_streamed_size_hash_and_job(tmp_path: Path) -
     document = _existing_document()
     db = _UploadSession(
         [
+            None,  # 중복 파일 검사(sha256 일치하는 기존 버전 없음)
             DocumentType(
                 code="equipment_manual",
                 name="Equipment manual",
@@ -227,10 +229,45 @@ def test_successful_upload_persists_streamed_size_hash_and_job(tmp_path: Path) -
     assert list(tmp_path.glob(".pdf-upload-*.part")) == []
 
 
+def test_upload_rejects_exact_duplicate_content(tmp_path: Path) -> None:
+    content = b"%PDF-1.4\nduplicate\n%%EOF"
+    document = _existing_document()
+    existing_version = DocumentVersion(
+        id=uuid4(),
+        document_id=document.id,
+        document=document,
+        version_number=1,
+        original_filename="manual.pdf",
+        stored_filename="already-stored.pdf",
+        storage_path=str(tmp_path / "already-stored.pdf"),
+        sha256=hashlib.sha256(content).hexdigest(),
+        file_size=len(content),
+        mime_type="application/pdf",
+        status="active",
+    )
+    db = _UploadSession([existing_version])
+
+    with pytest.raises(HTTPException) as exc_info:
+        upload_document(
+            current_user=_current_user(),
+            db=db,  # type: ignore[arg-type]
+            # 파일명이 달라도(재업로드 시 흔한 실수) 내용(sha256)이 같으면 막아야 한다.
+            file=UploadFile(filename="manual-renamed.pdf", file=BytesIO(content)),
+            product_type="sensor",
+            model_name="BTS",
+        )
+
+    assert exc_info.value.status_code == 409
+    # 중복으로 걸렸으므로 새 버전/처리작업이 추가로 만들어지면 안 된다.
+    assert not any(isinstance(item, DocumentVersion) for item in db.added)
+    assert not any(isinstance(item, DocumentProcessingJob) for item in db.added)
+
+
 def test_commit_failure_removes_temp_and_final_file(tmp_path: Path) -> None:
     document = _existing_document()
     db = _UploadSession(
         [
+            None,  # 중복 파일 검사(sha256 일치하는 기존 버전 없음)
             DocumentType(
                 code="equipment_manual",
                 name="Equipment manual",
@@ -261,3 +298,71 @@ def test_commit_failure_removes_temp_and_final_file(tmp_path: Path) -> None:
 
     assert db.rollback_calls == 1
     assert list(tmp_path.iterdir()) == []
+
+
+class _DeleteSession:
+    def __init__(self, document: Document | None) -> None:
+        self.document = document
+        self.added: list[object] = []
+        self.committed = False
+
+    def get(self, model, object_id):
+        if (
+            model is Document
+            and self.document is not None
+            and object_id == self.document.id
+        ):
+            return self.document
+        return None
+
+    def add(self, item: object) -> None:
+        self.added.append(item)
+
+    def commit(self) -> None:
+        self.committed = True
+
+
+def test_delete_document_soft_deletes() -> None:
+    document = _existing_document()
+    db = _DeleteSession(document)
+
+    delete_document(
+        document_id=document.id,
+        current_user=_current_user(),
+        db=db,  # type: ignore[arg-type]
+    )
+
+    assert document.lifecycle_status == "deleted"
+    assert document.deleted_at is not None
+    assert db.committed
+    audit_events = [item for item in db.added if isinstance(item, AuditEvent)]
+    assert len(audit_events) == 1
+    assert audit_events[0].event_type == "document.deleted"
+
+
+def test_delete_missing_document_returns_404() -> None:
+    db = _DeleteSession(None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        delete_document(
+            document_id=uuid4(),
+            current_user=_current_user(),
+            db=db,  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+def test_delete_already_deleted_document_returns_404() -> None:
+    document = _existing_document()
+    document.lifecycle_status = "deleted"
+    db = _DeleteSession(document)
+
+    with pytest.raises(HTTPException) as exc_info:
+        delete_document(
+            document_id=document.id,
+            current_user=_current_user(),
+            db=db,  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 404

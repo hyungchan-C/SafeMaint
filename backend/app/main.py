@@ -1,3 +1,7 @@
+from contextlib import asynccontextmanager
+import logging
+from uuid import uuid4
+
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -5,13 +9,29 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import api_router
 from app.api.routes.health import router as health_router
 from app.core.config import settings
-from uuid import uuid4
+from app.services.speech import speech_service
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # TTS 모델은 첫 요청이 들어올 때 지연 로드되도록 돼 있어서, 미리 예열해 두지
+    # 않으면 재시작 후 첫 사용자가 모델 로딩 지연을 그대로 겪는다. 예열이 실패해도
+    # (예: 모델 다운로드 불가) 서버 전체를 막지 않고, 이후 요청에서 다시 지연 로드를
+    # 시도하도록 조용히 넘어간다.
+    try:
+        await speech_service.warmup()
+    except Exception:
+        logger.exception("TTS 모델 예열에 실패했습니다. 첫 요청에서 다시 시도합니다.")
+    yield
 
 
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
     description="SafeMaint AI 초기 위험성평가 및 안전관리 API",
+    lifespan=lifespan,
 )
 
 # 개발 서버는 localhost뿐 아니라 같은 사설망의 브라우저에서도 접속한다.
