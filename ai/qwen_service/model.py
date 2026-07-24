@@ -23,10 +23,10 @@ from qwen_service.schemas import (
 
 
 MANUAL_SOURCE_TYPES = frozenset(
-    {"manual", "equipment_manual", "component_manual", "work_standard"}
+    {"equipment_manual", "component_manual"}
 )
 PUBLIC_REFERENCE_SOURCE_TYPES = frozenset(
-    {"public_guide", "public_incident", "regulation", "incident"}
+    {"public_law", "public_guide", "public_incident", "public_media"}
 )
 
 
@@ -173,7 +173,7 @@ class QwenEngine:
                 None,
                 "structured_answer is required when evidence sources are supplied.",
             )
-        return self._enrich_answer_response(response, request), None
+        return response, None
 
     def _normalize_answer_payload(
         self,
@@ -194,12 +194,12 @@ class QwenEngine:
             normalized["structured_answer"] = structured
 
         if request.answer_type == "maintenance_guide":
-            normalized["checklist_items"] = []
-        else:
             normalized["checklist_items"] = self._normalize_checklist_items(
                 normalized.get("checklist_items"),
                 request.sources,
             )
+        else:
+            normalized["checklist_items"] = []
         normalized["used_source_ids"] = self._normalize_source_id_list(
             normalized.get("used_source_ids"),
             request.sources,
@@ -333,7 +333,7 @@ class QwenEngine:
             "- maintenance_guide.summary must include status, risk_level, risk_basis, and core_warning.\n"
             "- maintenance_guide.hazards items must include name, content, and evidence_chunk_ids.\n"
             "- Checklist fields sequence/is_required belong only in checklist_items, never in hazards.\n"
-            "- For maintenance_guide, checklist_items must be [] because the server builds checklist items.\n"
+            "- Only maintenance_guide may return checklist_items. Every checklist item must cite allowed evidence.\n"
             "- additional_information_needed must be a list of plain strings.\n"
             "- If a field cannot be verified from allowed evidence, return an empty list for that field.\n\n"
             f"Validation error summary:\n{error_text}\n\n"
@@ -352,12 +352,17 @@ class QwenEngine:
             answer_text = ""
         if not answer_text:
             answer_text = self._fallback_answer_text(request)
+        structured_answer = self._fallback_structured_answer(request)
         payload: dict[str, Any] = {
             "answer": answer_text,
             "answer_type": request.answer_type,
-            "structured_answer": self._fallback_structured_answer(request),
-            "checklist_items": self._fallback_checklist_items(request),
-            "used_source_ids": [source.chunk_id for source in request.sources],
+            "structured_answer": structured_answer,
+            "checklist_items": [],
+            "used_source_ids": (
+                sorted(self._collect_evidence_ids(structured_answer))
+                if structured_answer
+                else []
+            ),
             "model": self.settings.base_model,
         }
         return AnswerResponse.model_validate(payload)
@@ -380,7 +385,6 @@ class QwenEngine:
     ) -> dict[str, Any] | None:
         if not request.sources:
             return None
-        chunk_ids = [source.chunk_id for source in request.sources]
         source_items = [
             {
                 "content": self._concise_source_content(source),
@@ -405,14 +409,12 @@ class QwenEngine:
                     "authored_at": None,
                 },
                 "main_contents": source_items,
-                "related_equipment": self._document_related_equipment(
-                    request.sources
-                ),
-                "related_components": self._document_related_components(
-                    request.sources
-                ),
-                "supported_tasks": self._document_supported_tasks(request.sources),
-                "evidence_chunk_ids": chunk_ids,
+                "related_equipment": [],
+                "related_components": [],
+                "supported_tasks": [],
+                "evidence_chunk_ids": [
+                    item["evidence_chunk_ids"][0] for item in source_items
+                ],
                 "conflicts": [],
                 "unverified_information": [
                     "검색된 근거 밖의 문서 전체 내용은 확인하지 못했습니다."
@@ -421,45 +423,42 @@ class QwenEngine:
         if request.answer_type == "component_info":
             return {
                 "answer_type": "component_info",
-                "one_line_description": self._component_description(request.sources),
-                "main_roles": self._component_roles(request.sources)
-                or source_items[:3],
-                "usage_locations": self._component_usage_locations(request.sources),
-                "precautions": self._component_precautions(request.sources),
-                "evidence_chunk_ids": chunk_ids,
+                "one_line_description": (
+                    "모델 응답을 구조화하지 못했습니다. 아래 검색 근거 원문을 확인해 주세요."
+                ),
+                "main_roles": [],
+                "usage_locations": [],
+                "precautions": [],
+                "evidence_chunk_ids": [],
                 "conflicts": [],
                 "additional_information_needed": [
-                    "정확한 모델명과 현장 적용 위치를 추가로 확인해 주세요."
+                    "질문 대상의 정확한 모델명과 확인하려는 용도를 알려 주세요."
                 ],
             }
-        has_manual = any(
-            source.source_type.casefold() in MANUAL_SOURCE_TYPES
-            for source in request.sources
-        )
+        public_items = [
+            item
+            for item, source in zip(source_items, request.sources[:5], strict=False)
+            if source.source_type.casefold() in PUBLIC_REFERENCE_SOURCE_TYPES
+        ]
         return {
             "answer_type": "maintenance_guide",
             "summary": {
-                "status": "안전관리자 확인 필요" if has_manual else "근거 부족",
+                "status": "근거 부족",
                 "risk_level": "판단 불가",
                 "risk_basis": [],
-                "core_warning": (
-                    "검색 근거만으로는 작업 승인 여부를 판단할 수 없습니다. "
-                    "제조사 매뉴얼 원문과 현장 안전관리자 확인 후 작업하세요."
-                ),
+                "core_warning": "모델 응답을 검증하지 못해 작업 절차를 생성하지 않았습니다.",
             },
-            "pre_checks": source_items[:3],
+            "pre_checks": [],
             "hazards": [],
             "manual_steps": [],
             "stop_conditions": [],
-            "related_regulations_and_incidents": [
-                item
-                for item, source in zip(source_items, request.sources[:5], strict=False)
-                if source.source_type.casefold() in PUBLIC_REFERENCE_SOURCE_TYPES
+            "related_regulations_and_incidents": public_items,
+            "evidence_chunk_ids": [
+                item["evidence_chunk_ids"][0] for item in public_items
             ],
-            "evidence_chunk_ids": chunk_ids,
             "conflicts": [],
             "additional_information_needed": [
-                "정확한 모델명, 현장 작업표준, 에너지 차단 기준을 확인해 주세요."
+                "검색 근거 원문과 현장 작업표준을 직접 확인해 주세요."
             ],
         }
 
@@ -467,89 +466,20 @@ class QwenEngine:
         self,
         request: AnswerRequest,
     ) -> list[dict[str, Any]]:
-        if request.answer_type != "maintenance_guide":
-            return []
-        candidates = self._fallback_checklist_candidates(request.sources)
-        return [
-            {
-                "id": None,
-                "content": content,
-                "sequence": index,
-                "is_required": True,
-                "is_completed": False,
-                "completed_by_user_id": None,
-                "completed_at": None,
-                "evidence_chunk_ids": evidence_ids,
-            }
-            for index, (content, evidence_ids) in enumerate(candidates[:5], start=1)
-        ]
+        return []
 
     def _fallback_checklist_candidates(
         self,
         sources: list[ChatSource],
     ) -> list[tuple[str, list[str]]]:
-        candidates: list[tuple[str, list[str]]] = []
-        for source in sources:
-            text = self._source_text(source)
-            source_candidates: list[str] = []
-            if self._contains_any(
-                text,
-                ("운전정지", "운전 정지", "정지 미실시", "운전중", "운전 중"),
-            ) or self._contains_keyword_groups(text, (("운전",), ("정지",))):
-                source_candidates.append("작업 전 설비 운전정지 및 불시 기동 방지 상태를 확인했다")
-            if self._contains_any(
-                text,
-                ("lockout", "tagout", "loto", "격리", "전원", "차단", "재가동"),
-            ):
-                source_candidates.append("작업 전 전원 차단·격리 및 재가동 방지 조치를 확인했다")
-            if self._contains_any(
-                text,
-                ("키를 제거", "키 제거", "시건", "잠금", "표지판", "경고 라벨"),
-            ):
-                source_candidates.append("키 제거, 잠금·시건, 표지판 부착 등 재가동 방지 조치를 확인했다")
-            if self._contains_any(text, ("비상정지", "비상 정지")):
-                source_candidates.append("비상정지장치의 위치와 작동 상태를 확인했다")
-            if self._contains_any(
-                text,
-                ("방호울", "방호", "가드", "덮개", "안전문", "안전장치"),
-            ):
-                source_candidates.append("방호장치·안전문·가드 등 접근 통제 장치의 상태를 확인했다")
-            if self._contains_any(
-                text,
-                ("잔류", "회전", "정지시간", "압력", "퍼지", "가압"),
-            ):
-                source_candidates.append("잔류 에너지, 회전부 정지, 압력 해소 상태를 확인했다")
-            for content in source_candidates:
-                if content not in {item[0] for item in candidates}:
-                    candidates.append((content, [source.chunk_id]))
-        return candidates
+        return []
 
     def _enrich_answer_response(
         self,
         response: AnswerResponse,
         request: AnswerRequest,
     ) -> AnswerResponse:
-        if response.structured_answer is None:
-            return response
-        fallback = self._fallback_structured_answer(request)
-        if fallback is None:
-            return response
-        structured = self._merge_structured_answer(
-            response.structured_answer.model_dump(mode="python"),
-            fallback,
-            request.answer_type,
-        )
-        payload = response.model_dump(mode="python")
-        payload["structured_answer"] = structured
-        if request.answer_type == "maintenance_guide" and not payload.get(
-            "checklist_items"
-        ):
-            payload["checklist_items"] = self._fallback_checklist_items(request)
-        if not payload.get("used_source_ids"):
-            payload["used_source_ids"] = sorted(
-                self._collect_evidence_ids(structured)
-            ) or [source.chunk_id for source in request.sources]
-        return AnswerResponse.model_validate(payload)
+        return response
 
     def _merge_structured_answer(
         self,
@@ -557,79 +487,7 @@ class QwenEngine:
         fallback: dict[str, Any],
         answer_type: str,
     ) -> dict[str, Any]:
-        merged = dict(value)
-        if answer_type == "document_qa":
-            for field in (
-                "main_contents",
-                "related_equipment",
-                "related_components",
-                "supported_tasks",
-                "evidence_chunk_ids",
-                "unverified_information",
-            ):
-                if not merged.get(field) and fallback.get(field):
-                    merged[field] = fallback[field]
-            overview = merged.get("overview")
-            fallback_overview = fallback.get("overview")
-            if (
-                isinstance(overview, dict)
-                and isinstance(fallback_overview, dict)
-                and not overview.get("filename")
-                and fallback_overview.get("filename")
-            ):
-                merged["overview"] = fallback_overview
-            return merged
-        if answer_type == "component_info":
-            empty_detail_sections = not any(
-                merged.get(field)
-                for field in ("main_roles", "usage_locations", "precautions")
-            )
-            if empty_detail_sections and fallback.get("one_line_description"):
-                merged["one_line_description"] = fallback["one_line_description"]
-            for field in (
-                "main_roles",
-                "usage_locations",
-                "precautions",
-                "evidence_chunk_ids",
-                "additional_information_needed",
-            ):
-                if not merged.get(field) and fallback.get(field):
-                    merged[field] = fallback[field]
-            return merged
-        if answer_type == "maintenance_guide":
-            summary = dict(merged.get("summary") or {})
-            fallback_summary = fallback.get("summary")
-            if isinstance(fallback_summary, dict):
-                if (
-                    summary.get("status") == "근거 부족"
-                    and fallback_summary.get("status") != "근거 부족"
-                ):
-                    summary["status"] = fallback_summary.get("status")
-                if (
-                    summary.get("risk_level") == "판단 불가"
-                    and fallback_summary.get("risk_level") != "판단 불가"
-                    and fallback_summary.get("risk_basis")
-                ):
-                    summary["risk_level"] = fallback_summary.get("risk_level")
-                if not summary.get("risk_basis") and fallback_summary.get("risk_basis"):
-                    summary["risk_basis"] = fallback_summary["risk_basis"]
-                if not summary.get("core_warning") and fallback_summary.get(
-                    "core_warning"
-                ):
-                    summary["core_warning"] = fallback_summary["core_warning"]
-            merged["summary"] = summary
-            for field in (
-                "pre_checks",
-                "hazards",
-                "manual_steps",
-                "stop_conditions",
-                "related_regulations_and_incidents",
-                "evidence_chunk_ids",
-                "additional_information_needed",
-            ):
-                if not merged.get(field) and fallback.get(field):
-                    merged[field] = fallback[field]
-        return merged
+        return dict(value)
 
     def _source_item(self, source: ChatSource) -> dict[str, Any]:
         return {
@@ -638,194 +496,28 @@ class QwenEngine:
         }
 
     def _document_related_equipment(self, sources: list[ChatSource]) -> list[str]:
-        labels: list[str] = []
-        for source in sources:
-            text = self._source_text(source)
-            self._add_label_if_present(
-                labels,
-                text,
-                ("라이트 커튼", "라이트커튼", "light curtain"),
-                "라이트 커튼",
-            )
-            self._add_label_if_present(labels, text, ("프레스", "press"), "프레스")
-            self._add_label_if_present(
-                labels,
-                text,
-                ("컨베이어", "conveyor"),
-                "컨베이어",
-            )
-            self._add_label_if_present(
-                labels,
-                text,
-                ("로봇", "robot"),
-                "로봇 작업구역",
-            )
-            self._add_label_if_present(
-                labels,
-                text,
-                ("기계", "machine"),
-                "기계 설비",
-            )
-        return labels[:10]
+        return []
 
     def _document_related_components(self, sources: list[ChatSource]) -> list[str]:
-        labels: list[str] = []
-        for source in sources:
-            text = self._source_text(source)
-            for keywords, label in (
-                (("투광기", "송신부", "emitter", "transmitter"), "투광기/송신부"),
-                (("수광기", "수신부", "receiver"), "수광기/수신부"),
-                (("컨트롤러", "controller"), "컨트롤러"),
-                (("광축", "optical axis"), "광축"),
-                (("인터락", "interlock"), "인터락"),
-                (("뮤팅", "muting"), "뮤팅 장치"),
-                (("pc 설정", "설정 툴", "configuration tool"), "PC 설정 툴"),
-                (("세이프티", "safety component"), "세이프티 컴포넌트"),
-                (("금형", "다이", "die"), "금형/다이"),
-            ):
-                self._add_label_if_present(labels, text, keywords, label)
-        return labels[:10]
+        return []
 
     def _document_supported_tasks(self, sources: list[ChatSource]) -> list[str]:
-        labels: list[str] = []
-        for source in sources:
-            text = self._source_text(source)
-            for keywords, label in (
-                (("설치", "install"), "설치"),
-                (("배선", "wiring"), "배선 확인"),
-                (("점검", "검사", "inspect", "check"), "점검"),
-                (("청소", "세척", "clean"), "청소"),
-                (("정렬", "광축", "align"), "광축 정렬 확인"),
-                (("설정", "pc 설정", "configuration"), "기능 설정 확인"),
-                (("모델 구성", "모델명", "model"), "모델 구성 확인"),
-                (("교체", "replace"), "교체"),
-            ):
-                self._add_label_if_present(labels, text, keywords, label)
-        return labels[:10]
+        return []
 
     def _component_description(self, sources: list[ChatSource]) -> str:
-        combined = " ".join(self._source_text(source) for source in sources)
-        if self._contains_any(
-            combined,
-            ("라이트 커튼", "라이트커튼", "light curtain"),
-        ):
-            if self._contains_any(
-                combined,
-                ("광축", "검출", "감지", "위험구역", "위험 영역"),
-            ):
-                return (
-                    "라이트 커튼은 광축 차단 또는 위험구역 접근을 검출해 "
-                    "기계 안전 기능과 연동하는 안전장치입니다."
-                )
-            return "라이트 커튼은 기계 위험구역 접근을 감지하는 안전 보호장치입니다."
-        if self._contains_any(combined, ("센서", "sensor", "검출", "감지")):
-            return "검색 근거에서 확인되는 검출·감지 기능을 수행하는 안전 관련 부품입니다."
-        return self._concise_source_content(sources[0])
+        return "검색 근거 원문을 확인해 주세요."
 
     def _component_roles(self, sources: list[ChatSource]) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        for source in sources:
-            text = self._source_text(source)
-            if self._contains_any(text, ("광축", "검출", "감지", "detect")):
-                items.append(
-                    {
-                        "content": "광축 차단이나 작업자 접근 여부를 검출합니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-            if self._contains_any(text, ("인터락", "재기동", "기계", "정지")):
-                items.append(
-                    {
-                        "content": "인터락 상태와 기계 재기동 조건을 관리하는 안전 기능과 연동됩니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-            if self._contains_any(text, ("pc 설정", "설정", "변경", "configuration")):
-                items.append(
-                    {
-                        "content": "설정 변경 후 장치가 의도한 대로 동작하는지 확인해야 하는 안전 기능을 제공합니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-            if self._contains_any(text, ("안전", "보호", "방호", "인사사고")):
-                items.append(
-                    {
-                        "content": "위험구역 접근으로 인한 인사사고를 예방하는 보호 기능을 담당합니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-        return self._dedupe_evidence_item_dicts(items)[:5]
+        return []
 
     def _component_usage_locations(
         self,
         sources: list[ChatSource],
     ) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        for source in sources:
-            text = self._source_text(source)
-            if self._contains_any(text, ("위험구역", "위험 구역", "기계", "machine")):
-                items.append(
-                    {
-                        "content": "기계 위험구역 또는 위험원 주변에 적용됩니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-            if self._contains_any(text, ("프레스", "press")):
-                items.append(
-                    {
-                        "content": "프레스 설비 주변 안전관리 구역에 적용될 수 있습니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-            if self._contains_any(text, ("로봇", "robot")):
-                items.append(
-                    {
-                        "content": "산업용 로봇 등 자동화 설비의 위험구역 방호에 적용될 수 있습니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-            if self._contains_any(text, ("컨베이어", "conveyor")):
-                items.append(
-                    {
-                        "content": "컨베이어 출입구나 이송 설비 주변 방호에 적용될 수 있습니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-        return self._dedupe_evidence_item_dicts(items)[:5]
+        return []
 
     def _component_precautions(self, sources: list[ChatSource]) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        for source in sources:
-            text = self._source_text(source)
-            if self._contains_any(text, ("의도한 대로", "동작하는지", "동작 확인")):
-                items.append(
-                    {
-                        "content": "기능 설정 또는 변경 후 의도한 대로 동작하는지 확인합니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-            if self._contains_any(text, ("인사사고", "위험", "안전")):
-                items.append(
-                    {
-                        "content": "설정 오류나 임의 변경은 인사사고 위험으로 이어질 수 있으므로 검증 후 사용합니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-            if self._contains_any(text, ("위험 구역", "위험구역", "재기동", "인터락")):
-                items.append(
-                    {
-                        "content": "인터락 해제나 재기동 전 위험구역 내 작업자 유무를 확인합니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-            if self._contains_any(text, ("규격", "규제", "법률", "법령")):
-                items.append(
-                    {
-                        "content": "해당 국가·지역의 규격, 규제, 법률을 확인합니다.",
-                        "evidence_chunk_ids": [source.chunk_id],
-                    }
-                )
-        return self._dedupe_evidence_item_dicts(items)[:5]
+        return []
 
     @staticmethod
     def _source_text(source: ChatSource) -> str:
@@ -960,12 +652,25 @@ class QwenEngine:
     ) -> list[dict[str, Any]]:
         if not isinstance(value, list):
             return []
+        sources_by_id = {source.chunk_id: source for source in sources}
+        allowed_types = MANUAL_SOURCE_TYPES | frozenset(
+            {"public_law", "public_guide"}
+        )
         items: list[dict[str, Any]] = []
         for index, item in enumerate(value, start=1):
             if not isinstance(item, dict):
                 continue
             content = str(item.get("content") or "").strip()
             if not content:
+                continue
+            evidence_ids = self._normalize_source_id_list(
+                item.get("evidence_chunk_ids"),
+                sources,
+            )
+            if not evidence_ids or any(
+                sources_by_id[source_id].source_type.casefold() not in allowed_types
+                for source_id in evidence_ids
+            ):
                 continue
             items.append(
                 {
@@ -976,10 +681,7 @@ class QwenEngine:
                     "is_completed": False,
                     "completed_by_user_id": None,
                     "completed_at": None,
-                    "evidence_chunk_ids": self._normalize_source_id_list(
-                        item.get("evidence_chunk_ids"),
-                        sources,
-                    ),
+                    "evidence_chunk_ids": evidence_ids,
                 }
             )
         return items
@@ -1551,8 +1253,18 @@ class QwenEngine:
         manual_ids = [
             source.chunk_id
             for source in request.sources
+            if source.source_type.casefold() in MANUAL_SOURCE_TYPES
+        ]
+        checklist_ids = [
+            source.chunk_id
+            for source in request.sources
             if source.source_type.casefold()
-            in {"manual", "equipment_manual", "component_manual", "work_standard"}
+            in {
+                "equipment_manual",
+                "component_manual",
+                "public_law",
+                "public_guide",
+            }
         ]
         return (
             f"{common}\nstructured_answer keys: answer_type=maintenance_guide, summary "
@@ -1571,8 +1283,10 @@ class QwenEngine:
             "additional_information_needed must be a list of plain strings, not objects. "
             "Only add a conflict when two or more retrieved chunks directly disagree, and "
             "cite every conflicting chunk ID. Otherwise conflicts must be []. "
-            "Top-level checklist_items must be [] because the server creates checklist items "
-            "from verified pre_checks and stop_conditions. Never put checklist text inside answer as [ ]. "
+            "Top-level checklist_items may contain only question-relevant TBM preview items "
+            "with content and evidence_chunk_ids. Do not create a checklist item without evidence. "
+            f"Only these chunk IDs may support checklist_items: {checklist_ids}. "
+            "Never put checklist text inside answer as [ ]. "
             f"Only these manual chunk IDs may support manual_steps: {manual_ids}. "
             "If that list is empty, manual_steps must be [] and risk may be 판단 불가."
         )

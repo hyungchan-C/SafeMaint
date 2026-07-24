@@ -84,6 +84,21 @@ class Settings:
     qwen_api_key: str = getenv("QWEN_API_KEY", "")
     qwen_timeout_seconds: float = float(getenv("QWEN_TIMEOUT_SECONDS", "600"))
     qwen_allow_company_context: bool = _bool_env("QWEN_ALLOW_COMPANY_CONTEXT", False)
+    question_intent_confidence_threshold: float = float(
+        getenv("QUESTION_INTENT_CONFIDENCE_THRESHOLD", "0.8")
+    )
+    qwen_source_excerpt_chars: int = int(
+        getenv("QWEN_SOURCE_EXCERPT_CHARS", "900")
+    )
+    qwen_document_source_limit: int = int(
+        getenv("QWEN_DOCUMENT_SOURCE_LIMIT", "6")
+    )
+    qwen_component_source_limit: int = int(
+        getenv("QWEN_COMPONENT_SOURCE_LIMIT", "5")
+    )
+    qwen_maintenance_source_limit: int = int(
+        getenv("QWEN_MAINTENANCE_SOURCE_LIMIT", "8")
+    )
     qwen_classifier_enabled: bool = _bool_env(
         "QWEN_CLASSIFIER_ENABLED", False
     )

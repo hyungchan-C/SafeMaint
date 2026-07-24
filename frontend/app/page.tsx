@@ -4,10 +4,9 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 
 import DocumentReviewPanel from "@/components/DocumentReviewPanel";
 import ChatSources from "@/components/ChatSources";
+import ChatAnswerContent from "@/components/ChatAnswerContent";
 import InterfaceIcon from "@/components/InterfaceIcon";
 import ManualManager from "@/components/ManualManager";
-import SafetyAnswerView from "@/components/SafetyAnswerView";
-import StructuredChatAnswer from "@/components/StructuredChatAnswer";
 import TbmChecklist from "@/components/TbmChecklist";
 import WorkspaceHeader from "@/components/WorkspaceHeader";
 import type {
@@ -1630,13 +1629,12 @@ function WorkspaceScreen({
                 </div>
               )}
               {message.role === "ai"
-                ? message.structuredAnswer
-                  ? <StructuredChatAnswer
-                      answer={message.structuredAnswer}
-                      checklistItems={message.checklistItems ?? []}
-                      sources={message.sources ?? []}
-                    />
-                  : <SafetyAnswerView answer={message.text} />
+                ? <ChatAnswerContent
+                    answer={message.text}
+                    structuredAnswer={message.structuredAnswer}
+                    checklistItems={message.checklistItems ?? []}
+                    sources={message.sources ?? []}
+                  />
                 : <p className="chat-answer-text">{message.text}</p>}
               {message.catalogCandidates && message.catalogCandidates.length > 0 && (
                 <div className="catalog-candidate-list">
@@ -1658,8 +1656,8 @@ function WorkspaceScreen({
                   <p className="catalog-candidate-caution">후보 이미지는 외형 비교용이며 동일 모델·규격을 의미하지 않습니다.</p>
                 </div>
               )}
-              {message.warning && <p className="chat-warning">⚠ {message.warning}</p>}
               {message.sources && <ChatSources sources={message.sources} />}
+              {message.warning && <p className="chat-warning">⚠ {message.warning}</p>}
             </div>
           ))}
           {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>안전자료를 검색하고 AI 답변을 생성하고 있습니다…</div>}

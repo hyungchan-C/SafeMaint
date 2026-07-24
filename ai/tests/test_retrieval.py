@@ -25,6 +25,14 @@ def test_scope_filters_are_parameterized() -> None:
     assert parameters == [["public_incident", "equipment_manual"], [document_id]]
 
 
+def test_legacy_source_type_aliases_map_to_canonical_document_types() -> None:
+    assert normalize_source_types(["incident", "manual", "regulation"]) == (
+        "public_incident",
+        "equipment_manual",
+        "public_law",
+    )
+
+
 def test_empty_explicit_scope_is_rejected() -> None:
     with pytest.raises(ValueError):
         normalize_source_types([])
@@ -296,7 +304,7 @@ def test_public_supplement_requires_selected_maintenance_intent() -> None:
 
     assert retriever._include_public_supplement(maintenance_request, None)
     assert not retriever._include_public_supplement(document_request, None)
-    assert not retriever._include_public_supplement(component_request, None)
+    assert retriever._include_public_supplement(component_request, None)
     assert not retriever._include_public_supplement(
         maintenance_request,
         (document_id,),
@@ -467,6 +475,22 @@ def test_document_summary_allows_diverse_chunks_from_same_document() -> None:
     ]
 
 
+def test_document_qa_without_selected_document_stops_before_embedding() -> None:
+    class MustNotEmbed:
+        def encode(self, text: str):
+            raise AssertionError("Document QA without a selected document must not search")
+
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "이 PDF를 요약해줘.",
+            "analysis": {"question_intent": "document_qa"},
+        }
+    )
+    retriever = PgvectorRetriever(Settings(), embedder=MustNotEmbed())  # type: ignore[arg-type]
+
+    assert retriever.search(request) == []
+
+
 def test_maintenance_action_match_is_ranked_above_generic_topic_match() -> None:
     request = InternalChatRequest.model_validate(
         {
@@ -519,6 +543,172 @@ def test_maintenance_action_match_is_ranked_above_generic_topic_match() -> None:
     results = retriever._rerank(request, [noise, action_match])
 
     assert results[0].chunk_id == "chunk-cleaning"
+
+
+def test_maintenance_action_mismatch_is_excluded() -> None:
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "프레스 설비 베어링을 교체할 예정이야.",
+            "analysis": {"question_intent": "maintenance_guide"},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(min_similarity=0.1, maintenance_top_k=4),
+        embedder=object(),  # type: ignore[arg-type]
+    )
+    mismatch = {
+        "document_id": "public-cleaning",
+        "chunk_id": "chunk-cleaning",
+        "title": "프레스 설비 청소 지침",
+        "source_type": "public_guide",
+        "document_scope": "public",
+        "original_filename": "cleaning.pdf",
+        "document_version": 1,
+        "section": "청소",
+        "content": "프레스 설비 내부 청소 전 전원을 차단한다.",
+        "content_hash": "m" * 64,
+        "page": 2,
+        "page_start": 2,
+        "page_end": 2,
+        "publisher": "public source",
+        "url": None,
+        "similarity": 0.95,
+        "postgres_keyword_score": 0.2,
+    }
+    matching = {
+        **mismatch,
+        "document_id": "manual-replacement",
+        "chunk_id": "chunk-replacement",
+        "title": "프레스 베어링 교체 매뉴얼",
+        "source_type": "component_manual",
+        "document_scope": "company",
+        "original_filename": "bearing.pdf",
+        "section": "베어링 교체",
+        "content_hash": "n" * 64,
+        "content": "프레스 설비 베어링 교체 시 축을 지지한다.",
+        "similarity": 0.75,
+    }
+
+    results = retriever._rerank(request, [mismatch, matching])
+
+    assert [result.chunk_id for result in results] == ["chunk-replacement"]
+
+
+def test_maintenance_bucket_quotas_prevent_one_source_type_from_dominating() -> None:
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "프레스 설비를 점검할 예정이야.",
+            "analysis": {"question_intent": "maintenance_guide"},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(
+            min_similarity=0.1,
+            maintenance_top_k=4,
+            maintenance_manual_quota=1,
+            maintenance_company_policy_quota=1,
+            maintenance_law_quota=1,
+            maintenance_guide_quota=1,
+            maintenance_incident_quota=0,
+        ),
+        embedder=object(),  # type: ignore[arg-type]
+    )
+
+    def row(index: int, source_type: str) -> dict:
+        return {
+            "document_id": f"doc-{index}",
+            "chunk_id": f"chunk-{index}",
+            "title": "프레스 설비 점검",
+            "source_type": source_type,
+            "document_scope": (
+                "company"
+                if source_type in {"equipment_manual", "company_policy"}
+                else "public"
+            ),
+            "original_filename": f"source-{index}.pdf",
+            "document_version": 1,
+            "section": "점검",
+            "content": "프레스 설비 점검 전 안전 상태를 확인한다.",
+            "content_hash": str(index) * 64,
+            "page": index,
+            "page_start": index,
+            "page_end": index,
+            "publisher": "source",
+            "url": None,
+            "similarity": 0.95 - index / 100,
+            "postgres_keyword_score": 0.1,
+        }
+
+    results = retriever._rerank(
+        request,
+        [
+            row(1, "equipment_manual"),
+            row(2, "component_manual"),
+            row(3, "company_policy"),
+            row(4, "public_law"),
+            row(5, "public_guide"),
+        ],
+    )
+
+    assert [result.source_type for result in results] == [
+        "equipment_manual",
+        "company_policy",
+        "public_law",
+        "public_guide",
+    ]
+
+
+def test_document_neighbor_loader_uses_same_document_version_and_window() -> None:
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.query = ""
+            self.parameters: tuple[object, ...] = ()
+
+        def execute(self, query: str, parameters: tuple[object, ...]) -> None:
+            self.query = query
+            self.parameters = parameters
+
+        def fetchall(self) -> list[dict]:
+            return [
+                {
+                    "document_id": "doc-1",
+                    "document_version_id": "version-1",
+                    "chunk_id": "neighbor-1",
+                    "chunk_index": 4,
+                    "similarity": 0.0,
+                }
+            ]
+
+    retriever = PgvectorRetriever(
+        Settings(
+            min_similarity=0.25,
+            document_neighbor_window=1,
+        ),
+        embedder=object(),  # type: ignore[arg-type]
+    )
+    cursor = FakeCursor()
+    rows = retriever._load_adjacent_rows(
+        cursor,
+        [
+            {
+                "document_id": "doc-1",
+                "document_version_id": "version-1",
+                "chunk_id": "seed-1",
+                "chunk_index": 5,
+                "similarity": 0.8,
+            }
+        ],
+    )
+
+    assert "COALESCE(dc.document_version_id::text, '') = %s" in cursor.query
+    assert cursor.parameters == (
+        retriever.settings.model_name,
+        "doc-1",
+        "version-1",
+        4,
+        6,
+    )
+    assert rows[0]["similarity"] == pytest.approx(0.79)
 
 
 def test_multiple_relevant_chunks_per_document_are_allowed_and_bounded() -> None:

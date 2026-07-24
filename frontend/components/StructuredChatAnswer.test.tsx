@@ -109,7 +109,8 @@ describe("StructuredChatAnswer", () => {
       />,
     );
 
-    expect(screen.getByText("예상 위험도")).toBeInTheDocument();
+    expect(screen.getByText("위험성평가")).toBeInTheDocument();
+    expect(screen.getByText("별도 위험성평가 필요")).toBeInTheDocument();
     expect(screen.getByText("4. 즉시 작업을 중지해야 하는 조건")).toBeInTheDocument();
     expect(screen.getByRole("checkbox")).toBeInTheDocument();
   });
@@ -148,5 +149,35 @@ describe("StructuredChatAnswer", () => {
     render(<SafetyAnswerView answer="기존 문자열 답변" />);
 
     expect(screen.getByText("기존 문자열 답변")).toBeInTheDocument();
+  });
+
+  it("links structured evidence numbers to the matching source card", () => {
+    render(
+      <>
+        <StructuredChatAnswer
+          answer={{
+            answer_type: "component_info",
+            one_line_description: "검증 근거가 있는 부품 설명",
+            main_roles: [
+              { content: "접근 감지", evidence_chunk_ids: ["chunk-1"] },
+            ],
+            usage_locations: [],
+            precautions: [],
+            evidence_chunk_ids: ["chunk-1"],
+            conflicts: [],
+            additional_information_needed: [],
+          }}
+          checklistItems={[]}
+          sources={[source]}
+        />
+        <article id="chat-source-1">검색 근거 카드</article>
+      </>,
+    );
+
+    expect(screen.getByRole("link", { name: "[1]" })).toHaveAttribute(
+      "href",
+      "#chat-source-1",
+    );
+    expect(document.getElementById("chat-source-1")).not.toBeNull();
   });
 });
