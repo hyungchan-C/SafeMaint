@@ -6,6 +6,7 @@ from fastapi import HTTPException, UploadFile
 
 from app.api.routes.vision import (
     _catalog_id_for_match,
+    _current_catalog_id,
     _parse_document_ids,
     _read_upload,
 )
@@ -110,3 +111,11 @@ def test_current_vision_catalog_can_be_matched() -> None:
     }
 
     assert _catalog_id_for_match(document) == "siglip-index"
+    assert _current_catalog_id(document) == "siglip-index"
+
+
+def test_legacy_vision_catalog_can_be_skipped_when_other_catalogs_are_current() -> None:
+    document = _document()
+    document.metadata_json = {"vision_catalog_id": "legacy-efficientnet-index"}
+
+    assert _current_catalog_id(document) is None

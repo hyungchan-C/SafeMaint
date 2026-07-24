@@ -67,6 +67,7 @@ class Settings:
         "LLM_REASONING_EFFORT", "none", {"none", "low", "medium", "high"}
     )
     vision_service_url: str = getenv("VISION_SERVICE_URL", "http://vision:8020")
+    vision_api_key: str = getenv("VISION_API_KEY", "")
     vision_image_max_upload_bytes: int = int(
         getenv("VISION_IMAGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))
     )
