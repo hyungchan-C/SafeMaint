@@ -6,7 +6,7 @@ function SourceCard({ source, number }: { source: ChatSource; number: number }) 
     : source.page ? `${source.page}페이지` : "페이지 정보 없음";
 
   return (
-    <article className="chat-source-card">
+    <article className="chat-source-card" id={`chat-source-${number}`}>
       <div className="chat-source-heading">
         <span className="source-number">근거 {number}</span>
         <span>{source.source_type} · 유사도 {(source.similarity * 100).toFixed(1)}%</span>

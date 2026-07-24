@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, status
@@ -9,6 +10,9 @@ from rag_service.config import settings
 from rag_service.retrieval import PgvectorRetriever
 from rag_service.schemas import ChatResponse, ChatSource, InternalChatRequest
 from evidence_policy import NO_EVIDENCE_WARNING, format_no_evidence_answer
+
+
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(
@@ -75,6 +79,10 @@ async def chat(payload: InternalChatRequest) -> ChatResponse:
     try:
         sources = await asyncio.to_thread(retriever.search, payload)
     except Exception as exc:
+        logger.exception(
+            "rag_retrieval_failed request_id=%s stage=hybrid_search",
+            payload.request_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Hybrid document retrieval failed.",

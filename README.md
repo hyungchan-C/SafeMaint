@@ -59,10 +59,14 @@ DB 테이블과 관계는 [docs/database.md](docs/database.md), 전처리 결과
 검색할 문서 종류는 코드에 고정하지 않고 `.env`의 쉼표 구분 설정으로 선택합니다.
 
 ```dotenv
-RAG_SOURCE_TYPES=incident,manual
+RAG_SOURCE_TYPES=public_guide,equipment_manual,component_manual
 ```
 
-값을 비우면 `private` 문서를 제외한 모든 source type을 검색합니다. 실제 고객
+공식 문서 유형은 `public_law`, `public_guide`, `public_incident`,
+`public_media`, `company_policy`, `equipment_manual`, `component_manual`입니다.
+레거시 `incident`, `manual`, `regulation`, `work_standard` 값은 입력 경계에서만
+호환되며 내부 검색은 공식 `document_type_code`를 사용합니다. 값을 비우면 접근
+권한이 허용된 공식 문서 유형을 질문 목적에 맞게 검색합니다. 실제 고객
 매뉴얼은 업로드·권한 검증·전처리가 완료된 문서만 검색 범위에 포함해야 합니다.
 
 ```powershell
@@ -851,9 +855,35 @@ DOCUMENT_WORKER_MAX_ATTEMPTS=3
 DOCUMENT_WORKER_RETRY_DELAY_SECONDS=10
 DOCUMENT_WORKER_STALE_AFTER_SECONDS=1800
 RAG_CANDIDATE_K=30
+RAG_DOCUMENT_TOP_K=6
+RAG_DOCUMENT_NEIGHBOR_WINDOW=1
+RAG_COMPONENT_TOP_K=5
+RAG_MAINTENANCE_TOP_K=8
 RAG_MAX_CHUNKS_PER_DOCUMENT=2
 RAG_MIN_KEYWORD_SCORE=0.08
+RAG_MAINTENANCE_MANUAL_QUOTA=4
+RAG_MAINTENANCE_COMPANY_POLICY_QUOTA=2
+RAG_MAINTENANCE_LAW_QUOTA=2
+RAG_MAINTENANCE_GUIDE_QUOTA=3
+RAG_MAINTENANCE_INCIDENT_QUOTA=2
+QUESTION_INTENT_CONFIDENCE_THRESHOLD=0.8
+QWEN_SOURCE_EXCERPT_CHARS=900
+QWEN_DOCUMENT_SOURCE_LIMIT=6
+QWEN_COMPONENT_SOURCE_LIMIT=5
+QWEN_MAINTENANCE_SOURCE_LIMIT=8
 ```
+
+AI 상담은 사용자가 명시한 질문 목적을 가장 먼저 사용하고, 그다음 Qwen 분석을
+사용합니다. Qwen 의도 신뢰도가 `QUESTION_INTENT_CONFIDENCE_THRESHOLD`보다 낮으면
+문서를 검색하거나 절차를 추측하지 않고 질문 목적을 다시 확인합니다. Qwen 장애나
+잘못된 응답일 때만 규칙 기반 의도 분류를 폴백으로 사용합니다.
+
+검색 범위는 질문 목적별로 분리됩니다. `document_qa`는 선택 문서와 같은 버전의
+인접 청크를 포함해 검색하고, `component_info`는 부품·설비 매뉴얼과 가이드를
+우선합니다. `maintenance_guide`는 매뉴얼·회사 기준·법령·가이드·사고사례를
+환경변수 quota만큼 균형 있게 선택합니다. Backend는 검색된 원문에 없는 안전 문장이나
+위험도를 보충하지 않으며, 별도 위험성평가 결과가 없는 상담 답변은 항상
+`판단 불가`(화면에서는 `별도 위험성평가 필요`)로 표시합니다.
 
 개발 검증은 운영 이미지와 분리된 Docker test stage에서 실행할 수 있습니다. DB 통합 테스트는 이름이 `_test`로 끝나는 별도 DB에서만 실행해야 합니다.
 

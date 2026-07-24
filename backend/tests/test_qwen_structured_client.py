@@ -186,6 +186,98 @@ def test_qwen_client_unwraps_nested_json_and_normalizes_numbered_sources() -> No
     assert result.used_source_ids == ("chunk-1",)
 
 
+def test_qwen_classify_normalizes_colab_alias_fields() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/classify"
+        return httpx.Response(
+            200,
+            json={
+                "analysis": {
+                    "answer_type": "maintenance_guide",
+                    "confidence": 0.93,
+                    "equipment_name": "컨베이어 CV-203",
+                    "target_component": ["베어링", "축"],
+                    "maintenance_action": "교체",
+                    "hazards": ["협착"],
+                    "energy_source": "전기",
+                    "keywords": ["베어링 교체", "LOTO"],
+                    "unknown_future_field": {"ignored": True},
+                }
+            },
+        )
+
+    result = asyncio.run(
+        QwenClient(
+            service_url="http://qwen.test",
+            transport=httpx.MockTransport(handler),
+        ).classify(ChatRequest(question="컨베이어 베어링을 교체하려고 해."))
+    )
+
+    assert result is not None
+    assert result.question_intent == "maintenance_guide"
+    assert result.intent_confidence == 0.93
+    assert result.equipment == ["컨베이어 CV-203"]
+    assert result.component == ["베어링", "축"]
+    assert result.work_type == "교체"
+    assert result.explicit_risk_factors == ["협착"]
+    assert result.energy_sources == ["전기"]
+    assert result.search_keywords == ["베어링 교체", "LOTO"]
+
+
+def test_qwen_answer_infers_used_source_ids_from_numbered_citations() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answer": "설치 전 안전거리를 확인합니다 [1].",
+                "model": "qwen-test",
+            },
+        )
+
+    retrieval_response = ChatResponse(
+        answer="검색 답변",
+        answer_type="maintenance_guide",
+        sources=[
+            ChatSource(
+                document_id="doc-1",
+                chunk_id="chunk-1",
+                title="라이트커튼 매뉴얼",
+                source_type="component_manual",
+                excerpt="설치 전 안전거리를 확인한다.",
+                similarity=0.8,
+            )
+        ],
+        retrieval_mode="hybrid",
+    )
+
+    result = asyncio.run(
+        QwenClient(
+            service_url="http://qwen.test",
+            transport=httpx.MockTransport(handler),
+        ).answer(
+            ChatRequest(question="라이트커튼 설치 방법을 알려줘."),
+            retrieval_response,
+        )
+    )
+
+    assert result is not None
+    assert result.used_source_ids == ("chunk-1",)
+
+
+def test_qwen_classify_rejects_non_object_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=["unexpected", "list"])
+
+    result = asyncio.run(
+        QwenClient(
+            service_url="http://qwen.test",
+            transport=httpx.MockTransport(handler),
+        ).classify(ChatRequest(question="라이트커튼 설치 방법"))
+    )
+
+    assert result is None
+
+
 def test_qwen_client_extracts_answer_from_truncated_nested_json_string() -> None:
     truncated_nested_json = (
         '{"answer": "라이트 커튼 설치 후 기능 설정과 정상 동작 여부를 확인해야 합니다.", '

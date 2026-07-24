@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
 from collections.abc import Sequence
 from threading import Lock
@@ -12,7 +14,16 @@ from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 
 from rag_service.config import Settings
+from rag_service.document_types import (
+    COMPONENT_DOCUMENT_TYPES,
+    MAINTENANCE_DOCUMENT_TYPES,
+    MANUAL_DOCUMENT_TYPES,
+    canonical_document_type,
+)
 from rag_service.schemas import ChatRequest, ChatSource, InternalChatRequest
+
+
+logger = logging.getLogger(__name__)
 
 
 class RetrievalError(RuntimeError):
@@ -162,7 +173,7 @@ def normalize_source_types(
         return None
     normalized: list[str] = []
     for source_type in source_types:
-        value = source_type.strip()
+        value = canonical_document_type(source_type)
         if not value:
             raise ValueError("source_types must not contain blank values")
         if value not in normalized:
@@ -190,7 +201,7 @@ def scope_sql(
     clauses: list[str] = []
     parameters: list[object] = []
     if source_types is not None:
-        clauses.append("AND d.source_type = ANY(%s)")
+        clauses.append("AND d.document_type_code = ANY(%s)")
         parameters.append(list(source_types))
     if document_ids is not None:
         clauses.append("AND d.id = ANY(%s)")
@@ -411,14 +422,51 @@ class PgvectorRetriever:
         if include_context:
             values.append(context_text)
         if request.analysis:
+            target_values = [
+                *request.analysis.equipment,
+                *request.analysis.component,
+            ]
+            relevant_targets = [
+                value
+                for value in target_values
+                if (
+                    not question_topics
+                    or topics_overlap(question_topics, topic_terms(value))
+                )
+            ]
+            explicit_risks = [
+                value
+                for value in request.analysis.explicit_risk_factors
+                if (
+                    value.casefold() in request.question.casefold()
+                    or not question_topics
+                    or topics_overlap(question_topics, topic_terms(value))
+                )
+            ]
             values.extend(
                 (
+                    " ".join(relevant_targets),
                     occurrence_type if include_occurrence_type else None,
-                    request.analysis.work_type if include_context else None,
+                    request.analysis.work_type,
+                    " ".join(explicit_risks),
+                    " ".join(request.analysis.energy_sources),
                     " ".join(relevant_analysis_keywords),
                 )
             )
         return " ".join(value.strip() for value in values if value and value.strip())
+
+    @staticmethod
+    def _intent_source_types(request: InternalChatRequest) -> tuple[str, ...] | None:
+        intent = request.analysis.question_intent if request.analysis else None
+        if intent == "component_info":
+            source_types = list(COMPONENT_DOCUMENT_TYPES)
+            question = request.question.casefold()
+            if not any(term in question for term in ("법", "법령", "규정", "기준")):
+                source_types.remove("public_law")
+            return tuple(source_types)
+        if intent == "maintenance_guide":
+            return MAINTENANCE_DOCUMENT_TYPES
+        return None
 
     @staticmethod
     def _active_version_clause() -> str:
@@ -480,6 +528,7 @@ class PgvectorRetriever:
                 SELECT
                     d.id::text AS document_id,
                     dc.id::text AS chunk_id,
+                    dc.chunk_index,
                     d.title,
                     d.document_type_code AS source_type,
                     dt.scope AS document_scope,
@@ -571,16 +620,146 @@ class PgvectorRetriever:
             LIMIT %s
         """
 
+    @staticmethod
+    def _adjacent_query(seed_count: int) -> str:
+        seed_predicates = " OR ".join(
+            (
+                "(d.id::text = %s "
+                "AND COALESCE(dc.document_version_id::text, '') = %s "
+                "AND dc.chunk_index BETWEEN %s AND %s)"
+            )
+            for _ in range(seed_count)
+        )
+        return f"""
+            SELECT
+                d.id::text AS document_id,
+                dc.id::text AS chunk_id,
+                dc.chunk_index,
+                d.title,
+                d.document_type_code AS source_type,
+                dt.scope AS document_scope,
+                dv.id::text AS document_version_id,
+                dv.original_filename,
+                dv.version_number AS document_version,
+                COALESCE(dc.metadata->>'section', dc.section_path->>0) AS section,
+                dc.content,
+                dc.content_hash,
+                COALESCE(dc.page_number, dc.page_start) AS page,
+                dc.page_start,
+                dc.page_end,
+                d.publisher,
+                d.source_url AS url,
+                0.0::double precision AS similarity,
+                0.0::double precision AS postgres_keyword_score
+            FROM document_chunks dc
+            JOIN documents d ON d.id = dc.document_id
+            JOIN document_types dt ON dt.code = d.document_type_code
+            LEFT JOIN document_versions dv ON dv.id = dc.document_version_id
+            WHERE d.deleted_at IS NULL
+              AND dt.is_active = true
+              AND dc.embedding_status = 'ready'
+              AND dc.embedding IS NOT NULL
+              AND dc.embedding_model = %s
+              AND ({seed_predicates})
+            ORDER BY d.id, dc.document_version_id, dc.chunk_index
+        """
+
+    def _load_adjacent_rows(
+        self,
+        cursor: Any,
+        seed_rows: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        window = max(0, self.settings.document_neighbor_window)
+        seeds: list[tuple[str, str, int, float]] = []
+        seen: set[tuple[str, str, int]] = set()
+        for row in seed_rows:
+            if row.get("chunk_index") is None:
+                continue
+            key = (
+                str(row["document_id"]),
+                str(row.get("document_version_id") or ""),
+                int(row["chunk_index"]),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            seeds.append((*key, float(row["similarity"])))
+        if not seeds or window == 0:
+            return []
+
+        parameters: list[object] = [self.settings.model_name]
+        for document_id, version_id, chunk_index, _ in seeds:
+            parameters.extend(
+                (
+                    document_id,
+                    version_id,
+                    max(0, chunk_index - window),
+                    chunk_index + window,
+                )
+            )
+        cursor.execute(self._adjacent_query(len(seeds)), tuple(parameters))
+        adjacent_rows = list(cursor.fetchall())
+        for row in adjacent_rows:
+            document_id = str(row["document_id"])
+            version_id = str(row.get("document_version_id") or "")
+            chunk_index = int(row["chunk_index"])
+            nearest_scores = [
+                max(
+                    self.settings.min_similarity,
+                    similarity - abs(seed_index - chunk_index) * 0.01,
+                )
+                for seed_document_id, seed_version_id, seed_index, similarity in seeds
+                if seed_document_id == document_id
+                and seed_version_id == version_id
+                and abs(seed_index - chunk_index) <= window
+            ]
+            if nearest_scores:
+                row["similarity"] = max(nearest_scores)
+        return adjacent_rows
+
     def search(
         self,
         request: InternalChatRequest,
         source_types: Sequence[str] | None = None,
         document_ids: Sequence[UUID] | None = None,
     ) -> list[ChatSource]:
+        configured_source_types = (
+            self.settings.source_types
+            if source_types is None and self.settings.source_types is not None
+            else source_types
+        )
         resolved_source_types = normalize_source_types(
-            self.settings.source_types if source_types is None else source_types
+            configured_source_types
+            if configured_source_types is not None
+            else self._intent_source_types(request)
         )
         resolved_document_ids = normalize_document_ids(document_ids)
+        intent = (
+            request.analysis.question_intent
+            if request.analysis
+            else None
+        )
+        if (
+            intent == "document_qa"
+            and not resolved_document_ids
+            and not request.context.effective_document_ids()
+            and not request.context.selected_document_version_ids
+        ):
+            logger.info(
+                "rag_retrieval %s",
+                json.dumps(
+                    {
+                        "request_id": request.request_id,
+                        "question_intent": intent,
+                        "candidate_bucket_counts": {},
+                        "selected_bucket_counts": {},
+                        "selected_sources": [],
+                        "fallback_reason": "document_not_selected",
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            return []
         scope_clause, scope_parameters = scope_sql(
             resolved_source_types,
             resolved_document_ids,
@@ -616,7 +795,14 @@ class PgvectorRetriever:
             self.settings.model_name,
             int(vector.shape[0]),
             self.settings.min_similarity,
-            max(self.settings.candidate_k, self.settings.top_k),
+            max(
+                self.settings.candidate_k,
+                self._result_limit(
+                    request.analysis.question_intent
+                    if request.analysis
+                    else None
+                ),
+            ),
         )
         with psycopg.connect(
             psycopg_database_url(self.settings.database_url),
@@ -626,8 +812,56 @@ class PgvectorRetriever:
             register_vector(connection)
             with connection.cursor() as cursor:
                 cursor.execute(self._candidate_query(scope_clause), parameters)
-                rows = cursor.fetchall()
-        return self._rerank(request, rows)
+                rows = list(cursor.fetchall())
+                if intent == "document_qa":
+                    adjacent_rows = self._load_adjacent_rows(cursor, rows)
+                    existing_chunk_ids = {
+                        str(row["chunk_id"]) for row in rows
+                    }
+                    rows.extend(
+                        row
+                        for row in adjacent_rows
+                        if str(row["chunk_id"]) not in existing_chunk_ids
+                    )
+        sources = self._rerank(request, rows)
+        candidate_bucket_counts: dict[str, int] = {}
+        for row in rows:
+            bucket = self._source_bucket(str(row.get("source_type") or ""))
+            candidate_bucket_counts[bucket] = (
+                candidate_bucket_counts.get(bucket, 0) + 1
+            )
+        selected_bucket_counts: dict[str, int] = {}
+        for source in sources:
+            bucket = self._source_bucket(source.source_type)
+            selected_bucket_counts[bucket] = (
+                selected_bucket_counts.get(bucket, 0) + 1
+            )
+        logger.info(
+            "rag_retrieval %s",
+            json.dumps(
+                {
+                    "request_id": request.request_id,
+                    "question_intent": (
+                        request.analysis.question_intent
+                        if request.analysis
+                        else None
+                    ),
+                    "candidate_bucket_counts": candidate_bucket_counts,
+                    "selected_bucket_counts": selected_bucket_counts,
+                    "selected_sources": [
+                        {
+                            "document_id": source.document_id,
+                            "chunk_id": source.chunk_id,
+                            "document_type": source.source_type,
+                            "score": source.reranker_score,
+                        }
+                        for source in sources
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+        )
+        return sources
 
     @staticmethod
     def _include_public_supplement(
@@ -639,7 +873,7 @@ class PgvectorRetriever:
             request.context.effective_document_ids()
             and request.access_scope.allow_company
             and document_ids is None
-            and intent == "maintenance_guide"
+            and intent in {"maintenance_guide", "component_info"}
         )
 
     def _rerank(
@@ -700,7 +934,7 @@ class PgvectorRetriever:
             combined = f"{metadata_text} {content}".casefold()
             row_document_id = str(row["document_id"])
             document_scope = str(row["document_scope"] or "").casefold()
-            source_type = str(row["source_type"] or "").casefold()
+            source_type = canonical_document_type(str(row["source_type"] or ""))
             if (
                 intent == "maintenance_guide"
                 and selected_documents_match_topic_phrase
@@ -734,43 +968,62 @@ class PgvectorRetriever:
             retrieval_score = max(0.0, similarity) * 0.7 + keyword * 0.3
             reranker_score = retrieval_score * 0.9 + metadata_score * 0.1
             if intent == "maintenance_guide":
-                if source_type in {
-                    "manual",
-                    "equipment_manual",
-                    "component_manual",
-                    "work_standard",
-                }:
+                if source_type in MANUAL_DOCUMENT_TYPES:
                     reranker_score += 0.08
-                elif source_type in {"public_guide", "public_incident", "regulation"}:
+                elif source_type in {
+                    "company_policy",
+                    "public_law",
+                    "public_guide",
+                }:
                     reranker_score += 0.03
+                elif source_type == "public_incident":
+                    reranker_score += 0.01
                 reranker_score += action_score * 0.12 + safety_score * 0.04
                 if query_action_terms and action_score == 0.0 and document_scope == "public":
                     reranker_score = max(0.0, reranker_score - 0.06)
+                row_action_terms = action_terms(combined)
+                if (
+                    query_action_terms
+                    and row_action_terms
+                    and not set(query_action_terms).intersection(row_action_terms)
+                ):
+                    continue
             elif intent == "component_info":
-                if source_type in {
-                    "manual",
-                    "equipment_manual",
-                    "component_manual",
-                    "public_guide",
-                }:
+                if source_type == "component_manual":
+                    reranker_score += 0.08
+                elif source_type == "equipment_manual":
                     reranker_score += 0.05
-                elif source_type in {"public_incident", "incident"}:
-                    reranker_score = max(0.0, reranker_score - 0.03)
+                elif source_type == "public_guide":
+                    reranker_score += 0.02
+                elif source_type == "public_incident":
+                    continue
+            row["source_type"] = source_type
             ranked.append((reranker_score, row, keyword, retrieval_score))
 
         ranked.sort(key=lambda item: (-item[0], item[1]["chunk_id"]))
         if intent == "document_qa":
             ranked = _diversify_document_ranked(ranked)
         per_document: dict[str, int] = {}
+        per_bucket: dict[str, int] = {}
         sources: list[ChatSource] = []
         max_chunks_per_document = self.settings.max_chunks_per_document
         if intent == "document_qa":
-            max_chunks_per_document = max(max_chunks_per_document, min(4, self.settings.top_k))
+            max_chunks_per_document = max(
+                max_chunks_per_document,
+                min(6, self.settings.document_top_k),
+            )
+        result_limit = self._result_limit(intent)
+        bucket_quotas = self._bucket_quotas(intent)
         for reranker_score, row, keyword, retrieval_score in ranked:
             document_id = row["document_id"]
             if per_document.get(document_id, 0) >= max_chunks_per_document:
                 continue
+            bucket = self._source_bucket(str(row["source_type"]))
+            quota = bucket_quotas.get(bucket)
+            if quota is not None and per_bucket.get(bucket, 0) >= quota:
+                continue
             per_document[document_id] = per_document.get(document_id, 0) + 1
+            per_bucket[bucket] = per_bucket.get(bucket, 0) + 1
             sources.append(
                 ChatSource(
                     document_id=document_id,
@@ -794,6 +1047,38 @@ class PgvectorRetriever:
                     reranker_score=max(0.0, reranker_score),
                 )
             )
-            if len(sources) >= self.settings.top_k:
+            if len(sources) >= result_limit:
                 break
         return sources
+
+    def _result_limit(self, intent: str | None) -> int:
+        if intent == "document_qa":
+            return max(1, self.settings.document_top_k)
+        if intent == "component_info":
+            return max(1, self.settings.component_top_k)
+        if intent == "maintenance_guide":
+            return max(1, self.settings.maintenance_top_k)
+        return max(1, self.settings.top_k)
+
+    def _bucket_quotas(self, intent: str | None) -> dict[str, int]:
+        if intent != "maintenance_guide":
+            return {}
+        return {
+            "manual": max(0, self.settings.maintenance_manual_quota),
+            "company_policy": max(
+                0, self.settings.maintenance_company_policy_quota
+            ),
+            "public_law": max(0, self.settings.maintenance_law_quota),
+            "public_guide": max(0, self.settings.maintenance_guide_quota),
+            "public_incident": max(
+                0, self.settings.maintenance_incident_quota
+            ),
+            "public_media": 0,
+        }
+
+    @staticmethod
+    def _source_bucket(source_type: str) -> str:
+        canonical = canonical_document_type(source_type)
+        if canonical in MANUAL_DOCUMENT_TYPES:
+            return "manual"
+        return canonical

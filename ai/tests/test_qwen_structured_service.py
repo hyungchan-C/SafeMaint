@@ -78,7 +78,7 @@ def test_qwen_component_answer_has_no_checklist(monkeypatch) -> None:
     assert response.checklist_items == []
 
 
-def test_qwen_empty_component_sections_are_enriched_from_sources(monkeypatch) -> None:
+def test_qwen_empty_component_sections_are_not_backfilled(monkeypatch) -> None:
     engine = QwenEngine(Settings())
     payload = {
         "answer": "라이트 커튼은 안전 장치입니다.",
@@ -121,10 +121,12 @@ def test_qwen_empty_component_sections_are_enriched_from_sources(monkeypatch) ->
     )
 
     assert response.structured_answer is not None
-    assert "라이트 커튼" in response.structured_answer.one_line_description
-    assert response.structured_answer.main_roles
-    assert response.structured_answer.usage_locations
-    assert response.structured_answer.precautions
+    assert response.structured_answer.one_line_description == (
+        "PC 설정 툴을 통해 설정 및 변경이 가능한 안전 장치입니다."
+    )
+    assert response.structured_answer.main_roles == []
+    assert response.structured_answer.usage_locations == []
+    assert response.structured_answer.precautions == []
 
 
 def test_qwen_malformed_json_returns_legacy_fallback_without_exception(monkeypatch) -> None:
@@ -392,7 +394,9 @@ def test_qwen_maintenance_payload_is_normalized_without_repair(monkeypatch) -> N
         "정확한 모델명",
         "현장 작업표준",
     ]
-    assert response.checklist_items == []
+    assert len(response.checklist_items) == 1
+    assert response.checklist_items[0].content == "Qwen이 만든 체크리스트"
+    assert response.checklist_items[0].evidence_chunk_ids == ["manual-chunk-1"]
 
 
 def test_qwen_repeated_invalid_json_returns_safe_structured_fallback(monkeypatch) -> None:
@@ -422,10 +426,13 @@ def test_qwen_repeated_invalid_json_returns_safe_structured_fallback(monkeypatch
     assert response.structured_answer is not None
     assert response.structured_answer.answer_type == "maintenance_guide"
     assert response.structured_answer.manual_steps == []
-    assert response.used_source_ids == ["manual-chunk-1"]
+    assert response.checklist_items == []
+    assert response.used_source_ids == []
 
 
-def test_qwen_fallback_checklist_uses_actionable_source_text(monkeypatch) -> None:
+def test_qwen_fallback_does_not_generate_checklist_from_incident_keywords(
+    monkeypatch,
+) -> None:
     engine = QwenEngine(Settings())
     monkeypatch.setattr(
         engine,
@@ -452,9 +459,67 @@ def test_qwen_fallback_checklist_uses_actionable_source_text(monkeypatch) -> Non
         )
     )
 
-    assert response.checklist_items
-    assert any("운전정지" in item.content for item in response.checklist_items)
-    assert all("근거를 원문에서 확인" not in item.content for item in response.checklist_items)
+    assert response.checklist_items == []
+
+
+def test_qwen_incident_only_checklist_is_rejected(monkeypatch) -> None:
+    engine = QwenEngine(Settings())
+    payload = {
+        "answer": "사고사례 원문을 확인하세요.",
+        "answer_type": "maintenance_guide",
+        "structured_answer": {
+            "answer_type": "maintenance_guide",
+            "summary": {
+                "status": "근거 부족",
+                "risk_level": "판단 불가",
+                "risk_basis": [],
+                "core_warning": "매뉴얼 작업 절차는 확인되지 않았습니다.",
+            },
+            "pre_checks": [],
+            "hazards": [],
+            "manual_steps": [],
+            "stop_conditions": [],
+            "related_regulations_and_incidents": [
+                {
+                    "content": "사고사례 원문",
+                    "evidence_chunk_ids": ["incident-1"],
+                }
+            ],
+            "evidence_chunk_ids": ["incident-1"],
+            "conflicts": [],
+            "additional_information_needed": [],
+        },
+        "checklist_items": [
+            {
+                "content": "사고사례를 작업 절차로 변환한 항목",
+                "evidence_chunk_ids": ["incident-1"],
+            }
+        ],
+        "used_source_ids": ["incident-1"],
+    }
+    monkeypatch.setattr(
+        engine,
+        "_generate",
+        lambda *args, **kwargs: json.dumps(payload, ensure_ascii=False),
+    )
+
+    response = engine._answer_sync(
+        AnswerRequest(
+            question="설비 내부 이물질을 제거하려고 해.",
+            answer_type="maintenance_guide",
+            sources=[
+                ChatSource(
+                    document_id="doc-1",
+                    chunk_id="incident-1",
+                    title="이물질 제거 중 협착 사고",
+                    source_type="public_incident",
+                    excerpt="운전 중 설비 내부 이물질을 제거하다가 협착되었다.",
+                )
+            ],
+        )
+    )
+
+    assert response.checklist_items == []
 
 
 def test_qwen_answer_route_returns_safe_fallback_on_unhandled_exception(
@@ -488,4 +553,5 @@ def test_qwen_answer_route_returns_safe_fallback_on_unhandled_exception(
     assert response.answer_type == "maintenance_guide"
     assert response.structured_answer is not None
     assert response.structured_answer.answer_type == "maintenance_guide"
-    assert response.used_source_ids == ["manual-chunk-1"]
+    assert response.checklist_items == []
+    assert response.used_source_ids == []

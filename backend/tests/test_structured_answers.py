@@ -51,7 +51,7 @@ def test_component_fallback_never_contains_maintenance_steps() -> None:
     assert "manual_steps" not in details.model_dump()
 
 
-def test_public_maintenance_fallback_populates_grounded_sections() -> None:
+def test_public_maintenance_fallback_exposes_reference_without_inventing_tbm() -> None:
     source = ChatSource(
         document_id="doc-public",
         chunk_id="public-1",
@@ -71,13 +71,13 @@ def test_public_maintenance_fallback_populates_grounded_sections() -> None:
 
     assert details is not None
     assert details.answer_type == "maintenance_guide"
-    assert details.pre_checks
-    assert details.hazards
+    assert details.pre_checks == []
+    assert details.hazards == []
     assert details.manual_steps == []
     assert details.related_regulations_and_incidents
-    assert details.summary.risk_basis
-    assert checklist
-    assert checklist[0].evidence_chunk_ids == ["public-1"]
+    assert details.summary.risk_level == "판단 불가"
+    assert details.summary.risk_basis == []
+    assert checklist == []
     assert "[자료유형]" not in details.related_regulations_and_incidents[0].content
 
 
@@ -103,7 +103,7 @@ def test_public_reference_items_do_not_expose_raw_dataset_prefix() -> None:
     assert "원문" not in details.related_regulations_and_incidents[0].content
 
 
-def test_public_incident_fallback_summarizes_prevention_actions() -> None:
+def test_public_incident_fallback_does_not_convert_incident_text_into_procedure() -> None:
     source = ChatSource(
         document_id="doc-incident",
         chunk_id="incident-1",
@@ -124,10 +124,11 @@ def test_public_incident_fallback_summarizes_prevention_actions() -> None:
     assert isinstance(details, MaintenanceAnswerDetails)
     dumped = json.dumps(details.model_dump(mode="json"), ensure_ascii=False)
     assert "【대책】" not in dumped
-    assert any("운전정지" in item.content for item in details.pre_checks)
-    assert any("비상정지" in item.content for item in details.pre_checks)
-    assert any("방호장치" in item.content for item in details.stop_conditions)
-    assert any("운전정지" in item.content for item in checklist)
+    assert details.pre_checks == []
+    assert details.hazards == []
+    assert details.stop_conditions == []
+    assert details.related_regulations_and_incidents
+    assert checklist == []
 
 
 def test_maintenance_fallback_does_not_invent_press_for_light_curtain_source() -> None:
@@ -152,11 +153,10 @@ def test_maintenance_fallback_does_not_invent_press_for_light_curtain_source() -
     dumped = json.dumps(details.model_dump(mode="json"), ensure_ascii=False)
     assert "프레스" not in dumped
     assert "청소 작업" not in dumped
-    assert details.pre_checks
-    assert details.hazards
-    assert any("기능 설정" in item.content for item in details.pre_checks)
-    assert any(hazard.name == "설정 오류" for hazard in details.hazards)
-    assert any("정상 동작" in item.content for item in details.manual_steps)
+    assert details.pre_checks == []
+    assert details.hazards == []
+    assert details.manual_steps == []
+    assert details.summary.risk_level == "판단 불가"
 
 
 def test_document_fallback_populates_related_fields_from_evidence() -> None:
@@ -176,10 +176,11 @@ def test_document_fallback_populates_related_fields_from_evidence() -> None:
     details = source_based_fallback("document_qa", [source])
 
     assert isinstance(details, DocumentAnswerDetails)
-    assert "라이트 커튼" in details.related_equipment
-    assert "세이프티 컴포넌트" in details.related_components
-    assert "광축 정렬 확인" in details.supported_tasks
-    assert "기능 설정 확인" in details.supported_tasks
+    assert details.main_contents
+    assert details.main_contents[0].evidence_chunk_ids == ["light-1"]
+    assert details.related_equipment == []
+    assert details.related_components == []
+    assert details.supported_tasks == []
 
 
 def test_component_fallback_populates_sections_from_evidence() -> None:
@@ -200,13 +201,13 @@ def test_component_fallback_populates_sections_from_evidence() -> None:
     details = source_based_fallback("component_info", [source])
 
     assert isinstance(details, ComponentAnswerDetails)
-    assert "라이트 커튼" in details.one_line_description
     assert details.main_roles
-    assert details.usage_locations
-    assert details.precautions
+    assert details.main_roles[0].evidence_chunk_ids == ["light-1"]
+    assert details.usage_locations == []
+    assert details.precautions == []
 
 
-def test_empty_qwen_component_sections_are_enriched_from_fallback() -> None:
+def test_empty_qwen_component_sections_are_not_rule_backfilled() -> None:
     fallback = source_based_fallback(
         "component_info",
         [
@@ -239,13 +240,13 @@ def test_empty_qwen_component_sections_are_enriched_from_fallback() -> None:
     )
 
     assert isinstance(enriched, ComponentAnswerDetails)
-    assert "라이트 커튼" in enriched.one_line_description
-    assert enriched.main_roles
-    assert enriched.usage_locations
-    assert enriched.precautions
+    assert enriched.one_line_description == qwen_details.one_line_description
+    assert enriched.main_roles == []
+    assert enriched.usage_locations == []
+    assert enriched.precautions == []
 
 
-def test_empty_qwen_document_sections_are_enriched_from_fallback() -> None:
+def test_empty_qwen_document_sections_are_not_rule_backfilled() -> None:
     fallback = source_based_fallback(
         "document_qa",
         [
@@ -281,12 +282,13 @@ def test_empty_qwen_document_sections_are_enriched_from_fallback() -> None:
     )
 
     assert isinstance(enriched, DocumentAnswerDetails)
-    assert "라이트 커튼" in enriched.related_equipment
-    assert "세이프티 컴포넌트" in enriched.related_components
-    assert "설치" in enriched.supported_tasks
+    assert enriched.main_contents == qwen_details.main_contents
+    assert enriched.related_equipment == []
+    assert enriched.related_components == []
+    assert enriched.supported_tasks == []
 
 
-def test_unretrieved_source_reference_rejects_structured_answer() -> None:
+def test_unretrieved_source_reference_drops_only_the_invalid_item() -> None:
     details = MaintenanceAnswerDetails(
         summary=MaintenanceSummary(
             status="안전관리자 확인 필요",
@@ -302,11 +304,14 @@ def test_unretrieved_source_reference_rejects_structured_answer() -> None:
         ],
     )
 
-    assert validated_structured_answer(
+    validated = validated_structured_answer(
         details,
         expected_type="maintenance_guide",
         sources=[_source("manual-1", "component_manual")],
-    ) is None
+    )
+
+    assert isinstance(validated, MaintenanceAnswerDetails)
+    assert validated.pre_checks == []
 
 
 def test_manual_steps_require_manual_source() -> None:
@@ -340,7 +345,7 @@ def test_manual_steps_require_manual_source() -> None:
     assert validated.manual_steps == []
 
 
-def test_manual_steps_summarize_long_raw_excerpt_chunks() -> None:
+def test_manual_steps_preserve_qwen_text_without_rule_rewriting() -> None:
     details = MaintenanceAnswerDetails(
         summary=MaintenanceSummary(
             status="안전관리자 확인 필요",
@@ -373,8 +378,13 @@ def test_manual_steps_summarize_long_raw_excerpt_chunks() -> None:
 
     assert validated is not None
     assert [step.content for step in validated.manual_steps] == [
-        "작업 전 설치·점검·배선 관련 조건과 현장 상태를 확인합니다.",
-        "설치 전 광축 정렬 상태를 확인합니다."
+        (
+            "경고: 본 제품은 안전 관련 장치이며 설치, 배선, 점검, 유지보수, "
+            "주변 장치와의 연결 상태, 감지 영역, 안전거리, 현장 조건 등 여러 "
+            "조건을 모두 고려해야 합니다. 자세한 내용은 각 장의 설명과 표를 "
+            "참조하십시오. 임의 변경은 위험할 수 있습니다."
+        ),
+        "설치 전 광축 정렬 상태를 확인합니다.",
     ]
 
 
@@ -435,7 +445,7 @@ def test_evidence_backed_component_items_require_verified_sources() -> None:
     assert [item.content for item in validated.main_roles] == ["검증된 역할"]
 
 
-def test_long_raw_component_items_are_summarized_before_enrichment() -> None:
+def test_component_items_preserve_qwen_text_without_rule_rewriting() -> None:
     long_raw = (
         "PC 설정 툴을 사용하여 기능을 설정하거나 변경한 후에는 반드시 의도한 대로 "
         "동작하는지 확인하십시오. 제품이 의도한 대로 설정되지 않은 경우 인사사고 "
@@ -469,9 +479,60 @@ def test_long_raw_component_items_are_summarized_before_enrichment() -> None:
 
     assert validated is not None
     assert [item.content for item in validated.precautions] == [
-        "기능 설정 또는 변경 후 정상 동작 여부를 확인합니다. 구성 변경이나 부품 교체 후 필요한 설정·재전송 상태를 확인합니다.",
-        "기능 변경 후 정상 동작 여부를 확인합니다."
+        long_raw,
+        "기능 변경 후 정상 동작 여부를 확인합니다.",
     ]
+
+
+def test_company_policy_is_allowed_only_as_a_related_maintenance_reference() -> None:
+    details = MaintenanceAnswerDetails(
+        summary=MaintenanceSummary(
+            status="안전관리자 확인 필요",
+            risk_level="판단 불가",
+            risk_basis=[],
+            core_warning="작업 전 확인 필요",
+        ),
+        related_regulations_and_incidents=[
+            EvidenceBackedItem(
+                content="회사의 승인된 작업 기준",
+                evidence_chunk_ids=["policy-1"],
+            ),
+            EvidenceBackedItem(
+                content="매뉴얼 항목을 회사 규정으로 잘못 표시",
+                evidence_chunk_ids=["manual-1"],
+            ),
+        ],
+    )
+
+    validated = validated_structured_answer(
+        details,
+        expected_type="maintenance_guide",
+        sources=[
+            _source("policy-1", "company_policy"),
+            _source("manual-1", "component_manual"),
+        ],
+    )
+
+    assert isinstance(validated, MaintenanceAnswerDetails)
+    assert [
+        item.evidence_chunk_ids
+        for item in validated.related_regulations_and_incidents
+    ] == [["policy-1"]]
+
+
+def test_incident_source_cannot_create_tbm_checklist_item() -> None:
+    validated = validated_checklist_items(
+        [
+            ChatChecklistItem(
+                content="사고사례를 제조사 절차처럼 사용",
+                sequence=1,
+                evidence_chunk_ids=["incident-1"],
+            )
+        ],
+        sources=[_source("incident-1", "public_incident")],
+    )
+
+    assert validated == []
 
 
 def test_risk_level_falls_back_when_risk_basis_has_no_verified_source() -> None:

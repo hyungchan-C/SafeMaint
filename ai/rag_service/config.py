@@ -23,6 +23,12 @@ class Settings:
     model_cache_dir: str = getenv("RAG_MODEL_CACHE_DIR", "/models")
     device: str = getenv("RAG_DEVICE", "cpu")
     top_k: int = int(getenv("RAG_TOP_K", "5"))
+    document_top_k: int = int(getenv("RAG_DOCUMENT_TOP_K", "6"))
+    document_neighbor_window: int = int(
+        getenv("RAG_DOCUMENT_NEIGHBOR_WINDOW", "1")
+    )
+    component_top_k: int = int(getenv("RAG_COMPONENT_TOP_K", "5"))
+    maintenance_top_k: int = int(getenv("RAG_MAINTENANCE_TOP_K", "8"))
     candidate_k: int = int(getenv("RAG_CANDIDATE_K", "30"))
     max_chunks_per_document: int = int(
         getenv("RAG_MAX_CHUNKS_PER_DOCUMENT", "2")
@@ -30,6 +36,21 @@ class Settings:
     min_similarity: float = float(getenv("RAG_MIN_SIMILARITY", "0.25"))
     min_keyword_score: float = float(getenv("RAG_MIN_KEYWORD_SCORE", "0.08"))
     source_types: tuple[str, ...] | None = _optional_csv_env("RAG_SOURCE_TYPES")
+    maintenance_manual_quota: int = int(
+        getenv("RAG_MAINTENANCE_MANUAL_QUOTA", "4")
+    )
+    maintenance_company_policy_quota: int = int(
+        getenv("RAG_MAINTENANCE_COMPANY_POLICY_QUOTA", "2")
+    )
+    maintenance_law_quota: int = int(
+        getenv("RAG_MAINTENANCE_LAW_QUOTA", "2")
+    )
+    maintenance_guide_quota: int = int(
+        getenv("RAG_MAINTENANCE_GUIDE_QUOTA", "3")
+    )
+    maintenance_incident_quota: int = int(
+        getenv("RAG_MAINTENANCE_INCIDENT_QUOTA", "2")
+    )
     worker_poll_seconds: float = float(getenv("DOCUMENT_WORKER_POLL_SECONDS", "2"))
     worker_chunk_characters: int = int(
         getenv("DOCUMENT_WORKER_CHUNK_CHARACTERS", "1200")
