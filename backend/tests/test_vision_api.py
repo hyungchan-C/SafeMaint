@@ -6,12 +6,12 @@ from fastapi import HTTPException, UploadFile
 
 from app.api.routes.vision import (
     _catalog_id_for_match,
-    _can_access_document,
     _parse_document_ids,
     _read_upload,
 )
 from app.db.models import Document, User
 from app.schemas.chat import RetrievalAccessScope
+from app.services.document_access import can_access_document
 
 
 def _user() -> User:
@@ -40,8 +40,8 @@ def test_private_catalog_is_accessible_only_to_its_owner() -> None:
     document = _document(owner.id, access_level="private")
     scope = RetrievalAccessScope(allow_company=True, all_sites=True)
 
-    assert _can_access_document(document, owner, scope)
-    assert not _can_access_document(document, stranger, scope)
+    assert can_access_document(document, owner, scope)
+    assert not can_access_document(document, stranger, scope)
 
 
 def test_restricted_catalog_requires_global_or_assigned_site_access() -> None:
@@ -49,17 +49,17 @@ def test_restricted_catalog_requires_global_or_assigned_site_access() -> None:
     document = _document(uuid4())
     document.site_id = uuid4()
 
-    assert not _can_access_document(
+    assert not can_access_document(
         document,
         user,
         RetrievalAccessScope(allow_company=True, site_ids=[]),
     )
-    assert _can_access_document(
+    assert can_access_document(
         document,
         user,
         RetrievalAccessScope(allow_company=True, site_ids=[str(document.site_id)]),
     )
-    assert _can_access_document(
+    assert can_access_document(
         document,
         user,
         RetrievalAccessScope(allow_company=True, all_sites=True),

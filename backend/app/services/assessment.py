@@ -20,6 +20,8 @@ from app.repositories.assessment import AssessmentRepository
 from app.schemas.assessment import (
     AssessmentRequest,
     AssessmentResponse,
+    AssessmentSummaryResponse,
+    ChatChecklistSaveRequest,
     ChecklistItemResponse,
     ChecklistItemUpdateResponse,
     EvidenceItem,
@@ -132,6 +134,50 @@ class AssessmentService:
             raise RuntimeError("저장한 위험성평가를 다시 불러오지 못했습니다.")
         return self._to_response(persisted, narrowed_scope)
 
+    def create_from_chat_checklist(
+        self,
+        payload: ChatChecklistSaveRequest,
+        session: Session,
+        current_user: User,
+    ) -> AssessmentResponse:
+        """채팅 답변에 딸려 온 TBM 체크리스트를 규칙 엔진 재계산 없이 그대로 저장한다.
+
+        채팅(Qwen)과 위험성평가(RiskEngine)는 서로 다른 파이프라인이라, 여기서
+        `_build_preview()`(RiskEngine+검색)를 다시 돌리면 화면에 보이던 체크리스트와
+        다른 내용이 저장될 수 있다. 그래서 화면에 보이는 항목을 입력 그대로 신뢰하고
+        저장만 한다(근거/위험요인은 채팅 쪽 스키마가 달라 이번 범위에서는 비워 둠).
+        """
+        request = AssessmentRequest(
+            site_name=payload.site_name or "AI 상담",
+            equipment_name=payload.equipment_name or "AI 상담 기반 작업",
+            task_type=payload.task_type or "AI 상담 기반 작업",
+            description=payload.description,
+        )
+        response = AssessmentResponse(
+            assessment_id=str(uuid4()),
+            status="draft",
+            created_at=datetime.now(timezone.utc),
+            hazards=[],
+            tbm_checklist=payload.checklist_items,
+            checklist_items=[
+                ChecklistItemResponse(sequence=index, content=content)
+                for index, content in enumerate(payload.checklist_items, start=1)
+            ],
+            evidence=[],
+            evidence_status="not_connected",
+            disclaimer=DISCLAIMER,
+        )
+        repository = AssessmentRepository(session)
+        assessment = repository.create(
+            request,
+            response,
+            created_by_user_id=current_user.id,
+        )
+        persisted = repository.get_by_id(str(assessment.id))
+        if persisted is None:
+            raise RuntimeError("저장한 위험성평가를 다시 불러오지 못했습니다.")
+        return self._to_response(persisted, RetrievalAccessScope())
+
     def get_by_id(
         self,
         assessment_id: str,
@@ -147,6 +193,43 @@ class AssessmentService:
         ):
             return None
         return self._to_response(assessment, access_scope)
+
+    def list_assessments(
+        self,
+        session: Session,
+        current_user: User,
+        access_scope: RetrievalAccessScope,
+    ) -> list[AssessmentSummaryResponse]:
+        """`access_scope.all_sites`(admin/document_manager)가 있으면 전체를,
+        없으면 본인 것과 배정된 사업장 것만 요약해서 돌려준다."""
+
+        assessments = AssessmentRepository(session).list_assessments(
+            requester_user_id=current_user.id,
+            all_sites=access_scope.all_sites,
+            site_ids=access_scope.site_ids,
+        )
+        return [self._to_summary(assessment) for assessment in assessments]
+
+    @staticmethod
+    def _to_summary(assessment: Assessment) -> AssessmentSummaryResponse:
+        completed = sum(1 for item in assessment.checklist_items if item.is_completed)
+        return AssessmentSummaryResponse(
+            assessment_id=str(assessment.id),
+            status=assessment.status,
+            created_at=assessment.created_at,
+            created_by_user_id=assessment.created_by_user_id,
+            created_by_name=(
+                assessment.created_by_user.name
+                if assessment.created_by_user is not None
+                else None
+            ),
+            site_name=assessment.site_name,
+            equipment_name=assessment.equipment_name,
+            task_type=assessment.task_type,
+            description=assessment.description,
+            checklist_total=len(assessment.checklist_items),
+            checklist_completed=completed,
+        )
 
     def update_checklist_item(
         self,

@@ -15,6 +15,9 @@ type Props = {
   structuredAnswer?: StructuredAnswer | null;
   checklistItems: ChatChecklistItem[];
   sources: ChatSource[];
+  savedAssessmentId: string | null;
+  isSavingChecklist: boolean;
+  onSaveChecklist: (checkedIndices: number[]) => void;
 };
 
 export default function ChatAnswerContent({
@@ -22,6 +25,9 @@ export default function ChatAnswerContent({
   structuredAnswer,
   checklistItems,
   sources,
+  savedAssessmentId,
+  isSavingChecklist,
+  onSaveChecklist,
 }: Props) {
   return (
     <div className="chat-answer-content">
@@ -42,6 +48,9 @@ export default function ChatAnswerContent({
             answer={structuredAnswer}
             checklistItems={checklistItems}
             sources={sources}
+            savedAssessmentId={savedAssessmentId}
+            isSavingChecklist={isSavingChecklist}
+            onSaveChecklist={onSaveChecklist}
           />
         </section>
       )}

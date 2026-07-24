@@ -5,19 +5,29 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import DocumentReviewPanel from "@/components/DocumentReviewPanel";
 import ChatSources from "@/components/ChatSources";
 import ChatAnswerContent from "@/components/ChatAnswerContent";
+import DocumentViewerModal, { type DocumentViewerTarget } from "@/components/DocumentViewerModal";
 import InterfaceIcon from "@/components/InterfaceIcon";
 import ManualManager from "@/components/ManualManager";
 import TbmChecklist from "@/components/TbmChecklist";
 import WorkspaceHeader from "@/components/WorkspaceHeader";
 import type {
   AssessmentResponse,
+  AssessmentSummaryResponse,
   ChecklistItemResponse,
   ChecklistItemUpdateResponse,
 } from "@/types/assessment";
-import type { CatalogCandidate, ChatMessage, ChatResponse } from "@/types/chat";
+import type {
+  CatalogCandidate,
+  ChatChecklistItem,
+  ChatMessage,
+  ChatResponse,
+  ChatSource,
+  EvidenceBackedItem,
+  StructuredAnswer,
+} from "@/types/chat";
 import type { UserDocumentSummary } from "@/types/documents";
-import type { GpsCheckResponse, VirtualEquipment } from "@/types/gps";
-import { getApiBaseUrl } from "@/lib/api";
+import type { GpsCheckResponse, NearbyEquipmentItem, VirtualEquipment } from "@/types/gps";
+import { getAccessToken, getApiBaseUrl } from "@/lib/api";
 
 type PageMode = "login" | "workspace" | "history";
 type FontSize = "small" | "medium" | "large";
@@ -86,6 +96,39 @@ function metersOffsetFromCenter(center: { lat: number; lon: number }, lat: numbe
   };
 }
 
+// 지도 박스는 overflow: hidden이라, 표시 범위 밖의 오프셋은 그냥 안 보이게 잘린다.
+// 가장자리 패딩 안쪽으로 들어오는지를 기준으로 "박스 밖"인지 판단한다.
+function isOffsetOffMap(offset: { x: number; y: number }) {
+  return (
+    Math.abs(offset.x) * GPS_MAP_SCALE_PX_PER_M > GPS_MAP_SIZE_PX / 2 - GPS_MAP_MARKER_EDGE_PADDING_PX ||
+    Math.abs(offset.y) * GPS_MAP_SCALE_PX_PER_M > GPS_MAP_SIZE_PX / 2 - GPS_MAP_MARKER_EDGE_PADDING_PX
+  );
+}
+
+// 실제 GPS가 아직 없을 때 사용하는 기본 "현재 위치"(테스트 좌표의 시작값이자, 지도에
+// 보여줄 기준 앵커). 실제 위치가 처음 잡히면 이 앵커는 그 실제 위치로 대체된다
+// (watchPosition의 최초 fix 처리 참고).
+const GPS_DEFAULT_ANCHOR = { latitude: 37.5665, longitude: 126.978 };
+// 설비 배치(A공장 설비 3대: CV-203/PNL-01/WLD-05, 반경 30m 안에 서로 모여 있음)는 항상
+// 이 앵커(현재 위치)로부터 아래 간격만큼 떨어진 곳에 놓인다. 모든 설비 반경(30m) 밖이면서
+// (최소 약 45m) 동시에 지도가 실제로 보여주는 범위(약 70m, GPS_MAP_SIZE_PX/
+// GPS_MAP_SCALE_PX_PER_M 기준) 안(최대 약 53m)에 들어오도록 골랐다. 그래야 설비가 현재
+// 위치(실제 위치 포함) 바로 앞이 아니라 "조금 떨어진 곳"에 있으면서도 지도에 보이고,
+// 위경도 값을 옮기거나 실제로 걸어가야("이동해야") 반경 안으로 들어온다.
+const EQUIPMENT_ORIGIN_GAP_EAST_M = -35;
+const EQUIPMENT_ORIGIN_GAP_NORTH_M = 28;
+
+function offsetPointByMeters(origin: { latitude: number; longitude: number }, eastM: number, northM: number) {
+  return {
+    latitude: origin.latitude + northM / METERS_PER_DEG_LAT,
+    longitude: origin.longitude + eastM / metersPerDegLon(origin.latitude),
+  };
+}
+
+function deriveEquipmentOrigin(anchor: { latitude: number; longitude: number }) {
+  return offsetPointByMeters(anchor, EQUIPMENT_ORIGIN_GAP_EAST_M, EQUIPMENT_ORIGIN_GAP_NORTH_M);
+}
+
 // 지도 박스는 overflow: hidden이라, 표시 범위(기준점에서 반경 약 80m) 밖의 좌표는
 // 그냥 안 보이게 잘려서 "마커가 사라진" 것처럼 보인다. 박스 가장자리에 붙여서라도
 // 항상 어느 방향에 있는지는 보이도록 좌표를 박스 안쪽으로 눌러 담는다.
@@ -134,8 +177,47 @@ function removeStorage(key: string) {
   }
 }
 
-function getAccessToken(): string {
-  return readStorage<StoredSession | null>(STORAGE_KEYS.session, null)?.accessToken ?? "";
+// Qwen이 만들어 주는 평문 answer는 화면(StructuredChatAnswer)에 표시되는 정제된 구조화
+// 답변과 별개로 생성돼서, 근거 원문을 그대로 옮겨 놓은 것처럼 읽힐 때가 있다. TTS가
+// "화면에 보이는 것과 다른 것"을 읽는 문제를 막기 위해, structuredAnswer가 있으면 그
+// 화면 렌더링과 같은 내용으로 읽을 텍스트를 직접 구성하고, 없을 때만 answer 원문을 쓴다.
+function buildSpeechText(message: { text: string; structuredAnswer?: StructuredAnswer | null }): string {
+  const answer = message.structuredAnswer;
+  if (!answer) return message.text;
+
+  const contents = (items: EvidenceBackedItem[] | undefined) => (items ?? []).map((item) => item.content);
+
+  switch (answer.answer_type) {
+    case "clarification_required":
+      return [answer.question, ...answer.options].filter(Boolean).join(". ");
+    case "no_evidence":
+      return [answer.message, answer.work_safety_notice].filter(Boolean).join(" ");
+    case "document_qa":
+      return [
+        ...contents(answer.main_contents),
+        ...answer.related_equipment,
+        ...answer.related_components,
+        ...answer.supported_tasks,
+      ].filter(Boolean).join(". ");
+    case "component_info":
+      return [
+        answer.one_line_description,
+        ...contents(answer.main_roles),
+        ...contents(answer.usage_locations),
+        ...contents(answer.precautions),
+      ].filter(Boolean).join(". ");
+    case "maintenance_guide":
+      return [
+        `${answer.summary.status}. 위험도 ${answer.summary.risk_level}.`,
+        answer.summary.core_warning,
+        ...contents(answer.pre_checks),
+        ...answer.hazards.map((hazard) => `${hazard.name}: ${hazard.content}`),
+        ...contents(answer.manual_steps),
+        ...contents(answer.stop_conditions),
+      ].filter(Boolean).join(". ");
+    default:
+      return message.text;
+  }
 }
 
 async function apiErrorMessage(response: Response, fallback: string): Promise<string> {
@@ -391,6 +473,136 @@ function HistoryScreen({ username, onBack }: { username: string; onBack: () => v
   );
 }
 
+// 페이지 전환(page state)으로 보여주면 그 사이 WorkspaceScreen 전체가 언마운트돼
+// 진행 중이던 채팅(messages)이 사라진다("체크리스트 확인하고 나면 채팅 없어지더라").
+// 그래서 별도 화면이 아니라 워크스페이스 안의 접이식 패널로 두고, <details>는 접어도
+// 안의 컴포넌트가 언마운트되지 않으므로 채팅 상태가 그대로 유지된다.
+function AssessmentsPanel() {
+  const [items, setItems] = useState<AssessmentSummaryResponse[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<AssessmentResponse | null>(null);
+  const [isLoadingDetail, setIsLoadingDetail] = useState(false);
+
+  // 이 패널은 (채팅이 사라지는 버그를 막기 위해) 워크스페이스 화면 안에 계속
+  // 마운트돼 있어서, 마운트 시 한 번만 불러오면 그 이후 채팅/GPS에서 새로 저장한
+  // 체크리스트가 목록에 반영되지 않는다. 그래서 "새로고침" 버튼으로 다시 불러올 수
+  // 있게 fetch 로직을 재사용 가능한 함수로 뺀다.
+  async function loadItems() {
+    setIsLoading(true);
+    setError("");
+    try {
+      const token = getAccessToken();
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/assessments`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!response.ok) throw new Error(await apiErrorMessage(response, "목록을 불러오지 못했습니다."));
+      setItems(await response.json() as AssessmentSummaryResponse[]);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "목록을 불러오지 못했습니다.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadItems();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function toggleExpand(assessmentId: string) {
+    if (expandedId === assessmentId) {
+      setExpandedId(null);
+      setDetail(null);
+      return;
+    }
+    setExpandedId(assessmentId);
+    setDetail(null);
+    setIsLoadingDetail(true);
+    try {
+      const token = getAccessToken();
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/assessments/${assessmentId}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!response.ok) throw new Error(await apiErrorMessage(response, "상세 내용을 불러오지 못했습니다."));
+      setDetail(await response.json() as AssessmentResponse);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "상세 내용을 불러오지 못했습니다.");
+    } finally {
+      setIsLoadingDetail(false);
+    }
+  }
+
+  function renderCard(item: AssessmentSummaryResponse) {
+    return (
+      <article className="history-card assessment-card" key={item.assessment_id}>
+        <div><strong>{item.equipment_name} · {item.task_type}</strong><span>{new Date(item.created_at).toLocaleString()}</span></div>
+        <p>{item.description}</p>
+        <div className="assessment-card-meta">
+          <span className={`status-pill ${item.checklist_total > 0 && item.checklist_completed === item.checklist_total ? "complete" : "incomplete"}`}>
+            {item.checklist_completed}/{item.checklist_total} 완료
+          </span>
+          {item.created_by_name && <span className="panel-tag muted">작성자: {item.created_by_name}</span>}
+          <button type="button" className="secondary-button compact" onClick={() => void toggleExpand(item.assessment_id)}>
+            {expandedId === item.assessment_id ? "접기" : "체크리스트 보기"}
+          </button>
+        </div>
+        {expandedId === item.assessment_id && (
+          isLoadingDetail ? <p className="muted-copy">불러오는 중...</p> : detail && (
+            <div className="chat-checklist-items">
+              {/* 조회 전용 패널이라 체크박스는 항상 비활성화한다. 다른 사람(특히
+                  admin이 열람하는 남의 기록)의 완료 상태를 여기서 실수로 바꾸지
+                  않도록, 체크 상태를 바꾸는 액션은 이 패널에 두지 않는다. */}
+              {detail.checklist_items.map((checklistItem) => (
+                <label className={checklistItem.is_completed ? "checked" : ""} key={checklistItem.id ?? checklistItem.sequence}>
+                  <input type="checkbox" checked={checklistItem.is_completed} disabled readOnly />
+                  <span>{checklistItem.sequence}. {checklistItem.content}</span>
+                </label>
+              ))}
+            </div>
+          )
+        )}
+      </article>
+    );
+  }
+
+  // GPS 근접 안내(정기 순찰 점검)와 채팅 상담 체크리스트는 근거·목적이 서로 달라서
+  // (사용자 요청: "정기 순찰 점검이면 분리해서 따로 모아서 표시") task_type 기준으로
+  // 나눠서 보여준다.
+  const patrolItems = items.filter((item) => item.task_type === "정기 순찰 점검");
+  const chatItems = items.filter((item) => item.task_type !== "정기 순찰 점검");
+
+  return (
+    <div className="assessment-groups">
+      <div className="assessment-groups-toolbar">
+        <button type="button" className="secondary-button compact" onClick={() => void loadItems()} disabled={isLoading}>
+          {isLoading ? "불러오는 중..." : "새로고침"}
+        </button>
+      </div>
+      {error && <p className="error-message">{error}</p>}
+      {!isLoading && items.length === 0 && (
+        <p className="muted-copy">
+          저장된 위험성평가가 없습니다. 채팅 답변의 TBM 체크리스트나 GPS 근접 안내의 체크리스트에서
+          &quot;이 체크리스트 저장&quot;을 누르면 여기에 표시됩니다.
+        </p>
+      )}
+      {patrolItems.length > 0 && (
+        <div className="assessment-group">
+          <h3>정기 순찰 점검 (GPS 근접 안내)</h3>
+          <div className="history-list">{patrolItems.map(renderCard)}</div>
+        </div>
+      )}
+      {chatItems.length > 0 && (
+        <div className="assessment-group">
+          <h3>채팅 상담 체크리스트</h3>
+          <div className="history-list">{chatItems.map(renderCard)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WorkspaceScreen({
   username,
   displayName,
@@ -402,6 +614,14 @@ function WorkspaceScreen({
   onHistory: () => void;
   onLogout: () => void;
 }) {
+  const assessmentsDrawerRef = useRef<HTMLDetailsElement>(null);
+  const [assessmentsOpenCount, setAssessmentsOpenCount] = useState(0);
+  function openAssessmentsDrawer() {
+    const drawer = assessmentsDrawerRef.current;
+    if (!drawer) return;
+    drawer.open = true;
+    drawer.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
   const [volume, setVolume] = useState(70);
   const [fontSize, setFontSize] = useState<FontSize>("medium");
   const [autoSpeak, setAutoSpeak] = useState(false);
@@ -415,6 +635,7 @@ function WorkspaceScreen({
   const [visionStatus, setVisionStatus] = useState("");
   const [visionElapsedMs, setVisionElapsedMs] = useState<number | null>(null);
   const [catalogCandidates, setCatalogCandidates] = useState<CatalogCandidate[]>([]);
+  const [documentViewerTarget, setDocumentViewerTarget] = useState<DocumentViewerTarget | null>(null);
   const [visualCategories, setVisualCategories] = useState<string[]>([]);
   const [visualFeatures, setVisualFeatures] = useState<string[]>([]);
   const [ppeChecks, setPpeChecks] = useState<Record<string, boolean>>({});
@@ -424,14 +645,22 @@ function WorkspaceScreen({
   const [calibratedEquipment, setCalibratedEquipment] = useState<VirtualEquipment[]>([]);
   const [gpsResult, setGpsResult] = useState<GpsCheckResponse | null>(null);
   const [isGpsChecking, setIsGpsChecking] = useState(false);
+  // 설비별(equipment_code 기준) 순찰 체크리스트 상태. gpsResult는 위치가 바뀔 때마다
+  // 통째로 새로 오므로, 이미 저장한 위험성평가 id는 별도로(설비 코드 기준) 계속 들고
+  // 있어야 재저장(변경사항 저장)이 새 assessment를 또 만들지 않고 이어서 갱신된다.
+  const [gpsChecklistChecked, setGpsChecklistChecked] = useState<Record<string, Set<number>>>({});
+  const [gpsSavedChecklists, setGpsSavedChecklists] = useState<
+    Record<string, { assessmentId: string; items: { id: string | null; is_completed: boolean }[] }>
+  >({});
+  const [savingGpsEquipmentCode, setSavingGpsEquipmentCode] = useState<string | null>(null);
   const [gpsSource, setGpsSource] = useState<"default" | "real">("default");
   const [gpsPermissionDenied, setGpsPermissionDenied] = useState(false);
-  const [manualLatitude, setManualLatitude] = useState("37.5665");
-  const [manualLongitude, setManualLongitude] = useState("126.9780");
+  const [manualLatitude, setManualLatitude] = useState(GPS_DEFAULT_ANCHOR.latitude.toFixed(6));
+  const [manualLongitude, setManualLongitude] = useState(GPS_DEFAULT_ANCHOR.longitude.toFixed(6));
   const gpsWatchIdRef = useRef<number | null>(null);
   const gpsOriginRef = useRef<{ latitude: number; longitude: number } | null>(null);
-  const gpsOriginLockedRef = useRef(false);
   const gpsManualOverrideRef = useRef(false);
+  const hasPromotedRealOriginRef = useRef(false);
   const latestRealPositionRef = useRef<{ latitude: number; longitude: number } | null>(null);
   const [hasRealFix, setHasRealFix] = useState(false);
   const calibratedRequestIdRef = useRef(0);
@@ -443,6 +672,7 @@ function WorkspaceScreen({
   const [savedAssessmentId, setSavedAssessmentId] = useState<string | null>(null);
   const [isSavingAssessment, setIsSavingAssessment] = useState(false);
   const [pendingChecklistItemIds, setPendingChecklistItemIds] = useState<Set<string>>(new Set());
+  const [savingChecklistIndex, setSavingChecklistIndex] = useState<number | null>(null);
   const [checklistError, setChecklistError] = useState("");
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [isVisionLoading, setIsVisionLoading] = useState(false);
@@ -582,10 +812,17 @@ function WorkspaceScreen({
   }, [autoSpeak]);
 
   useEffect(() => {
-    // 실제 GPS 권한/응답을 기다리지 않고, 기본 좌표로 즉시 한 번 확인해 화면에
-    // "자동으로 위치가 잡혀 있는" 상태를 바로 보여준다. 실제 위치 추적이 성공하면
-    // 아래 효과가 이어서 이 값을 진짜 위치로 갱신하고, 화면에 어느 쪽인지 표시한다.
-    recalibrateManualLocation(false);
+    // 실제 GPS 응답을 기다리지 않고, 기본 앵커(GPS_DEFAULT_ANCHOR)를 "현재 위치"로 즉시
+    // 보여준다. 설비 배치는 이 앵커에서 EQUIPMENT_ORIGIN_GAP만큼 떨어진 곳에 둬서,
+    // 시작하자마자 설비 앞에 서 있는 것처럼 보이지 않게 한다. 실제 위치가 처음 잡히면
+    // (watchPosition 참고) 이 앵커와 설비 배치 모두 그 실제 위치 기준으로 다시 잡힌다.
+    const origin = deriveEquipmentOrigin(GPS_DEFAULT_ANCHOR);
+    gpsOriginRef.current = origin;
+    setGpsOrigin(origin);
+    void loadCalibratedEquipment(origin);
+    setGpsSource("default");
+    setGpsLivePosition(GPS_DEFAULT_ANCHOR);
+    void checkLocation(GPS_DEFAULT_ANCHOR.latitude, GPS_DEFAULT_ANCHOR.longitude, origin);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -607,12 +844,18 @@ function WorkspaceScreen({
         // 필요 없이 이 값을 바로 보여줄 수 있다.
         latestRealPositionRef.current = current;
         setHasRealFix(true);
-        if (!gpsOriginLockedRef.current) {
-          // 실제 위치가 처음 잡히는 순간으로, "이 위치로 다시 보정"과 완전히 같은
-          // 경로(recalibrateTo)로 기준점을 실제 위치로 승격한다. 이후 코드는 이미
-          // 여기서 다 처리됐으므로 더 실행할 게 없다.
-          recalibrateTo(current, { lockOrigin: true, source: "real" });
-          return;
+        if (!hasPromotedRealOriginRef.current) {
+          // 실제 위치가 처음 잡히는 순간, 설비 배치를 기본 앵커 대신 이 실제 위치
+          // 기준(EQUIPMENT_ORIGIN_GAP만큼 떨어진 곳)으로 한 번만 옮긴다. 그래야 설비가
+          // 기본 좌표(예: 서울)처럼 실제 위치와 무관한 곳이 아니라 사용자 근처에 있으면서도,
+          // 정확히 발밑은 아니어서 여전히 "이동해야" 반경 안으로 들어온다. 이후 GPS가
+          // 흔들려도(오차로 위치가 조금씩 바뀌어도) 설비를 계속 따라 옮기지 않도록 한 번만
+          // 수행한다 — 다시 옮기고 싶으면 "이 위치로 다시 보정" 버튼을 쓴다.
+          hasPromotedRealOriginRef.current = true;
+          const origin = deriveEquipmentOrigin(current);
+          gpsOriginRef.current = origin;
+          setGpsOrigin(origin);
+          void loadCalibratedEquipment(origin);
         }
         // "이 위치로 확인"(수동 1회 확인) 직후에는, 뒤이어 들어오는 실제 위치
         // 업데이트가 화면에 띄워둔 수동 확인 결과를 조용히 덮어쓰지 않도록 건너뛴다.
@@ -667,6 +910,8 @@ function WorkspaceScreen({
     throw new Error("로그인 세션이 만료되었습니다. 다시 로그인해 주세요.");
   }
 
+  // 지도는 설비 배치의 기준점을 중앙에 고정한다. 설비는 항상 같은 자리에 그대로 있고,
+  // 현재 위치(핀)가 그 기준으로 다가오거나 멀어지는 것으로 보인다.
   const gpsMapCenter = gpsOrigin ? { lat: gpsOrigin.latitude, lon: gpsOrigin.longitude } : null;
   const gpsLiveOffset =
     gpsMapCenter && gpsLivePosition
@@ -675,10 +920,16 @@ function WorkspaceScreen({
   const gpsLiveDistanceM = gpsLiveOffset ? Math.round(Math.hypot(gpsLiveOffset.x, gpsLiveOffset.y)) : 0;
   // 지도 박스가 실제로 표시하는 반경(대략 GPS_MAP_SIZE_PX/2 ÷ GPS_MAP_SCALE_PX_PER_M, m
   // 단위)보다 멀면 마커가 박스 밖으로 밀려서 overflow:hidden에 잘려 안 보이게 된다.
-  const gpsLiveIsOffMap =
-    gpsLiveOffset !== null &&
-    (Math.abs(gpsLiveOffset.x) * GPS_MAP_SCALE_PX_PER_M > GPS_MAP_SIZE_PX / 2 - GPS_MAP_MARKER_EDGE_PADDING_PX ||
-      Math.abs(gpsLiveOffset.y) * GPS_MAP_SCALE_PX_PER_M > GPS_MAP_SIZE_PX / 2 - GPS_MAP_MARKER_EDGE_PADDING_PX);
+  const gpsLiveIsOffMap = gpsLiveOffset !== null && isOffsetOffMap(gpsLiveOffset);
+
+  function openDocumentViewer(source: ChatSource) {
+    setDocumentViewerTarget({
+      documentId: source.document_id,
+      documentVersionId: source.document_version_id,
+      page: source.page_start ?? source.page ?? null,
+      title: source.original_filename || source.title,
+    });
+  }
 
   function saveHistory(questionText: string, summary: string, riskLabel: string) {
     const current = readStorage<HistoryItem[]>(STORAGE_KEYS.history, []);
@@ -775,6 +1026,201 @@ function WorkspaceScreen({
     }
   }
 
+  // 채팅 답변에 딸려 온 체크리스트(로컬 미리보기)를 위험성평가로 DB에 저장한다.
+  // 화면에 보이는 항목 문구를 그대로 보내서, 별도 규칙 엔진이 다시 계산한 다른
+  // 체크리스트가 저장되지 않도록 한다(백엔드 `/assessments/from-chat-checklist` 참고).
+  // 채팅 체크리스트 저장/재저장. 처음 호출이면(savedAssessmentId 없음) 위험성평가를
+  // 새로 만들고, 이미 저장돼 있으면 그 assessment에 이어서 사용한다. 어느 쪽이든
+  // checkedIndices(배열 위치 기준)와 현재 항목의 완료 상태가 다른 것만 PATCH해서
+  // 반영하므로, 몇 번이고 다시 체크하고 다시 저장할 수 있다.
+  //
+  // 인덱스(배열 위치)로 대조하는 이유: 백엔드가 최초 저장 시 sequence를 1부터 다시
+  // 매기는데, 모델이 만든 원래 항목 목록에 걸러진 항목이 있으면 원래 sequence에
+  // 구멍이 생겨 저장 후 sequence와 어긋날 수 있다. 배열 위치는 항상 순서대로
+  // 전송·저장되므로 이런 어긋남이 생기지 않는다.
+  async function saveChatChecklist(messageIndex: number, message: ChatMessage, checkedIndices: number[]) {
+    const items = message.checklistItems ?? [];
+    if (!items.length || savingChecklistIndex !== null) return;
+    setSavingChecklistIndex(messageIndex);
+    setError("");
+    try {
+      const token = getAccessToken();
+      if (!token) throw new Error("체크리스트를 저장하려면 다시 로그인해 주세요.");
+
+      let assessmentId = message.savedAssessmentId ?? null;
+      let baseItems = items;
+      if (!assessmentId) {
+        const response = await fetch(`${getApiBaseUrl()}/api/v1/assessments/from-chat-checklist`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            description: message.sourceQuestion || message.text || "AI 상담 체크리스트",
+            checklist_items: items.map((item) => item.content),
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(await apiErrorMessage(response, "체크리스트를 저장하지 못했습니다."));
+        }
+        const payload = await response.json() as AssessmentResponse;
+        assessmentId = payload.assessment_id;
+        baseItems = payload.checklist_items.map((item): ChatChecklistItem => ({
+          id: item.id,
+          content: item.content,
+          sequence: item.sequence,
+          is_required: false,
+          is_completed: item.is_completed,
+          completed_by_user_id: item.completed_by_user_id,
+          completed_at: item.completed_at,
+          evidence_chunk_ids: [],
+        }));
+        // 생성 직후 체크 상태 PATCH 중 일부가 실패하더라도 재시도 시 같은 평가를
+        // 이어서 사용하도록, 생성된 ID와 서버 항목을 먼저 화면 상태에 반영한다.
+        setMessages((current) => current.map((existing, index) => (
+          index === messageIndex
+            ? { ...existing, savedAssessmentId: assessmentId, checklistItems: baseItems }
+            : existing
+        )));
+      }
+
+      const checkedIndexSet = new Set(checkedIndices);
+      const finalItems: ChatChecklistItem[] = [];
+      for (let index = 0; index < baseItems.length; index += 1) {
+        const current = baseItems[index];
+        const shouldBeCompleted = checkedIndexSet.has(index);
+        if (current.id && shouldBeCompleted !== current.is_completed) {
+          const patchResponse = await fetch(
+            `${getApiBaseUrl()}/api/v1/assessments/${assessmentId}/checklist-items/${current.id}`,
+            {
+              method: "PATCH",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({ is_completed: shouldBeCompleted }),
+            },
+          );
+          if (!patchResponse.ok) {
+            throw new Error(await apiErrorMessage(
+              patchResponse,
+              "체크리스트 완료 상태를 저장하지 못했습니다.",
+            ));
+          }
+          const updated = await patchResponse.json() as ChecklistItemUpdateResponse;
+          finalItems.push({
+            id: updated.id,
+            content: updated.content,
+            sequence: updated.sequence,
+            is_required: false,
+            is_completed: updated.is_completed,
+            completed_by_user_id: updated.completed_by_user_id,
+            completed_at: updated.completed_at,
+            evidence_chunk_ids: [],
+          });
+          continue;
+        }
+        finalItems.push(current);
+      }
+
+      setMessages((current) => current.map((existing, index) => (
+        index === messageIndex
+          ? { ...existing, savedAssessmentId: assessmentId, checklistItems: finalItems }
+          : existing
+      )));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "체크리스트 저장 중 오류가 발생했습니다.");
+    } finally {
+      setSavingChecklistIndex(null);
+    }
+  }
+
+  // GPS 근접 안내 체크리스트 저장/재저장. 채팅 체크리스트와 같은 저장 API를 쓰되,
+  // task_type="정기 순찰 점검" + 실제 site_name/equipment_name을 함께 보내서
+  // 목록 화면에서 채팅 상담 체크리스트와 구분되어 따로 모아 보이게 한다.
+  async function saveGpsChecklist(item: NearbyEquipmentItem) {
+    if (gpsSource !== "real" || savingGpsEquipmentCode !== null) return;
+    const checkedIndexSet = gpsChecklistChecked[item.equipment_code] ?? new Set<number>();
+    setSavingGpsEquipmentCode(item.equipment_code);
+    setError("");
+    try {
+      const token = getAccessToken();
+      if (!token) throw new Error("체크리스트를 저장하려면 다시 로그인해 주세요.");
+
+      let saved = gpsSavedChecklists[item.equipment_code];
+      if (!saved) {
+        const response = await fetch(`${getApiBaseUrl()}/api/v1/assessments/from-chat-checklist`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            site_name: item.site_name,
+            equipment_name: item.equipment_name,
+            task_type: "정기 순찰 점검",
+            description: `${item.site_name} ${item.equipment_name} 근접 안전 점검`,
+            checklist_items: item.checklist,
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(await apiErrorMessage(response, "체크리스트를 저장하지 못했습니다."));
+        }
+        const payload = await response.json() as AssessmentResponse;
+        saved = {
+          assessmentId: payload.assessment_id,
+          items: payload.checklist_items.map((entry) => ({ id: entry.id, is_completed: entry.is_completed })),
+        };
+        // 생성 이후 완료 상태 저장에 실패해도 다음 시도에서 새 평가를 중복 생성하지
+        // 않도록 서버가 발급한 평가 ID를 즉시 보관한다.
+        setGpsSavedChecklists((current) => ({
+          ...current,
+          [item.equipment_code]: saved!,
+        }));
+      }
+
+      const assessmentId = saved.assessmentId;
+      const nextItems: { id: string | null; is_completed: boolean }[] = [];
+      for (let index = 0; index < saved.items.length; index += 1) {
+        const current = saved.items[index];
+        const shouldBeCompleted = checkedIndexSet.has(index);
+        if (current.id && shouldBeCompleted !== current.is_completed) {
+          const patchResponse = await fetch(
+            `${getApiBaseUrl()}/api/v1/assessments/${assessmentId}/checklist-items/${current.id}`,
+            {
+              method: "PATCH",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({ is_completed: shouldBeCompleted }),
+            },
+          );
+          if (!patchResponse.ok) {
+            throw new Error(await apiErrorMessage(
+              patchResponse,
+              "GPS 체크리스트 완료 상태를 저장하지 못했습니다.",
+            ));
+          }
+          const updated = await patchResponse.json() as ChecklistItemUpdateResponse;
+          nextItems.push({ id: updated.id, is_completed: updated.is_completed });
+          continue;
+        }
+        nextItems.push(current);
+      }
+
+      setGpsSavedChecklists((current) => ({
+        ...current,
+        [item.equipment_code]: { assessmentId, items: nextItems },
+      }));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "체크리스트 저장 중 오류가 발생했습니다.");
+    } finally {
+      setSavingGpsEquipmentCode(null);
+    }
+  }
+
   async function sendChat(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const submittedQuestion = question.trim();
@@ -865,7 +1311,7 @@ function WorkspaceScreen({
         );
       }
       if (autoSpeakRef.current) {
-        void playSpeech(payload.answer);
+        void playSpeech(buildSpeechText({ text: payload.answer, structuredAnswer: payload.structured_answer }));
       }
     } catch (requestError) {
       const message = requestError instanceof Error ? requestError.message : "백엔드에 연결할 수 없습니다.";
@@ -969,6 +1415,32 @@ function WorkspaceScreen({
       setManualStatus(`${filename} 비전 인덱스를 최신 형식으로 다시 생성했습니다.`);
     } catch (requestError) {
       setManualStatus(requestError instanceof Error ? requestError.message : `${filename} 비전 인덱스 재생성 실패`);
+    }
+  }
+
+  async function deleteManual(documentId: string, filename: string) {
+    const token = getAccessToken();
+    if (!token) {
+      onLogout();
+      return;
+    }
+    setManualStatus(`${filename} 삭제하는 중...`);
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/api/v1/documents/${documentId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      requireActiveSession(response);
+      if (!response.ok) {
+        throw new Error(await apiErrorMessage(response, `${filename} 삭제에 실패했습니다.`));
+      }
+      setUserDocuments((current) => current.filter((document) => document.document_id !== documentId));
+      setSelectedDocumentIds((current) => current.filter((id) => id !== documentId));
+      setCatalogCandidates([]);
+      setVisionSummary("");
+      setManualStatus(`${filename}을(를) 삭제했습니다.`);
+    } catch (requestError) {
+      setManualStatus(requestError instanceof Error ? requestError.message : `${filename} 삭제에 실패했습니다.`);
     }
   }
 
@@ -1121,49 +1593,66 @@ function WorkspaceScreen({
     return { latitude, longitude };
   }
 
-  // 기준점(설비 배치)을 point로 재설정하는 유일한 경로. 마운트 시 기본값 표시,
-  // 실제 GPS 최초 확인, "이 위치로 다시 보정" 버튼이 모두 이 함수 하나만 거치게
-  // 해서, 원점을 옮기는 로직이 여러 곳에 비슷하게 중복되며 조금씩 어긋나는 걸 막는다.
-  // lockOrigin=true(기본값)는 사용자가 명시적으로 기준점을 다시 잡는 경우로,
-  // 이후 실제 GPS가 잡혀도 이 기준점을 몰래 덮어쓰지 않도록 잠근다.
-  // mount 시 자동 기본값 설정만 lockOrigin=false로 호출해, 실제 GPS가 처음
-  // 잡히면 그쪽으로 자동 승격될 수 있게 열어둔다.
-  function recalibrateTo(point: { latitude: number; longitude: number }, options: { lockOrigin: boolean; source: "default" | "real" }) {
+  // 기준점(설비 배치)을 point로 재설정하는 유일한 경로. "이 위치로 다시 보정" 버튼이
+  // 이 함수를 거쳐, 설비 배치 자체를 그 좌표로 명시적으로 옮긴다. 실제 GPS 위치는
+  // (최초 fix를 포함해) 이 기준점을 자동으로 건드리지 않는다 — 그래야 실제 위치가
+  // 설비 반경 안으로 "이동해 들어와야" 체크리스트가 활성화되는 것이 유지된다.
+  function recalibrateTo(point: { latitude: number; longitude: number }, options: { source: "default" | "real" }) {
     gpsOriginRef.current = point;
-    if (options.lockOrigin) gpsOriginLockedRef.current = true;
     // 기준점을 다시 잡는 것이므로, 이 시점부터는 실제 위치 변화가 이 기준점
     // 대비로 다시 실시간 반영되도록 수동 override를 해제한다.
     gpsManualOverrideRef.current = false;
     setGpsOrigin(point);
     setGpsLivePosition(point);
     setGpsSource(options.source);
-    // 입력창을 이 기준점으로 동기화해 둔다. 안 그러면 실제 GPS가 잡혀 기준점이
-    // 사용자의 실제 위치로 옮겨간 뒤에도 입력창엔 옛날 기본값이 그대로 남아서,
-    // "조금만 옮겨서 테스트"해도 실제로는 기준점에서 수백~수천m 떨어진 값을
-    // 건드리는 셈이 되어 매번 반경 밖으로 나온다.
+    // 입력창을 이 기준점으로 동기화해 둔다. 안 그러면 기준점이 옮겨간 뒤에도
+    // 입력창엔 옛날 값이 그대로 남아서, "조금만 옮겨서 테스트"해도 실제로는
+    // 기준점에서 수백~수천m 떨어진 값을 건드리는 셈이 되어 매번 반경 밖으로 나온다.
     setManualLatitude(point.latitude.toFixed(6));
     setManualLongitude(point.longitude.toFixed(6));
     void loadCalibratedEquipment(point);
     void checkLocation(point.latitude, point.longitude, point);
   }
 
-  function recalibrateManualLocation(lockOrigin = true) {
+  function recalibrateManualLocation() {
     const point = parseManualCoordinates();
     if (!point) return;
-    recalibrateTo(point, { lockOrigin, source: "default" });
+    recalibrateTo(point, { source: "default" });
+  }
+
+  // 주어진 좌표를 "이 위치로 확인"한 것과 동일하게 처리한다. 입력창 값을 직접 파싱하는
+  // checkManualLocation과, 지도를 클릭해 좌표를 바로 넘기는 handleMapClick이 공유한다.
+  function checkPointAsManualLocation(point: { latitude: number; longitude: number }) {
+    // 수동으로 확인한 결과이므로, 직전에 실제 위치로 표시돼 있었더라도 지금 보여주는
+    // 결과의 출처는 "기본 테스트 좌표"로 명확히 되돌린다. 이어서 들어오는 실제 위치
+    // 업데이트가 이 결과를 곧바로 덮어쓰지 않도록 잠근다.
+    // (기준점은 마운트 시/실제 위치 최초 확인 시 이미 설정돼 있으므로 건드리지 않는다.)
+    gpsManualOverrideRef.current = true;
+    setGpsSource("default");
+    setManualLatitude(point.latitude.toFixed(6));
+    setManualLongitude(point.longitude.toFixed(6));
+    setGpsLivePosition(point);
+    void checkLocation(point.latitude, point.longitude, gpsOriginRef.current ?? point);
   }
 
   function checkManualLocation() {
     const point = parseManualCoordinates();
     if (!point) return;
-    // 수동 입력으로 확인한 결과이므로, 직전에 실제 위치로 표시돼 있었더라도
-    // 지금 보여주는 결과의 출처는 "기본 테스트 좌표"로 명확히 되돌린다. 이어서
-    // 들어오는 실제 위치 업데이트가 이 결과를 곧바로 덮어쓰지 않도록 잠근다.
-    // (기준점은 마운트 시 recalibrateTo로 항상 먼저 설정돼 있으므로 건드리지 않는다.)
-    gpsManualOverrideRef.current = true;
-    setGpsSource("default");
-    setGpsLivePosition(point);
-    void checkLocation(point.latitude, point.longitude, gpsOriginRef.current ?? point);
+    checkPointAsManualLocation(point);
+  }
+
+  // 지도를 클릭한 픽셀 좌표를, 화면에 그린 것과 같은 축척(GPS_MAP_SCALE_PX_PER_M)으로
+  // 기준점(gpsMapCenter) 기준 위경도로 역산해 그 위치를 "이 위치로 확인"한 것처럼 반영한다.
+  // metersOffsetFromCenter의 역변환이다.
+  function handleMapClick(event: React.MouseEvent<HTMLDivElement>) {
+    if (!gpsMapCenter) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const offsetXm = (event.clientX - rect.left - GPS_MAP_SIZE_PX / 2) / GPS_MAP_SCALE_PX_PER_M;
+    const offsetYm = (event.clientY - rect.top - GPS_MAP_SIZE_PX / 2) / GPS_MAP_SCALE_PX_PER_M;
+    checkPointAsManualLocation({
+      latitude: gpsMapCenter.lat - offsetYm / METERS_PER_DEG_LAT,
+      longitude: gpsMapCenter.lon + offsetXm / metersPerDegLon(gpsMapCenter.lat),
+    });
   }
 
   // "이 위치로 확인"으로 실제 위치 반영을 잠가둔 뒤, 기준점(설비 배치)은 그대로 둔 채
@@ -1316,8 +1805,8 @@ function WorkspaceScreen({
   async function speakGuidance() {
     if (stopSpeech()) return;
 
-    const latestAnswer = [...messages].reverse().find((message) => message.role === "ai")?.text;
-    const text = latestAnswer ?? (result
+    const latestAiMessage = [...messages].reverse().find((message) => message.role === "ai");
+    const text = (latestAiMessage ? buildSpeechText(latestAiMessage) : null) ?? (result
       ? `현재 분석된 위험요인은 ${result.hazards.length}건입니다. ${result.hazards.map((hazard) => `${hazard.name}. ${hazard.safety_actions.join(". ")}`).join(". ")}`
       : "매뉴얼을 선택하고 AI 상담에서 질문한 뒤 음성 안전 안내를 들을 수 있습니다.");
 
@@ -1394,6 +1883,7 @@ function WorkspaceScreen({
         onVoiceInput={toggleVoiceInput}
         onSpeakGuidance={speakGuidance}
         onHistory={onHistory}
+        onAssessments={openAssessmentsDrawer}
         onVolumeChange={setVolume}
         onFontSizeChange={setFontSize}
         onAutoSpeakChange={setAutoSpeak}
@@ -1429,7 +1919,7 @@ function WorkspaceScreen({
         <section className="panel gps-map-panel" aria-label="가상 GPS 자동 위치 추적">
         <p className="muted-copy">
           브라우저가 실제 위치를 확인하면 자동으로 그 위치를 보여주고, 실패하면 기본 테스트 좌표를 사용합니다.
-          아래 위경도 값을 바꿔 <strong>이 위치로 확인</strong>을 누르면 설비 배치 기준점은 그대로 둔 채 그 좌표에서의 결과만
+          아래 위경도 값을 바꾸거나 <strong>지도를 클릭</strong>하면 설비 배치 기준점은 그대로 둔 채 그 위치에서의 결과만
           1회성으로 미리볼 수 있고, <strong>실제 위치로 돌아가기</strong>로 다시 실시간 위치 표시로 돌아갈 수 있습니다.
           <strong>이 위치로 다시 보정</strong>은 설비 배치 자체의 기준점을 그 좌표로 옮깁니다.
           (점선 원은 설비별 근접 판정 반경 {GPS_EQUIPMENT_RADIUS_M}m)
@@ -1441,7 +1931,12 @@ function WorkspaceScreen({
           </p>
         )}
         {gpsMapCenter ? (
-          <div className="gps-map" style={{ width: GPS_MAP_SIZE_PX, height: GPS_MAP_SIZE_PX }}>
+          <div
+            className="gps-map"
+            style={{ width: GPS_MAP_SIZE_PX, height: GPS_MAP_SIZE_PX }}
+            onClick={handleMapClick}
+            title="지도를 클릭하면 그 위치로 테스트 좌표가 이동합니다"
+          >
             {calibratedEquipment.map((eq) => {
               const offset = metersOffsetFromCenter(gpsMapCenter, eq.latitude, eq.longitude);
               const x = GPS_MAP_SIZE_PX / 2 + offset.x * GPS_MAP_SCALE_PX_PER_M;
@@ -1536,9 +2031,43 @@ function WorkspaceScreen({
                   </div>
                   <div className="checklist">
                     <h3>체크리스트</h3>
-                    {item.checklist.map((entry) => (
-                      <label key={entry}><input type="checkbox" /><span>{entry}</span></label>
-                    ))}
+                    {gpsSource !== "real" && (
+                      <p className="muted-copy">
+                        테스트 좌표로 확인한 결과입니다. 실제 위치가 설비 근처로 들어오면 체크할 수 있습니다.
+                      </p>
+                    )}
+                    {item.checklist.map((entry, entryIndex) => {
+                      const checkedSet = gpsChecklistChecked[item.equipment_code];
+                      const isChecked = checkedSet ? checkedSet.has(entryIndex) : false;
+                      return (
+                        <label key={entry}>
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            disabled={gpsSource !== "real"}
+                            onChange={(event) => setGpsChecklistChecked((current) => {
+                              const next = new Set(current[item.equipment_code] ?? []);
+                              if (event.target.checked) next.add(entryIndex);
+                              else next.delete(entryIndex);
+                              return { ...current, [item.equipment_code]: next };
+                            })}
+                          />
+                          <span>{entry}</span>
+                        </label>
+                      );
+                    })}
+                    {gpsSource === "real" && (
+                      <button
+                        type="button"
+                        className="chat-checklist-save"
+                        onClick={() => void saveGpsChecklist(item)}
+                        disabled={savingGpsEquipmentCode === item.equipment_code}
+                      >
+                        {savingGpsEquipmentCode === item.equipment_code
+                          ? "저장 중..."
+                          : gpsSavedChecklists[item.equipment_code] ? "변경사항 저장" : "이 체크리스트 저장"}
+                      </button>
+                    )}
                   </div>
                 </div>
               ))
@@ -1591,6 +2120,7 @@ function WorkspaceScreen({
           onAddManuals={(files) => void addManuals(files)}
           onAddPhoto={(file) => void analyzePhoto(file)}
           onReindexDocument={(documentId, filename) => void reindexManual(documentId, filename)}
+          onDeleteDocument={(documentId, filename) => void deleteManual(documentId, filename)}
           onToggleDocument={(documentId) => {
             setSelectedDocumentIds((current) => current.includes(documentId)
               ? current.filter((id) => id !== documentId)
@@ -1634,6 +2164,9 @@ function WorkspaceScreen({
                     structuredAnswer={message.structuredAnswer}
                     checklistItems={message.checklistItems ?? []}
                     sources={message.sources ?? []}
+                    savedAssessmentId={message.savedAssessmentId ?? null}
+                    isSavingChecklist={savingChecklistIndex === index}
+                    onSaveChecklist={(checkedIndices) => void saveChatChecklist(index, message, checkedIndices)}
                   />
                 : <p className="chat-answer-text">{message.text}</p>}
               {message.catalogCandidates && message.catalogCandidates.length > 0 && (
@@ -1656,7 +2189,7 @@ function WorkspaceScreen({
                   <p className="catalog-candidate-caution">후보 이미지는 외형 비교용이며 동일 모델·규격을 의미하지 않습니다.</p>
                 </div>
               )}
-              {message.sources && <ChatSources sources={message.sources} />}
+              {message.sources && <ChatSources sources={message.sources} onOpenDocument={openDocumentViewer} />}
               {message.warning && <p className="chat-warning">⚠ {message.warning}</p>}
             </div>
           ))}
@@ -1679,6 +2212,19 @@ function WorkspaceScreen({
           token={getAccessToken()}
           onApproved={async () => refreshMyDocuments()}
         />
+      </details>
+
+      <details
+        className="admin-tools-drawer"
+        ref={assessmentsDrawerRef}
+        onToggle={(event) => {
+          // 패널이 계속 마운트돼 있는 채라(채팅 유지 목적) 열 때마다 최신 상태를
+          // 다시 불러오도록, 열릴 때만 key를 바꿔 강제로 새로 마운트한다.
+          if (event.currentTarget.open) setAssessmentsOpenCount((count) => count + 1);
+        }}
+      >
+        <summary><span><InterfaceIcon name="document" /><strong>저장된 체크리스트</strong></span><small>채팅과 GPS 근접 안내에서 저장한 위험성평가 체크리스트 목록입니다.</small></summary>
+        <AssessmentsPanel key={assessmentsOpenCount} />
       </details>
 
       {result && <details className="assessment-drawer">
@@ -1714,6 +2260,9 @@ function WorkspaceScreen({
 
       <footer className="safety-footer">본 결과는 작업 전 검토를 위한 초안이며, 현장 안전관리자의 최종 확인과 승인 없이 작업을 시작할 수 없습니다.</footer>
       </div>
+      {documentViewerTarget && (
+        <DocumentViewerModal target={documentViewerTarget} onClose={() => setDocumentViewerTarget(null)} />
+      )}
     </main>
   );
 }

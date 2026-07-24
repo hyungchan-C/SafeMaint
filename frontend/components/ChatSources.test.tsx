@@ -30,7 +30,7 @@ function source(index: number): ChatSource {
 
 describe("ChatSources", () => {
   it("처음 두 근거를 표시하고 나머지는 접이식 목록으로 제공한다", () => {
-    render(<ChatSources sources={[source(1), source(2), source(3)]} />);
+    render(<ChatSources sources={[source(1), source(2), source(3)]} onOpenDocument={() => {}} />);
 
     expect(screen.getByText("manual-1.pdf")).toBeInTheDocument();
     expect(screen.getByText("manual-2.pdf")).toBeInTheDocument();

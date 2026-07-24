@@ -383,7 +383,9 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
                 """
                 UPDATE documents
                 SET lifecycle_status = 'review_required', updated_at = %s
-                WHERE id = %s AND current_version_id IS NULL
+                WHERE id = %s
+                  AND current_version_id IS NULL
+                  AND lifecycle_status <> 'deleted'
                 """,
                 (now, job.document_id),
             )

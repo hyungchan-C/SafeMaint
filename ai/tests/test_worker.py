@@ -1,6 +1,8 @@
 from pathlib import Path
+from uuid import uuid4
 
 import fitz
+import numpy as np
 
 from rag_service.pdf_processing import ProcessedChunk, ProcessedPdf
 from rag_service import worker
@@ -54,3 +56,81 @@ def test_local_pdf_text_is_extracted(monkeypatch, tmp_path: Path) -> None:
     assert page_count == 1
     assert chunks[0][0] == 1
     assert "SafeMaint local PDF extraction" in chunks[0][1]
+
+
+def test_completion_status_update_never_resurrects_deleted_document(
+    monkeypatch,
+) -> None:
+    executed_sql: list[str] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, statement: str, _params=None) -> None:
+            executed_sql.append(" ".join(statement.split()))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+        def commit(self) -> None:
+            pass
+
+    processed = ProcessedPdf(
+        kind="text",
+        page_count=1,
+        chunks=(
+            ProcessedChunk(
+                source_chunk_id="chunk-1",
+                content="검증된 매뉴얼 내용",
+                content_hash="hash-1",
+                page_start=1,
+                page_end=1,
+                section_path=("안전",),
+                metadata={},
+            ),
+        ),
+        processing_metadata={
+            "extractor": "docling",
+            "fallback_used": False,
+        },
+    )
+    monkeypatch.setattr(worker, "_process", lambda _job: processed)
+    monkeypatch.setattr(worker, "_connect", lambda: FakeConnection())
+
+    class FakeEmbedder:
+        def encode_many(self, _texts: list[str]) -> np.ndarray:
+            return np.asarray([[1.0, 0.0, 0.0]], dtype=np.float32)
+
+    job = worker.ClaimedJob(
+        job_id=uuid4(),
+        version_id=uuid4(),
+        document_id=uuid4(),
+        storage_path="manual.pdf",
+        attempts=1,
+        title="테스트 매뉴얼",
+        original_filename="manual.pdf",
+        document_type="equipment_manual",
+        metadata={},
+    )
+
+    worker.complete_job(job, FakeEmbedder())  # type: ignore[arg-type]
+
+    document_status_updates = [
+        statement
+        for statement in executed_sql
+        if statement.startswith("UPDATE documents")
+        and "lifecycle_status = 'review_required'" in statement
+    ]
+    assert len(document_status_updates) == 1
+    assert "lifecycle_status <> 'deleted'" in document_status_updates[0]
