@@ -21,6 +21,7 @@ from app.db.models import (
 )
 from app.db.session import get_db
 from app.main import app
+from app.schemas.chat import RetrievalAccessScope
 
 
 def _current_user() -> User:
@@ -325,10 +326,16 @@ class _DeleteSession:
 def test_delete_document_soft_deletes() -> None:
     document = _existing_document()
     db = _DeleteSession(document)
+    current_user = _current_user()
 
     delete_document(
         document_id=document.id,
-        current_user=_current_user(),
+        current_user=current_user,
+        access_scope=RetrievalAccessScope(
+            requester_user_id=current_user.id,
+            all_sites=True,
+            allow_company=True,
+        ),
         db=db,  # type: ignore[arg-type]
     )
 
@@ -342,11 +349,17 @@ def test_delete_document_soft_deletes() -> None:
 
 def test_delete_missing_document_returns_404() -> None:
     db = _DeleteSession(None)
+    current_user = _current_user()
 
     with pytest.raises(HTTPException) as exc_info:
         delete_document(
             document_id=uuid4(),
-            current_user=_current_user(),
+            current_user=current_user,
+            access_scope=RetrievalAccessScope(
+                requester_user_id=current_user.id,
+                all_sites=True,
+                allow_company=True,
+            ),
             db=db,  # type: ignore[arg-type]
         )
 
@@ -357,12 +370,39 @@ def test_delete_already_deleted_document_returns_404() -> None:
     document = _existing_document()
     document.lifecycle_status = "deleted"
     db = _DeleteSession(document)
+    current_user = _current_user()
 
     with pytest.raises(HTTPException) as exc_info:
         delete_document(
             document_id=document.id,
-            current_user=_current_user(),
+            current_user=current_user,
+            access_scope=RetrievalAccessScope(
+                requester_user_id=current_user.id,
+                all_sites=True,
+                allow_company=True,
+            ),
             db=db,  # type: ignore[arg-type]
         )
 
     assert exc_info.value.status_code == 404
+
+
+def test_delete_inaccessible_document_returns_404() -> None:
+    document = _existing_document()
+    db = _DeleteSession(document)
+    current_user = _current_user()
+
+    with pytest.raises(HTTPException) as exc_info:
+        delete_document(
+            document_id=document.id,
+            current_user=current_user,
+            access_scope=RetrievalAccessScope(
+                requester_user_id=current_user.id,
+                allow_company=True,
+            ),
+            db=db,  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 404
+    assert document.lifecycle_status != "deleted"
+    assert not db.committed

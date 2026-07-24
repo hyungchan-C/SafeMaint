@@ -673,6 +673,16 @@ a {
 .structured-list { display: grid; gap: 7px; margin: 0; padding-left: 20px; }
 .structured-list li { line-height: 1.55; overflow-wrap: anywhere; word-break: break-word; }
 .structured-list li small { color: #47685a; display: block; font-size: 11px; margin-top: 2px; }
+.structured-list li small a { color: #087f6b; font-weight: 800; margin-right: 4px; text-decoration: underline; text-underline-offset: 2px; }
+.chat-answer-content { display: grid; gap: 14px; }
+.chat-natural-answer,
+.chat-structured-details { border-radius: 14px; display: grid; gap: 10px; }
+.chat-natural-answer { background: #fffdf7; border: 1px solid #f2c66d; padding: 14px; }
+.chat-structured-details { border-top: 1px solid var(--line); padding-top: 14px; }
+.chat-answer-section-heading { align-items: baseline; display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.chat-answer-section-heading > strong { color: #143849; font-size: 14px; }
+.chat-answer-section-heading > span { color: var(--muted); font-size: 11px; }
+.chat-source-card { scroll-margin-top: 90px; }
 .structured-empty { color: var(--muted); font-size: 12px; line-height: 1.5; }
 .document-overview dl { display: grid; gap: 6px; margin: 0; }
 .document-overview dl div { display: grid; gap: 8px; grid-template-columns: 100px minmax(0, 1fr); }

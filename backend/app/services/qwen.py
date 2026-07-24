@@ -16,6 +16,7 @@ from app.schemas.chat import (
     QueryAnalysis,
     StructuredAnswer,
 )
+from app.services.document_types import canonical_document_type
 
 
 _STRUCTURED_ANSWER_ADAPTER = TypeAdapter(StructuredAnswer)
@@ -76,24 +77,28 @@ class QwenClient:
         except (httpx.HTTPError, ValueError, TypeError):
             return None
 
-        if isinstance(body.get("analysis"), dict):
-            try:
-                return QueryAnalysis.model_validate(body["analysis"])
-            except ValueError:
-                return None
-        occurrence_type = str(body.get("occurrence_type") or "").strip()
-        question_intent = str(body.get("question_intent") or "").strip() or None
-        if not occurrence_type and not question_intent:
+        if not isinstance(body, dict):
+            return None
+        payload = body.get("analysis") if isinstance(body.get("analysis"), dict) else body
+        normalized = self._normalize_analysis_payload(payload)
+        if not any(
+            normalized.get(field)
+            for field in (
+                "question_intent",
+                "occurrence_type",
+                "work_type",
+                "equipment",
+                "component",
+                "explicit_risk_factors",
+                "energy_sources",
+                "search_keywords",
+            )
+        ):
             return None
         try:
-            return QueryAnalysis(
-                occurrence_type=occurrence_type or None,
-                question_intent=question_intent,
-                intent_confidence=body.get("intent_confidence"),
-                clarification_question=body.get("clarification_question"),
-            )
+            return QueryAnalysis.model_validate(normalized)
         except ValueError:
-            return QueryAnalysis(occurrence_type=occurrence_type or None)
+            return None
 
     async def answer(
         self,
@@ -218,6 +223,10 @@ class QwenClient:
                         structured_answer.model_dump(mode="python")
                     )
                 )
+            )
+        if not used_source_ids:
+            used_source_ids = tuple(
+                self._source_ids_from_citations(answer, retrieval_response.sources)
             )
         return QwenGeneratedAnswer(
             answer=answer,
@@ -344,8 +353,125 @@ class QwenClient:
                 found.update(cls._collect_evidence_ids(nested))
         return found
 
+    @classmethod
+    def _normalize_analysis_payload(cls, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+
+        def first(*names: str) -> Any:
+            return next(
+                (
+                    value[name]
+                    for name in names
+                    if name in value and value[name] is not None
+                ),
+                None,
+            )
+
+        intent = str(
+            first("question_intent", "intent", "answer_type") or ""
+        ).strip()
+        if intent not in {
+            "document_qa",
+            "maintenance_guide",
+            "component_info",
+            "clarification_required",
+        }:
+            intent = ""
+
+        confidence_value = first(
+            "intent_confidence",
+            "confidence",
+            "intent_score",
+        )
+        try:
+            confidence = (
+                min(max(float(confidence_value), 0.0), 1.0)
+                if confidence_value is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            confidence = None
+
+        return {
+            "question_intent": intent or None,
+            "intent_confidence": confidence,
+            "clarification_question": cls._optional_text(
+                first("clarification_question", "follow_up_question")
+            ),
+            "occurrence_type": cls._optional_text(
+                first("occurrence_type", "accident_type", "incident_type")
+            ),
+            "work_type": cls._optional_text(
+                first("work_type", "task_type", "maintenance_action")
+            ),
+            "equipment": cls._string_list(
+                first("equipment", "equipments", "equipment_name", "target_equipment"),
+                limit=20,
+            ),
+            "component": cls._string_list(
+                first("component", "components", "component_name", "target_component"),
+                limit=20,
+            ),
+            "explicit_risk_factors": cls._string_list(
+                first(
+                    "explicit_risk_factors",
+                    "risk_factors",
+                    "hazards",
+                    "explicit_hazards",
+                ),
+                limit=20,
+            ),
+            "energy_sources": cls._string_list(
+                first("energy_sources", "energy_source"),
+                limit=20,
+            ),
+            "search_keywords": cls._string_list(
+                first("search_keywords", "keywords", "retrieval_keywords"),
+                limit=30,
+            ),
+        }
+
+    @staticmethod
+    def _optional_text(value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(str(value).split())
+        return normalized or None
+
+    @staticmethod
+    def _string_list(value: Any, *, limit: int) -> list[str]:
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        normalized: list[str] = []
+        for item in values:
+            if item is None or isinstance(item, (dict, list, tuple, set)):
+                continue
+            text = " ".join(str(item).split())
+            if text and text not in normalized:
+                normalized.append(text)
+            if len(normalized) >= limit:
+                break
+        return normalized
+
+    @classmethod
+    def _source_ids_from_citations(
+        cls,
+        answer: str,
+        sources: list[Any],
+    ) -> list[str]:
+        return cls._normalize_source_id_list(
+            [
+                int(match)
+                for match in re.findall(r"\[\s*(\d+)\s*\]", answer)
+            ],
+            sources,
+        )
+
     def _headers(self) -> dict[str, str]:
-        headers = {"Accept": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            "ngrok-skip-browser-warning": "true",
+        }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
@@ -380,7 +506,7 @@ class QwenClient:
             "document_version_id": source.document_version_id,
             "chunk_id": source.chunk_id,
             "title": source.title,
-            "source_type": source.source_type,
+            "source_type": canonical_document_type(source.source_type),
             "document_scope": source.document_scope,
             "original_filename": source.original_filename,
             "document_version": source.document_version,

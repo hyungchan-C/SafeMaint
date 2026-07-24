@@ -59,10 +59,14 @@ DB 테이블과 관계는 [docs/database.md](docs/database.md), 전처리 결과
 검색할 문서 종류는 코드에 고정하지 않고 `.env`의 쉼표 구분 설정으로 선택합니다.
 
 ```dotenv
-RAG_SOURCE_TYPES=incident,manual
+RAG_SOURCE_TYPES=public_guide,equipment_manual,component_manual
 ```
 
-값을 비우면 `private` 문서를 제외한 모든 source type을 검색합니다. 실제 고객
+공식 문서 유형은 `public_law`, `public_guide`, `public_incident`,
+`public_media`, `company_policy`, `equipment_manual`, `component_manual`입니다.
+레거시 `incident`, `manual`, `regulation`, `work_standard` 값은 입력 경계에서만
+호환되며 내부 검색은 공식 `document_type_code`를 사용합니다. 값을 비우면 접근
+권한이 허용된 공식 문서 유형을 질문 목적에 맞게 검색합니다. 실제 고객
 매뉴얼은 업로드·권한 검증·전처리가 완료된 문서만 검색 범위에 포함해야 합니다.
 
 ```powershell
@@ -723,6 +727,10 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 별도 운영 작업 필요: 고객사 HTTPS 인증서/reverse proxy, Ed25519 키 수명주기와 오프라인 전달 절차, 실제 백업·PITR 자동화, 스캔 PDF용 검증된 로컬 OCR 엔진, 악성 PDF 안티바이러스/CDR, 로그 보존·모니터링 정책. 이 항목들은 동작하는 것처럼 화면에 표시하지 않습니다.
 
+## Colab A100 비전 서버
+
+[`notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb`](notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb)은 기본적으로 `google/siglip2-base-patch16-naflex`만 사용하는 벡터 전용 실험 서버를 ngrok으로 제공합니다. PDF 페이지 전체, 겹치는 4개 영역과 PDF 내부 이미지를 벡터화하고, 현장 사진과 유사한 PDF 페이지를 반환합니다. Qwen3-VL 코드는 삭제하지 않았으며 `VISION_ENABLE_QWEN=true`로 되돌리면 정밀 검증 경로를 다시 사용할 수 있습니다. 노트북이 출력한 `VISION_SERVICE_URL`과 `VISION_API_KEY`를 로컬 `.env`에 설정하고 백엔드를 재시작하세요. 기본 비전 인덱싱 한도는 대형 장비 카탈로그를 위해 2,000페이지이며 `VISION_PDF_MAX_PAGES`로 조정할 수 있습니다. 인덱스 형식이 페이지 기반 v5로 변경되었으므로 기존 문서는 **비전 재인덱싱**이 필요합니다. Colab 저장소는 일시적이므로 런타임 재시작 후에도 다시 인덱싱해야 합니다.
+
 ## 팀 Qwen3.5-9B LoRA 로컬 실행
 
 팀 파인튜닝 모델은 일반 채팅 모델이 아니라 작업 설명을 14개 산업재해 발생형태로
@@ -851,9 +859,35 @@ DOCUMENT_WORKER_MAX_ATTEMPTS=3
 DOCUMENT_WORKER_RETRY_DELAY_SECONDS=10
 DOCUMENT_WORKER_STALE_AFTER_SECONDS=1800
 RAG_CANDIDATE_K=30
+RAG_DOCUMENT_TOP_K=6
+RAG_DOCUMENT_NEIGHBOR_WINDOW=1
+RAG_COMPONENT_TOP_K=5
+RAG_MAINTENANCE_TOP_K=8
 RAG_MAX_CHUNKS_PER_DOCUMENT=2
 RAG_MIN_KEYWORD_SCORE=0.08
+RAG_MAINTENANCE_MANUAL_QUOTA=4
+RAG_MAINTENANCE_COMPANY_POLICY_QUOTA=2
+RAG_MAINTENANCE_LAW_QUOTA=2
+RAG_MAINTENANCE_GUIDE_QUOTA=3
+RAG_MAINTENANCE_INCIDENT_QUOTA=2
+QUESTION_INTENT_CONFIDENCE_THRESHOLD=0.8
+QWEN_SOURCE_EXCERPT_CHARS=900
+QWEN_DOCUMENT_SOURCE_LIMIT=6
+QWEN_COMPONENT_SOURCE_LIMIT=5
+QWEN_MAINTENANCE_SOURCE_LIMIT=8
 ```
+
+AI 상담은 사용자가 명시한 질문 목적을 가장 먼저 사용하고, 그다음 Qwen 분석을
+사용합니다. Qwen 의도 신뢰도가 `QUESTION_INTENT_CONFIDENCE_THRESHOLD`보다 낮으면
+문서를 검색하거나 절차를 추측하지 않고 질문 목적을 다시 확인합니다. Qwen 장애나
+잘못된 응답일 때만 규칙 기반 의도 분류를 폴백으로 사용합니다.
+
+검색 범위는 질문 목적별로 분리됩니다. `document_qa`는 선택 문서와 같은 버전의
+인접 청크를 포함해 검색하고, `component_info`는 부품·설비 매뉴얼과 가이드를
+우선합니다. `maintenance_guide`는 매뉴얼·회사 기준·법령·가이드·사고사례를
+환경변수 quota만큼 균형 있게 선택합니다. Backend는 검색된 원문에 없는 안전 문장이나
+위험도를 보충하지 않으며, 별도 위험성평가 결과가 없는 상담 답변은 항상
+`판단 불가`(화면에서는 `별도 위험성평가 필요`)로 표시합니다.
 
 개발 검증은 운영 이미지와 분리된 Docker test stage에서 실행할 수 있습니다. DB 통합 테스트는 이름이 `_test`로 끝나는 별도 DB에서만 실행해야 합니다.
 

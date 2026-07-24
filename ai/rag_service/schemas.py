@@ -73,6 +73,7 @@ class AccessScope(BaseModel):
 
 class InternalChatRequest(ChatRequest):
     access_scope: AccessScope = Field(default_factory=AccessScope)
+    request_id: str | None = Field(default=None, max_length=100)
 
 
 class ChatSource(BaseModel):

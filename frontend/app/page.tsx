@@ -4,11 +4,10 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 
 import DocumentReviewPanel from "@/components/DocumentReviewPanel";
 import ChatSources from "@/components/ChatSources";
+import ChatAnswerContent from "@/components/ChatAnswerContent";
 import DocumentViewerModal, { type DocumentViewerTarget } from "@/components/DocumentViewerModal";
 import InterfaceIcon from "@/components/InterfaceIcon";
 import ManualManager from "@/components/ManualManager";
-import SafetyAnswerView from "@/components/SafetyAnswerView";
-import StructuredChatAnswer from "@/components/StructuredChatAnswer";
 import TbmChecklist from "@/components/TbmChecklist";
 import WorkspaceHeader from "@/components/WorkspaceHeader";
 import type {
@@ -686,6 +685,7 @@ function WorkspaceScreen({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const visionRequestIdRef = useRef(0);
+  const sitePhotoFileRef = useRef<File | null>(null);
   const [error, setError] = useState("");
   const [workspaceRestored, setWorkspaceRestored] = useState(false);
   const myDocumentsInitializedRef = useRef(false);
@@ -1077,6 +1077,13 @@ function WorkspaceScreen({
           completed_at: item.completed_at,
           evidence_chunk_ids: [],
         }));
+        // 생성 직후 체크 상태 PATCH 중 일부가 실패하더라도 재시도 시 같은 평가를
+        // 이어서 사용하도록, 생성된 ID와 서버 항목을 먼저 화면 상태에 반영한다.
+        setMessages((current) => current.map((existing, index) => (
+          index === messageIndex
+            ? { ...existing, savedAssessmentId: assessmentId, checklistItems: baseItems }
+            : existing
+        )));
       }
 
       const checkedIndexSet = new Set(checkedIndices);
@@ -1096,20 +1103,24 @@ function WorkspaceScreen({
               body: JSON.stringify({ is_completed: shouldBeCompleted }),
             },
           );
-          if (patchResponse.ok) {
-            const updated = await patchResponse.json() as ChecklistItemUpdateResponse;
-            finalItems.push({
-              id: updated.id,
-              content: updated.content,
-              sequence: updated.sequence,
-              is_required: false,
-              is_completed: updated.is_completed,
-              completed_by_user_id: updated.completed_by_user_id,
-              completed_at: updated.completed_at,
-              evidence_chunk_ids: [],
-            });
-            continue;
+          if (!patchResponse.ok) {
+            throw new Error(await apiErrorMessage(
+              patchResponse,
+              "체크리스트 완료 상태를 저장하지 못했습니다.",
+            ));
           }
+          const updated = await patchResponse.json() as ChecklistItemUpdateResponse;
+          finalItems.push({
+            id: updated.id,
+            content: updated.content,
+            sequence: updated.sequence,
+            is_required: false,
+            is_completed: updated.is_completed,
+            completed_by_user_id: updated.completed_by_user_id,
+            completed_at: updated.completed_at,
+            evidence_chunk_ids: [],
+          });
+          continue;
         }
         finalItems.push(current);
       }
@@ -1162,6 +1173,12 @@ function WorkspaceScreen({
           assessmentId: payload.assessment_id,
           items: payload.checklist_items.map((entry) => ({ id: entry.id, is_completed: entry.is_completed })),
         };
+        // 생성 이후 완료 상태 저장에 실패해도 다음 시도에서 새 평가를 중복 생성하지
+        // 않도록 서버가 발급한 평가 ID를 즉시 보관한다.
+        setGpsSavedChecklists((current) => ({
+          ...current,
+          [item.equipment_code]: saved!,
+        }));
       }
 
       const assessmentId = saved.assessmentId;
@@ -1181,11 +1198,15 @@ function WorkspaceScreen({
               body: JSON.stringify({ is_completed: shouldBeCompleted }),
             },
           );
-          if (patchResponse.ok) {
-            const updated = await patchResponse.json() as ChecklistItemUpdateResponse;
-            nextItems.push({ id: updated.id, is_completed: updated.is_completed });
-            continue;
+          if (!patchResponse.ok) {
+            throw new Error(await apiErrorMessage(
+              patchResponse,
+              "GPS 체크리스트 완료 상태를 저장하지 못했습니다.",
+            ));
           }
+          const updated = await patchResponse.json() as ChecklistItemUpdateResponse;
+          nextItems.push({ id: updated.id, is_completed: updated.is_completed });
+          continue;
         }
         nextItems.push(current);
       }
@@ -1208,7 +1229,12 @@ function WorkspaceScreen({
     const isPhotoQuestion = refersToAttachedPhoto(submittedQuestion);
     const candidatesForAnswer = isPhotoQuestion ? catalogCandidates : [];
 
-    if (isPhotoQuestion && sitePhotoName && visualCategories.length === 0) {
+    if (
+      isPhotoQuestion
+      && sitePhotoName
+      && visualCategories.length === 0
+      && catalogCandidates.length === 0
+    ) {
       setQuestion("");
       setMessages((current) => [
         ...current,
@@ -1424,8 +1450,12 @@ function WorkspaceScreen({
     }
   }
 
-  async function analyzePhoto(file: File | undefined) {
+  async function analyzePhoto(
+    file: File | undefined,
+    documentIds: string[] = selectedDocumentIds,
+  ) {
     if (!file) return;
+    sitePhotoFileRef.current = file;
     const analysisStartedAt = performance.now();
     setIsVisionLoading(true);
     const token = getAccessToken();
@@ -1458,7 +1488,7 @@ function WorkspaceScreen({
     const requestAnalysis = async () => {
       const body = new FormData();
       body.append("file", file);
-      body.append("document_ids", JSON.stringify(selectedDocumentIds));
+      body.append("document_ids", JSON.stringify(documentIds));
       body.append("analysis_mode", "deep");
       const response = await fetch(`${getApiBaseUrl()}/api/v1/vision/catalog/match`, {
         method: "POST",
@@ -2102,11 +2132,15 @@ function WorkspaceScreen({
           onReindexDocument={(documentId, filename) => void reindexManual(documentId, filename)}
           onDeleteDocument={(documentId, filename) => void deleteManual(documentId, filename)}
           onToggleDocument={(documentId) => {
-            setSelectedDocumentIds((current) => current.includes(documentId)
-              ? current.filter((id) => id !== documentId)
-              : [...current, documentId]);
+            const nextDocumentIds = selectedDocumentIds.includes(documentId)
+              ? selectedDocumentIds.filter((id) => id !== documentId)
+              : [...selectedDocumentIds, documentId];
+            setSelectedDocumentIds(nextDocumentIds);
             setCatalogCandidates([]);
             setVisionSummary("");
+            if (sitePhotoFileRef.current) {
+              void analyzePhoto(sitePhotoFileRef.current, nextDocumentIds);
+            }
           }}
           onRemoveLegacyManual={(index) => {
             setManuals((current) => current.filter((_, itemIndex) => itemIndex !== index));
@@ -2139,26 +2173,25 @@ function WorkspaceScreen({
                 </div>
               )}
               {message.role === "ai"
-                ? message.structuredAnswer
-                  ? <StructuredChatAnswer
-                      answer={message.structuredAnswer}
-                      checklistItems={message.checklistItems ?? []}
-                      sources={message.sources ?? []}
-                      savedAssessmentId={message.savedAssessmentId ?? null}
-                      isSavingChecklist={savingChecklistIndex === index}
-                      onSaveChecklist={(checkedIndices) => void saveChatChecklist(index, message, checkedIndices)}
-                    />
-                  : <SafetyAnswerView answer={message.text} />
+                ? <ChatAnswerContent
+                    answer={message.text}
+                    structuredAnswer={message.structuredAnswer}
+                    checklistItems={message.checklistItems ?? []}
+                    sources={message.sources ?? []}
+                    savedAssessmentId={message.savedAssessmentId ?? null}
+                    isSavingChecklist={savingChecklistIndex === index}
+                    onSaveChecklist={(checkedIndices) => void saveChatChecklist(index, message, checkedIndices)}
+                  />
                 : <p className="chat-answer-text">{message.text}</p>}
               {message.catalogCandidates && message.catalogCandidates.length > 0 && (
                 <div className="catalog-candidate-list">
-                  <strong>사진과 유사한 카탈로그 후보</strong>
+                  <strong>사진과 유사한 PDF 페이지 후보</strong>
                   <div className="catalog-candidate-grid">
                     {message.catalogCandidates.map((candidate, candidateIndex) => (
                       <article className="catalog-candidate-card" key={`${candidate.document_id}-${candidate.page}-${candidate.image_index}`}>
                         <SecureCandidateImage candidate={candidate} alt={`후보 ${candidateIndex + 1}`} />
                         <div>
-                          <strong>후보 {candidateIndex + 1} · {candidate.visual_category || "제품 종류 확인 불가"}</strong>
+                          <strong>후보 {candidateIndex + 1}{candidate.visual_category ? ` · ${candidate.visual_category}` : ""}</strong>
                           <span>{candidate.filename} · {candidate.page}페이지</span>
                           <span>유사도 {(candidate.similarity * 100).toFixed(1)}% · 신뢰 {candidate.confidence}</span>
                           {candidate.visual_features && candidate.visual_features.length > 0 && <p>{candidate.visual_features.join(" · ")}</p>}
@@ -2167,11 +2200,11 @@ function WorkspaceScreen({
                       </article>
                     ))}
                   </div>
-                  <p className="catalog-candidate-caution">후보 이미지는 외형 비교용이며 동일 모델·규격을 의미하지 않습니다.</p>
+                  <p className="catalog-candidate-caution">벡터 유사도 후보이며 제품명·동일 모델·규격을 확정한 결과가 아닙니다. PDF 원문을 직접 확인해 주세요.</p>
                 </div>
               )}
-              {message.warning && <p className="chat-warning">⚠ {message.warning}</p>}
               {message.sources && <ChatSources sources={message.sources} onOpenDocument={openDocumentViewer} />}
+              {message.warning && <p className="chat-warning">⚠ {message.warning}</p>}
             </div>
           ))}
           {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>안전자료를 검색하고 AI 답변을 생성하고 있습니다…</div>}

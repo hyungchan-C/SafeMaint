@@ -3,6 +3,7 @@ bitsandbytes>=0.46,<1.0
 fastapi>=0.136,<1.0
 paddleocr[doc-parser]>=3.4,<4.0
 pillow>=11.0,<13.0
+pypdfium2>=4.30,<5.0
 pypdf>=6.0,<7.0
 numpy>=2.0,<3.0
 python-multipart>=0.0.20,<1.0

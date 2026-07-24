@@ -380,7 +380,11 @@ def test_chat_service_uses_qwen_classification_and_answer() -> None:
             assert request.analysis is not None
             assert request.analysis.occurrence_type == "caught-in"
             assert retrieval_response.sources
-            return QwenGeneratedAnswer("Qwen grounded answer [1]", "qwen-test")
+            return QwenGeneratedAnswer(
+                "Qwen grounded answer [1]",
+                "qwen-test",
+                used_source_ids=("public-chunk",),
+            )
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -427,7 +431,53 @@ def test_chat_service_uses_qwen_classification_and_answer() -> None:
     assert response.answer == "Qwen grounded answer [1]"
 
 
-def test_low_confidence_qwen_clarification_does_not_override_local_maintenance_intent() -> None:
+def test_chat_service_can_skip_qwen_intent_classification() -> None:
+    class AnswerOnlyQwenClient:
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            raise AssertionError("Qwen classify should be skipped")
+
+        async def answer(
+            self,
+            request: ChatRequest,
+            retrieval_response: ChatResponse,
+        ) -> QwenGeneratedAnswer:
+            assert request.analysis is not None
+            assert request.analysis.question_intent == "maintenance_guide"
+            return QwenGeneratedAnswer(
+                "Fast Qwen answer [1]",
+                "qwen-test",
+                used_source_ids=("chunk-1",),
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["analysis"]["question_intent"] == "maintenance_guide"
+        return httpx.Response(
+            200,
+            json={
+                "answer": "Local grounded template answer",
+                "sources": [_grounded_source()],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+            qwen_client=AnswerOnlyQwenClient(),  # type: ignore[arg-type]
+            qwen_enabled=True,
+            qwen_allow_company_context=True,
+            qwen_intent_classify_enabled=False,
+        ).answer(ChatRequest(question="light curtain installation"))
+    )
+
+    assert response.generation_mode == "qwen"
+    assert response.answer == "Fast Qwen answer [1]"
+
+
+def test_low_confidence_qwen_intent_returns_clarification_before_retrieval() -> None:
     class MisclassifyingQwenClient:
         async def classify(self, request: ChatRequest) -> QueryAnalysis:
             return QueryAnalysis(
@@ -441,9 +491,109 @@ def test_low_confidence_qwen_clarification_does_not_override_local_maintenance_i
             request: ChatRequest,
             retrieval_response: ChatResponse,
         ) -> QwenGeneratedAnswer:
+            raise AssertionError("Low-confidence intent must not generate an answer")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("Low-confidence intent must be clarified before retrieval")
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+            qwen_client=MisclassifyingQwenClient(),  # type: ignore[arg-type]
+            qwen_enabled=True,
+            qwen_allow_company_context=True,
+        ).answer(ChatRequest(question="라이트 커튼을 설치하려고 해."))
+    )
+
+    assert response.answer_type == "clarification_required"
+    assert response.generation_mode == "template"
+    assert response.clarification_question
+    assert response.sources == []
+
+
+def test_high_confidence_qwen_intent_overrides_local_rule_fallback() -> None:
+    class IntentQwenClient:
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            return QueryAnalysis(
+                question_intent="component_info",
+                intent_confidence=0.97,
+                equipment=["라이트커튼"],
+                component=["수광기"],
+                work_type="설치",
+                explicit_risk_factors=["오검출"],
+                energy_sources=["전기"],
+                search_keywords=["라이트커튼 수광기"],
+            )
+
+        async def answer(
+            self,
+            request: ChatRequest,
+            retrieval_response: ChatResponse,
+        ) -> QwenGeneratedAnswer:
+            assert request.analysis is not None
+            assert request.analysis.question_intent == "component_info"
+            return QwenGeneratedAnswer(
+                "라이트커튼은 안전장치입니다 [1].",
+                "qwen-test",
+                used_source_ids=("chunk-1",),
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        analysis = body["analysis"]
+        assert analysis["question_intent"] == "component_info"
+        assert analysis["equipment"] == ["라이트커튼"]
+        assert analysis["component"] == ["수광기"]
+        assert analysis["work_type"] == "설치"
+        assert analysis["explicit_risk_factors"] == ["오검출"]
+        assert analysis["energy_sources"] == ["전기"]
+        assert "라이트커튼 수광기" in analysis["search_keywords"]
+        return httpx.Response(
+            200,
+            json={
+                "answer": "검색 기본 답변",
+                "sources": [_grounded_source()],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+            qwen_client=IntentQwenClient(),  # type: ignore[arg-type]
+            qwen_enabled=True,
+            qwen_allow_company_context=True,
+        ).answer(ChatRequest(question="라이트커튼 설치 방법을 알려줘."))
+    )
+
+    assert response.answer_type == "component_info"
+    assert response.generation_mode == "qwen"
+
+
+def test_explicit_request_intent_is_not_overwritten_by_qwen() -> None:
+    class IntentQwenClient:
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            return QueryAnalysis(
+                question_intent="component_info",
+                intent_confidence=0.99,
+            )
+
+        async def answer(
+            self,
+            request: ChatRequest,
+            retrieval_response: ChatResponse,
+        ) -> QwenGeneratedAnswer:
             assert request.analysis is not None
             assert request.analysis.question_intent == "maintenance_guide"
-            return QwenGeneratedAnswer("유지보수 안내", "qwen-test")
+            return QwenGeneratedAnswer(
+                "승인된 매뉴얼 기준을 확인하세요 [1].",
+                "qwen-test",
+                used_source_ids=("chunk-1",),
+            )
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -462,15 +612,21 @@ def test_low_confidence_qwen_clarification_does_not_override_local_maintenance_i
             service_url="http://rag.test",
             transport=httpx.MockTransport(handler),
             openai_enabled=False,
-            qwen_client=MisclassifyingQwenClient(),  # type: ignore[arg-type]
+            qwen_client=IntentQwenClient(),  # type: ignore[arg-type]
             qwen_enabled=True,
             qwen_allow_company_context=True,
-        ).answer(ChatRequest(question="라이트 커튼을 설치하려고 해."))
+        ).answer(
+            ChatRequest(
+                question="라이트커튼 설치 방법을 알려줘.",
+                analysis=QueryAnalysis(
+                    question_intent="maintenance_guide",
+                    intent_confidence=1.0,
+                ),
+            )
+        )
     )
 
     assert response.answer_type == "maintenance_guide"
-    assert response.generation_mode == "qwen"
-    assert response.answer == "유지보수 안내"
 
 
 def test_chat_service_does_not_ask_qwen_to_invent_answer_without_evidence() -> None:
@@ -781,7 +937,7 @@ def test_maintenance_qwen_structure_and_checklist_are_source_validated() -> None
     assert [item.content for item in response.checklist_items] == ["설치 위치 기준 확인"]
 
 
-def test_qwen_empty_component_sections_are_enriched_before_response() -> None:
+def test_qwen_empty_component_sections_are_not_rule_backfilled() -> None:
     class EmptySectionQwenClient:
         async def classify(self, request: ChatRequest) -> QueryAnalysis:
             return QueryAnalysis(
@@ -838,10 +994,10 @@ def test_qwen_empty_component_sections_are_enriched_before_response() -> None:
 
     assert response.answer_type == "component_info"
     assert isinstance(response.structured_answer, ComponentAnswerDetails)
-    assert "라이트커튼" in response.structured_answer.one_line_description.replace(" ", "")
-    assert response.structured_answer.main_roles
-    assert response.structured_answer.usage_locations
-    assert response.structured_answer.precautions
+    assert response.structured_answer.one_line_description.startswith("PC 설정 툴")
+    assert response.structured_answer.main_roles == []
+    assert response.structured_answer.usage_locations == []
+    assert response.structured_answer.precautions == []
 
 
 def test_qwen_receives_compact_sources_to_avoid_colab_ngrok_timeout() -> None:
@@ -864,9 +1020,13 @@ def test_qwen_receives_compact_sources_to_avoid_colab_ngrok_timeout() -> None:
             request: ChatRequest,
             retrieval_response: ChatResponse,
         ) -> QwenGeneratedAnswer:
-            assert len(retrieval_response.sources) == 2
-            assert all(len(source.excerpt) <= 363 for source in retrieval_response.sources)
-            return QwenGeneratedAnswer("Qwen compact answer", "qwen-test")
+            assert len(retrieval_response.sources) == 3
+            assert all(len(source.excerpt) <= 903 for source in retrieval_response.sources)
+            return QwenGeneratedAnswer(
+                "Qwen compact answer [1]",
+                "qwen-test",
+                used_source_ids=("chunk-1",),
+            )
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -906,7 +1066,7 @@ def test_qwen_receives_compact_sources_to_avoid_colab_ngrok_timeout() -> None:
     )
 
     assert response.generation_mode == "qwen"
-    assert response.answer == "Qwen compact answer"
+    assert response.answer == "Qwen compact answer [1]"
     assert len(response.sources) == 3
 
 
@@ -1026,7 +1186,7 @@ def test_qwen_timeout_warns_and_keeps_retrieved_template() -> None:
     assert "Qwen 답변 생성 실패(timeout)" in (response.warning or "")
     assert "BGE-M3" in (response.warning or "")
     assert response.structured_answer is not None
-    assert response.checklist_items
+    assert response.checklist_items == []
 
 
 def test_invalid_qwen_source_reference_falls_back_without_500() -> None:

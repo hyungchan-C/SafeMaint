@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -97,7 +97,9 @@ class ChatChecklistSaveRequest(BaseModel):
     equipment_name: str | None = Field(default=None, max_length=100)
     task_type: str | None = Field(default=None, max_length=100)
     description: str = Field(min_length=5, max_length=2000)
-    checklist_items: list[str] = Field(min_length=1, max_length=50)
+    checklist_items: list[
+        Annotated[str, Field(min_length=1, max_length=1000)]
+    ] = Field(min_length=1, max_length=50)
 
 
 class AssessmentResponse(BaseModel):

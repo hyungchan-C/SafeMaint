@@ -128,6 +128,11 @@ class CatalogAnalyzer:
         )
         return self._qwen_model, self._qwen_processor
 
+    def warmup(self) -> None:
+        """Load the configured VLM before the first analysis request."""
+        if self.settings.enable_qwen:
+            self._load_qwen()
+
     def _analyze_with_qwen(self, image_path: Path) -> str:
         from qwen_vl_utils import process_vision_info
 

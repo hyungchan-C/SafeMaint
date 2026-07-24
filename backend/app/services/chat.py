@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+from time import perf_counter
+from uuid import uuid4
 
 import httpx
 from openai import OpenAIError
@@ -16,6 +19,7 @@ from app.schemas.chat import (
     ChatSource,
     QueryAnalysis,
     RetrievalAccessScope,
+    StructuredAnswer,
 )
 from app.services.accident_classifier import (
     AccidentClassifierClient,
@@ -23,6 +27,11 @@ from app.services.accident_classifier import (
 )
 from app.services.ai import AIConfigurationError, AIService
 from app.services.evidence_policy import RAG_UNAVAILABLE_WARNING
+from app.services.document_types import (
+    MANUAL_DOCUMENT_TYPES,
+    PUBLIC_REFERENCE_DOCUMENT_TYPES,
+    canonical_document_type,
+)
 from app.services.qwen import QwenAnswerFailure, QwenClient
 from app.services.question_intent import classify_question_intent
 from app.services.structured_answers import (
@@ -59,11 +68,10 @@ QWEN_COMPANY_CONTEXT_WARNING = (
 CLASSIFIER_FALLBACK_WARNING = (
     "팀 Qwen 사고유형 분류기를 사용할 수 없어 기존 검색 분석으로 대체했습니다."
 )
-QWEN_SOURCE_EXCERPT_CHARS = 360
 QWEN_SOURCE_LIMIT_BY_TYPE: dict[AnswerType, int] = {
-    "maintenance_guide": 2,
-    "document_qa": 4,
-    "component_info": 3,
+    "maintenance_guide": settings.qwen_maintenance_source_limit,
+    "document_qa": settings.qwen_document_source_limit,
+    "component_info": settings.qwen_component_source_limit,
     "no_evidence": 0,
     "clarification_required": 0,
 }
@@ -100,13 +108,9 @@ QWEN_CONTEXT_SIGNAL_TERMS = (
     "tagout",
     "interlock",
 )
-QWEN_MAINTENANCE_SOURCE_TYPES = frozenset(
-    {"manual", "equipment_manual", "component_manual", "work_standard"}
-)
-QWEN_PUBLIC_REFERENCE_TYPES = frozenset(
-    {"public_guide", "public_incident", "incident", "regulation"}
-)
-QWEN_PUBLIC_INCIDENT_TYPES = frozenset({"public_incident", "incident"})
+QWEN_MAINTENANCE_SOURCE_TYPES = MANUAL_DOCUMENT_TYPES
+QWEN_PUBLIC_REFERENCE_TYPES = PUBLIC_REFERENCE_DOCUMENT_TYPES
+QWEN_PUBLIC_INCIDENT_TYPES = frozenset({"public_incident"})
 QWEN_RELEVANCE_STOPWORDS = frozenset(
     {
         "그거",
@@ -176,6 +180,8 @@ QWEN_MAINTENANCE_ACTION_SIGNAL_TERMS = (
     "repair",
 )
 
+logger = logging.getLogger(__name__)
+
 
 class ChatService:
     def __init__(
@@ -188,6 +194,7 @@ class ChatService:
         qwen_client: QwenClient | None = None,
         qwen_enabled: bool | None = None,
         qwen_allow_company_context: bool | None = None,
+        qwen_intent_classify_enabled: bool | None = None,
         classifier_client: AccidentClassifierClient | None = None,
         classifier_enabled: bool | None = None,
     ) -> None:
@@ -216,6 +223,11 @@ class ChatService:
             if qwen_allow_company_context is None
             else qwen_allow_company_context
         )
+        self.qwen_intent_classify_enabled = (
+            settings.qwen_intent_classify_enabled
+            if qwen_intent_classify_enabled is None
+            else qwen_intent_classify_enabled
+        )
         self.classifier_client = classifier_client or AccidentClassifierClient(
             settings.qwen_classifier_url
         )
@@ -230,7 +242,13 @@ class ChatService:
         self,
         request: ChatRequest,
         access_scope: RetrievalAccessScope | None = None,
+        request_id: str | None = None,
     ) -> ChatResponse:
+        started_at = perf_counter()
+        resolved_request_id = request_id or str(uuid4())
+        explicit_question_intent = bool(
+            request.analysis and request.analysis.question_intent
+        )
         use_qwen = self.qwen_enabled and self.qwen_client is not None
         classification, classifier_fell_back = await self._classify(request)
         analyzed_request, analyzer_fell_back = await self._analyze(
@@ -247,13 +265,15 @@ class ChatService:
             analyzed_request = self._apply_classification(
                 analyzed_request, classification
             )
-        elif use_qwen:
+        elif use_qwen and self.qwen_intent_classify_enabled:
             qwen_analysis = await self.qwen_client.classify(analyzed_request)
             if qwen_analysis is not None:
                 analyzed_request = analyzed_request.model_copy(
                     update={
                         "analysis": self._merge_qwen_analysis(
-                            analyzed_request.analysis, qwen_analysis
+                            analyzed_request.analysis,
+                            qwen_analysis,
+                            preserve_intent=explicit_question_intent,
                         )
                     }
                 )
@@ -262,7 +282,7 @@ class ChatService:
         # current photo with stale document evidence (for example, a bearing manual).
         visual_answer = self._visual_answer(analyzed_request)
         if visual_answer:
-            return ChatResponse(
+            response = ChatResponse(
                 answer=visual_answer,
                 sources=[],
                 retrieval_mode="safety-fallback",
@@ -273,11 +293,33 @@ class ChatService:
                 ),
                 accident_classification=classification,
             )
+            self._log_response(
+                resolved_request_id,
+                analyzed_request,
+                response,
+                started_at=started_at,
+                qwen_used=False,
+                fallback_reason="vision_answer",
+            )
+            return response
 
         answer_type = self._resolved_answer_type(analyzed_request)
         if answer_type == "clarification_required":
-            return self._clarification_response(analyzed_request)
-        retrieval_response = await self._retrieve(analyzed_request, access_scope)
+            response = self._clarification_response(analyzed_request)
+            self._log_response(
+                resolved_request_id,
+                analyzed_request,
+                response,
+                started_at=started_at,
+                qwen_used=use_qwen,
+                fallback_reason="low_intent_confidence",
+            )
+            return response
+        retrieval_response = await self._retrieve(
+            analyzed_request,
+            access_scope,
+            request_id=resolved_request_id,
+        )
         if not retrieval_response.sources:
             retrieval_response = self._no_evidence_response(
                 retrieval_response,
@@ -321,21 +363,55 @@ class ChatService:
             )
 
         if use_qwen:
-            return await self._answer_with_qwen(analyzed_request, retrieval_response)
+            response = await self._answer_with_qwen(
+                analyzed_request,
+                retrieval_response,
+                request_id=resolved_request_id,
+            )
+            self._log_response(
+                resolved_request_id,
+                analyzed_request,
+                response,
+                started_at=started_at,
+                qwen_used=response.generation_mode == "qwen",
+                fallback_reason=(
+                    None if response.generation_mode == "qwen" else "qwen_fallback"
+                ),
+            )
+            return response
 
         if not retrieval_response.sources or not self.openai_enabled:
+            self._log_response(
+                resolved_request_id,
+                analyzed_request,
+                retrieval_response,
+                started_at=started_at,
+                qwen_used=False,
+                fallback_reason=(
+                    "no_evidence" if not retrieval_response.sources else "llm_disabled"
+                ),
+            )
             return retrieval_response
 
         # visual_summary is produced locally but is still supplied by the client.
         # Never forward OCR, labels, or image-derived text to an external provider.
         if analyzed_request.context.visual_summary and not settings.llm_is_local:
-            return retrieval_response.model_copy(
+            response = retrieval_response.model_copy(
                 update={
                     "warning": self._append_warning(
                         retrieval_response.warning, LOCAL_VISION_LLM_WARNING
                     )
                 }
             )
+            self._log_response(
+                resolved_request_id,
+                analyzed_request,
+                response,
+                started_at=started_at,
+                qwen_used=False,
+                fallback_reason="external_vision_context_blocked",
+            )
+            return response
 
         # This is intentionally unconditional: no company evidence is sent to
         # an external provider, even if a legacy environment flag says otherwise.
@@ -343,13 +419,22 @@ class ChatService:
             source.document_scope == "company"
             for source in retrieval_response.sources
         ):
-            return retrieval_response.model_copy(
+            response = retrieval_response.model_copy(
                 update={
                     "warning": self._append_warning(
                         retrieval_response.warning, COMPANY_LLM_WARNING
                     )
                 }
             )
+            self._log_response(
+                resolved_request_id,
+                analyzed_request,
+                response,
+                started_at=started_at,
+                qwen_used=False,
+                fallback_reason="external_company_context_blocked",
+            )
+            return response
 
         try:
             answer = await asyncio.to_thread(
@@ -358,26 +443,46 @@ class ChatService:
                 self._build_grounded_context(analyzed_request, retrieval_response),
             )
         except (AIConfigurationError, OpenAIError, RuntimeError, ValueError):
-            return retrieval_response.model_copy(
+            response = retrieval_response.model_copy(
                 update={
                     "warning": self._append_warning(
                         retrieval_response.warning, LLM_FALLBACK_WARNING
                     )
                 }
             )
+            self._log_response(
+                resolved_request_id,
+                analyzed_request,
+                response,
+                started_at=started_at,
+                qwen_used=False,
+                fallback_reason="openai_failure",
+            )
+            return response
 
-        return retrieval_response.model_copy(
+        response = retrieval_response.model_copy(
             update={
                 "answer": answer,
                 "generation_mode": "openai",
                 "model": settings.llm_answer_model,
             }
         )
+        self._log_response(
+            resolved_request_id,
+            analyzed_request,
+            response,
+            started_at=started_at,
+            qwen_used=False,
+            fallback_reason=None,
+        )
+        return response
 
     async def _answer_with_qwen(
         self,
         request: ChatRequest,
         retrieval_response: ChatResponse,
+        *,
+        request_id: str | None = None,
     ) -> ChatResponse:
         if not retrieval_response.sources or self.qwen_client is None:
             return retrieval_response
@@ -396,8 +501,15 @@ class ChatService:
                 }
             )
         qwen_response = self._qwen_context_response(request, retrieval_response)
+        qwen_started_at = perf_counter()
         qwen_answer = await self.qwen_client.answer(request, qwen_response)
         if qwen_answer is None:
+            self._log_qwen_stage(
+                request_id,
+                qwen_response,
+                qwen_started_at,
+                fallback_reason="unavailable",
+            )
             return retrieval_response.model_copy(
                 update={
                     "warning": self._append_warning(
@@ -406,6 +518,12 @@ class ChatService:
                 }
             )
         if isinstance(qwen_answer, QwenAnswerFailure):
+            self._log_qwen_stage(
+                request_id,
+                qwen_response,
+                qwen_started_at,
+                fallback_reason=qwen_answer.reason,
+            )
             return retrieval_response.model_copy(
                 update={
                     "warning": self._append_warning(
@@ -418,11 +536,32 @@ class ChatService:
         if qwen_answer.used_source_ids and not set(
             qwen_answer.used_source_ids
         ).issubset(allowed_source_ids):
+            self._log_qwen_stage(
+                request_id,
+                qwen_response,
+                qwen_started_at,
+                fallback_reason="invalid_source_reference",
+            )
             return retrieval_response.model_copy(
                 update={
                     "warning": self._append_warning(
                         retrieval_response.warning,
                         "Qwen이 검색되지 않은 출처를 참조해 구조화 결과를 사용하지 않았습니다.",
+                    )
+                }
+            )
+        if not qwen_answer.used_source_ids:
+            self._log_qwen_stage(
+                request_id,
+                qwen_response,
+                qwen_started_at,
+                fallback_reason="missing_source_citation",
+            )
+            return retrieval_response.model_copy(
+                update={
+                    "warning": self._append_warning(
+                        retrieval_response.warning,
+                        "Qwen 답변에 검증 가능한 출처 인용이 없어 자연어 답변을 사용하지 않았습니다.",
                     )
                 }
             )
@@ -445,19 +584,79 @@ class ChatService:
             if retrieval_response.answer_type == "maintenance_guide"
             else []
         )
-        if (
-            retrieval_response.answer_type == "maintenance_guide"
-            and not checklist_items
-        ):
-            checklist_items = retrieval_response.checklist_items
+        unvalidated_item_count = self._structured_item_count(
+            qwen_answer.structured_answer
+        ) + len(qwen_answer.checklist_items)
+        validated_item_count = self._structured_item_count(
+            structured_answer
+        ) + len(checklist_items)
+        answer = self._remap_answer_citations(
+            qwen_answer.answer,
+            qwen_response.sources,
+            retrieval_response.sources,
+        )
+        self._log_qwen_stage(
+            request_id,
+            qwen_response,
+            qwen_started_at,
+            fallback_reason=None,
+            removed_item_count=max(
+                0, unvalidated_item_count - validated_item_count
+            ),
+        )
         return retrieval_response.model_copy(
             update={
-                "answer": qwen_answer.answer,
+                "answer": answer,
                 "generation_mode": "qwen",
                 "model": qwen_answer.model or "qwen",
                 "structured_answer": structured_answer,
                 "checklist_items": checklist_items,
             }
+        )
+
+    @staticmethod
+    def _structured_item_count(value: StructuredAnswer | None) -> int:
+        if value is None:
+            return 0
+        dumped = value.model_dump(mode="python")
+        count = 0
+        for field_value in dumped.values():
+            if isinstance(field_value, list):
+                count += len(field_value)
+            elif isinstance(field_value, dict):
+                count += sum(
+                    len(nested)
+                    for nested in field_value.values()
+                    if isinstance(nested, list)
+                )
+        return count
+
+    @staticmethod
+    def _log_qwen_stage(
+        request_id: str | None,
+        response: ChatResponse,
+        started_at: float,
+        *,
+        fallback_reason: str | None,
+        removed_item_count: int = 0,
+    ) -> None:
+        logger.info(
+            "chat_qwen %s",
+            json.dumps(
+                {
+                    "request_id": request_id,
+                    "provider": settings.qwen_provider,
+                    "answer_type": response.answer_type,
+                    "evidence_count": len(response.sources),
+                    "response_ms": round(
+                        (perf_counter() - started_at) * 1000, 2
+                    ),
+                    "validation_removed_item_count": removed_item_count,
+                    "fallback": fallback_reason is not None,
+                    "fallback_reason": fallback_reason,
+                },
+                ensure_ascii=False,
+            ),
         )
 
     @staticmethod
@@ -563,6 +762,7 @@ class ChatService:
             1 for term in QWEN_MAINTENANCE_ACTION_SIGNAL_TERMS if term.casefold() in text
         )
         source_type = source.source_type.casefold()
+        source_type = canonical_document_type(source_type)
         type_bonus = 0.0
         if source_type in QWEN_PUBLIC_INCIDENT_TYPES:
             type_bonus = 0.18
@@ -590,7 +790,7 @@ class ChatService:
 
     @staticmethod
     def _source_group(source: ChatSource) -> str:
-        source_type = source.source_type.casefold()
+        source_type = canonical_document_type(source.source_type)
         if source_type in QWEN_PUBLIC_INCIDENT_TYPES:
             return "incident"
         if source_type in QWEN_MAINTENANCE_SOURCE_TYPES:
@@ -659,8 +859,8 @@ class ChatService:
             question,
             max_sentences=max_sentences,
         )
-        if len(excerpt) > QWEN_SOURCE_EXCERPT_CHARS:
-            excerpt = excerpt[:QWEN_SOURCE_EXCERPT_CHARS].rstrip() + "..."
+        if len(excerpt) > settings.qwen_source_excerpt_chars:
+            excerpt = excerpt[: settings.qwen_source_excerpt_chars].rstrip() + "..."
         return source.model_copy(update={"excerpt": excerpt})
 
     @staticmethod
@@ -800,6 +1000,8 @@ class ChatService:
         self,
         request: ChatRequest,
         access_scope: RetrievalAccessScope | None = None,
+        *,
+        request_id: str | None = None,
     ) -> ChatResponse:
         if not self.service_url:
             return self._fallback(request)
@@ -812,11 +1014,26 @@ class ChatService:
                 request_body["access_scope"] = (
                     access_scope or RetrievalAccessScope()
                 ).model_dump(mode="json")
+                request_body["request_id"] = request_id
                 response = await client.post(
                     f"{self.service_url}/v1/chat", json=request_body
                 )
                 response.raise_for_status()
-                return ChatResponse.model_validate(response.json())
+                parsed = ChatResponse.model_validate(response.json())
+                return parsed.model_copy(
+                    update={
+                        "sources": [
+                            source.model_copy(
+                                update={
+                                    "source_type": canonical_document_type(
+                                        source.source_type
+                                    )
+                                }
+                            )
+                            for source in parsed.sources
+                        ]
+                    }
+                )
         except (httpx.HTTPError, ValueError):
             return self._fallback(request)
 
@@ -859,42 +1076,127 @@ class ChatService:
     def _merge_qwen_analysis(
         fallback: QueryAnalysis | None,
         qwen_analysis: QueryAnalysis,
+        *,
+        preserve_intent: bool = False,
     ) -> QueryAnalysis:
         base = fallback or QueryAnalysis()
-        updates: dict[str, object] = {}
-        if qwen_analysis.question_intent and not ChatService._keep_local_intent(
-            base,
-            qwen_analysis,
-        ):
-            updates["question_intent"] = qwen_analysis.question_intent
-            updates["intent_confidence"] = qwen_analysis.intent_confidence
-            updates["clarification_question"] = qwen_analysis.clarification_question
-        occurrence_type = (qwen_analysis.occurrence_type or "").strip()
-        if occurrence_type:
-            updates["occurrence_type"] = occurrence_type
+        updates: dict[str, object] = {
+            field: value
+            for field in (
+                "occurrence_type",
+                "work_type",
+                "equipment",
+                "component",
+                "explicit_risk_factors",
+                "energy_sources",
+                "search_keywords",
+            )
+            if (value := getattr(qwen_analysis, field))
+        }
+        if not preserve_intent and qwen_analysis.question_intent:
+            confidence = qwen_analysis.intent_confidence
+            if (
+                confidence is not None
+                and confidence < settings.question_intent_confidence_threshold
+            ):
+                updates.update(
+                    {
+                        "question_intent": "clarification_required",
+                        "intent_confidence": confidence,
+                        "clarification_question": (
+                            qwen_analysis.clarification_question
+                            or "질문의 목적을 정확히 확인해야 합니다. 부품 정보, 문서 내용, 설치·점검 방법 중 무엇이 필요한가요?"
+                        ),
+                    }
+                )
+            elif confidence is not None:
+                updates.update(
+                    {
+                        "question_intent": qwen_analysis.question_intent,
+                        "intent_confidence": confidence,
+                        "clarification_question": qwen_analysis.clarification_question,
+                    }
+                )
         return base.model_copy(update=updates) if updates else base
 
     @staticmethod
-    def _keep_local_intent(
-        fallback: QueryAnalysis,
-        qwen_analysis: QueryAnalysis,
-    ) -> bool:
-        local_intent = fallback.question_intent
-        qwen_intent = qwen_analysis.question_intent
-        if not local_intent or not qwen_intent:
-            return False
-        if local_intent == qwen_intent:
-            return False
+    def _remap_answer_citations(
+        answer: str,
+        sent_sources: list[ChatSource],
+        all_sources: list[ChatSource],
+    ) -> str:
+        global_numbers = {
+            source.chunk_id: index
+            for index, source in enumerate(all_sources, start=1)
+        }
+        local_to_global = {
+            index: global_numbers[source.chunk_id]
+            for index, source in enumerate(sent_sources, start=1)
+            if source.chunk_id in global_numbers
+        }
+        return re.sub(
+            r"\[\s*(\d+)\s*\]",
+            lambda match: (
+                f"[{local_to_global[int(match.group(1))]}]"
+                if int(match.group(1)) in local_to_global
+                else match.group(0)
+            ),
+            answer,
+        )
 
-        local_confidence = fallback.intent_confidence or 0.0
-        qwen_confidence = qwen_analysis.intent_confidence or 0.0
-        if local_intent != "clarification_required" and local_confidence >= 0.85:
-            if qwen_intent == "clarification_required":
-                return True
-            return qwen_confidence < max(0.97, local_confidence + 0.05)
-        if qwen_intent == "clarification_required" and qwen_confidence < 0.85:
-            return True
-        return False
+    @staticmethod
+    def _log_response(
+        request_id: str,
+        request: ChatRequest,
+        response: ChatResponse,
+        *,
+        started_at: float,
+        qwen_used: bool,
+        fallback_reason: str | None,
+    ) -> None:
+        analysis = request.analysis or QueryAnalysis()
+        bucket_counts: dict[str, int] = {}
+        for source in response.sources:
+            source_type = canonical_document_type(source.source_type)
+            bucket = (
+                "manual"
+                if source_type in QWEN_MAINTENANCE_SOURCE_TYPES
+                else source_type
+            )
+            bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        logger.info(
+            "chat_pipeline %s",
+            json.dumps(
+                {
+                    "request_id": request_id,
+                    "question_intent": response.answer_type,
+                    "intent_confidence": analysis.intent_confidence,
+                    "qwen_used": qwen_used,
+                    "qwen_provider": settings.qwen_provider if qwen_used else None,
+                    "equipment": analysis.equipment,
+                    "component": analysis.component,
+                    "work_type": analysis.work_type,
+                    "selected_bucket_counts": bucket_counts,
+                    "selected_sources": [
+                        {
+                            "document_id": source.document_id,
+                            "chunk_id": source.chunk_id,
+                            "document_type": canonical_document_type(
+                                source.source_type
+                            ),
+                            "score": source.reranker_score,
+                        }
+                        for source in response.sources
+                    ],
+                    "evidence_count": len(response.sources),
+                    "generation_mode": response.generation_mode,
+                    "fallback": fallback_reason is not None,
+                    "fallback_reason": fallback_reason,
+                    "total_ms": round((perf_counter() - started_at) * 1000, 2),
+                },
+                ensure_ascii=False,
+            ),
+        )
 
     @staticmethod
     def _merge_analysis(

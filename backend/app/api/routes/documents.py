@@ -558,21 +558,22 @@ def approve_document(
 def delete_document(
     document_id: UUID,
     current_user: Annotated[User, Depends(require_document_delete)],
+    access_scope: Annotated[RetrievalAccessScope, Depends(get_retrieval_access_scope)],
     db: Annotated[Session, Depends(get_db)],
 ) -> None:
     """문서를 소프트 삭제한다(레코드/원본 파일은 남기고 접근·검색 대상에서만 제외).
 
-    `lifecycle_status`를 'deleted'로만 바꾸면 되는 이유: RAG 검색(`retrieval.py`)은
-    `lifecycle_status = 'active'`인 문서만 대상으로 하고, worker의 상태 전이 쿼리도
-    전부 `lifecycle_status <> 'deleted'`를 조건으로 걸고 있어(`ai/rag_service/worker.py`)
-    이미 처리 중이던 job이 나중에 끝나도 삭제 상태를 덮어쓰지 않는다. 실제 파일을 함께
-    지우면(하드 삭제) 처리 중이던 job이 결과를 저장하려다 예외 없이 죽는 문제가 있었음
-    (오늘 세션에서 재현) — 소프트 삭제는 이 문제 자체가 발생하지 않는다.
+    RAG 검색은 활성 문서만 대상으로 하며, worker의 완료 상태 전이도 삭제 문서를
+    덮어쓰지 않도록 보호한다. 처리 중인 원본 파일은 즉시 지우지 않아 worker의 파일
+    접근 실패를 피하고, 삭제된 문서와 청크는 검색과 열람에서 제외한다.
     """
 
-    document = db.get(Document, document_id)
-    if document is None or document.lifecycle_status == "deleted":
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "문서를 찾을 수 없습니다.")
+    document = require_accessible_document(
+        db,
+        document_id,
+        current_user,
+        access_scope,
+    )
 
     document.lifecycle_status = "deleted"
     document.deleted_at = datetime.now(timezone.utc)

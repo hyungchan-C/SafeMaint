@@ -60,11 +60,11 @@ def test_rag_scope_uses_parameters_instead_of_source_type_sql_literals() -> None
 
     sql, parameters = scope_sql(source_types, (document_id,))
 
-    assert source_types == ("incident", "manual")
-    assert "d.source_type = ANY(%s)" in sql
+    assert source_types == ("public_incident", "equipment_manual")
+    assert "d.document_type_code = ANY(%s)" in sql
     assert "d.id = ANY(%s)" in sql
     assert "incident" not in sql
-    assert parameters == [["incident", "manual"], [document_id]]
+    assert parameters == [["public_incident", "equipment_manual"], [document_id]]
     with pytest.raises(ValueError, match="must not be empty"):
         normalize_source_types([])
 

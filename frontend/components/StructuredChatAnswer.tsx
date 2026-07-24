@@ -37,8 +37,19 @@ function EvidenceList({
               근거 {item.evidence_chunk_ids
                 .map((id) => sourceNumbers.get(id))
                 .filter((value): value is number => value !== undefined)
-                .map((value) => `[${value}]`)
-                .join(" ")}
+                .map((value) => (
+                  <a
+                    href={`#chat-source-${value}`}
+                    key={value}
+                    onClick={() => {
+                      const card = document.getElementById(`chat-source-${value}`);
+                      const details = card?.closest("details");
+                      if (details instanceof HTMLDetailsElement) details.open = true;
+                    }}
+                  >
+                    [{value}]
+                  </a>
+                ))}
             </small>
           )}
         </li>
@@ -220,9 +231,12 @@ export default function StructuredChatAnswer({
   return (
     <div className="structured-answer maintenance-answer">
       <span className="answer-type-label">유지보수 작업 안내</span>
-      <section className={`maintenance-summary risk-${answer.summary.risk_level.replaceAll(" ", "-")}`}>
+      <section className="maintenance-summary risk-판단-불가">
         <div><span>상태</span><strong>{answer.summary.status}</strong></div>
-        <div><span>예상 위험도</span><strong>{answer.summary.risk_level}</strong></div>
+        <div>
+          <span>위험성평가</span>
+          <strong>별도 위험성평가 필요</strong>
+        </div>
         <p>{answer.summary.core_warning}</p>
         <EvidenceList items={answer.summary.risk_basis} sourceNumbers={sourceNumbers} />
       </section>
@@ -230,15 +244,15 @@ export default function StructuredChatAnswer({
       <section className="structured-section"><h4>2. 주요 위험요인</h4><EvidenceList items={answer.hazards.map(({ name, ...item }) => ({ ...item, content: `${name}: ${item.content}` }))} sourceNumbers={sourceNumbers} /></section>
       <section className="structured-section"><h4>3. 매뉴얼 기반 작업 절차</h4><EvidenceList items={answer.manual_steps} sourceNumbers={sourceNumbers} /></section>
       <section className="structured-section stop-section"><h4>4. 즉시 작업을 중지해야 하는 조건</h4><EvidenceList items={answer.stop_conditions} sourceNumbers={sourceNumbers} /></section>
-      <section className="structured-section"><h4>5. 관련 법령·사고사례</h4><EvidenceList items={answer.related_regulations_and_incidents} sourceNumbers={sourceNumbers} /></section>
+      <section className="structured-section"><h4>5. 관련 회사 기준·법령·가이드·사고사례</h4><EvidenceList items={answer.related_regulations_and_incidents} sourceNumbers={sourceNumbers} /></section>
       <ConflictSection items={answer.conflicts} sourceNumbers={sourceNumbers} />
-      <section className="structured-section muted"><h4>6. 추가 확인이 필요한 내용</h4><TextList items={answer.additional_information_needed} /></section>
       <ChatChecklist
         items={checklistItems}
         savedAssessmentId={savedAssessmentId}
         isSaving={isSavingChecklist}
         onSave={onSaveChecklist}
       />
+      <section className="structured-section muted"><h4>6. 추가 확인이 필요한 내용</h4><TextList items={answer.additional_information_needed} /></section>
       <p className="structured-critical">이 안내는 작업 승인이 아닙니다. 안전관리자의 최종 확인 전에는 작업을 시작하지 마세요.</p>
     </div>
   );
