@@ -55,3 +55,17 @@ export interface AssessmentResponse {
   evidence_status: "not_connected" | "connected";
   disclaimer: string;
 }
+
+export interface AssessmentSummaryResponse {
+  assessment_id: string;
+  status: "draft" | "pending_review" | "approved" | "rejected";
+  created_at: string;
+  created_by_user_id: string | null;
+  created_by_name: string | null;
+  site_name: string;
+  equipment_name: string;
+  task_type: string;
+  description: string;
+  checklist_total: number;
+  checklist_completed: number;
+}

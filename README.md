@@ -727,6 +727,10 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 별도 운영 작업 필요: 고객사 HTTPS 인증서/reverse proxy, Ed25519 키 수명주기와 오프라인 전달 절차, 실제 백업·PITR 자동화, 스캔 PDF용 검증된 로컬 OCR 엔진, 악성 PDF 안티바이러스/CDR, 로그 보존·모니터링 정책. 이 항목들은 동작하는 것처럼 화면에 표시하지 않습니다.
 
+## Colab A100 비전 서버
+
+[`notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb`](notebooks/SafeMaint_Vision_Colab_A100_Server.ipynb)은 기본적으로 `google/siglip2-base-patch16-naflex`만 사용하는 벡터 전용 실험 서버를 ngrok으로 제공합니다. PDF 페이지 전체, 겹치는 4개 영역과 PDF 내부 이미지를 벡터화하고, 현장 사진과 유사한 PDF 페이지를 반환합니다. Qwen3-VL 코드는 삭제하지 않았으며 `VISION_ENABLE_QWEN=true`로 되돌리면 정밀 검증 경로를 다시 사용할 수 있습니다. 노트북이 출력한 `VISION_SERVICE_URL`과 `VISION_API_KEY`를 로컬 `.env`에 설정하고 백엔드를 재시작하세요. 기본 비전 인덱싱 한도는 대형 장비 카탈로그를 위해 2,000페이지이며 `VISION_PDF_MAX_PAGES`로 조정할 수 있습니다. 인덱스 형식이 페이지 기반 v5로 변경되었으므로 기존 문서는 **비전 재인덱싱**이 필요합니다. Colab 저장소는 일시적이므로 런타임 재시작 후에도 다시 인덱싱해야 합니다.
+
 ## 팀 Qwen3.5-9B LoRA 로컬 실행
 
 팀 파인튜닝 모델은 일반 채팅 모델이 아니라 작업 설명을 14개 산업재해 발생형태로

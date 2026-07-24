@@ -46,6 +46,9 @@ describe("ChatAnswerContent", () => {
         }}
         checklistItems={[]}
         sources={[source]}
+        savedAssessmentId={null}
+        isSavingChecklist={false}
+        onSaveChecklist={() => {}}
       />,
     );
 
@@ -62,6 +65,9 @@ describe("ChatAnswerContent", () => {
         structuredAnswer={null}
         checklistItems={[]}
         sources={[]}
+        savedAssessmentId={null}
+        isSavingChecklist={false}
+        onSaveChecklist={() => {}}
       />,
     );
 

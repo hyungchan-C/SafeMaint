@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import tempfile
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -103,6 +104,9 @@ class QwenEngine:
         )
 
     def _answer_sync(self, request: AnswerRequest) -> AnswerResponse:
+        if self.settings.answer_mode == "text":
+            return self._answer_text_sync(request)
+
         evidence = self._evidence_text(request)
         system_prompt = (
             "당신은 SafeMaint AI입니다. 반드시 유효한 JSON 객체 하나만 출력하세요. "
@@ -137,7 +141,7 @@ class QwenEngine:
         if response is not None:
             return response
 
-        if validation_error:
+        if validation_error and self.settings.repair_enabled:
             repaired = self._generate(
                 system_prompt,
                 self._repair_prompt(request, generated, validation_error),
@@ -147,8 +151,87 @@ class QwenEngine:
             response, _ = self._response_from_generation(request, repaired)
             if response is not None:
                 return response
+        elif validation_error:
+            print(
+                json.dumps(
+                    {
+                        "event": "qwen_repair_skipped",
+                        "answer_type": request.answer_type,
+                        "reason": validation_error[:300],
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
 
         return self._fallback_answer(request, generated)
+
+    def _answer_text_sync(self, request: AnswerRequest) -> AnswerResponse:
+        evidence = self._evidence_text(request)
+        system_prompt = (
+            "You are SafeMaint AI. Write the final answer in Korean only. "
+            "Use only the provided evidence. Do not output JSON, markdown tables, "
+            "checklists, hidden reasoning, or source data structures. "
+            "Cite every evidence-backed claim with the matching numeric marker "
+            "such as [1]. Do not cite a source that does not support the claim."
+        )
+        user_prompt = (
+            f"Answer type: {request.answer_type}\n"
+            f"{self._answer_text_instructions(request)}\n\n"
+            f"Work context:\n{self._context_text(request.context)}\n\n"
+            f"Analysis:\n{self._analysis_text(request.analysis)}\n\n"
+            f"Evidence:\n{evidence}\n\n"
+            f"Question:\n{request.question}"
+        )
+        generated = self._generate(
+            system_prompt,
+            user_prompt,
+            max_new_tokens=self.settings.max_new_tokens,
+            disable_adapter=True,
+        )
+        return AnswerResponse(
+            answer=self._answer_text_from_generation(request, generated),
+            answer_type=request.answer_type,
+            structured_answer=None,
+            checklist_items=[],
+            used_source_ids=self._source_ids_from_answer_citations(
+                generated,
+                request.sources,
+            ),
+            model=self.settings.base_model,
+        )
+
+    def _answer_text_from_generation(
+        self,
+        request: AnswerRequest,
+        generated: str,
+    ) -> str:
+        parsed = self._extract_answer_payload(generated)
+        parsed_answer = parsed and isinstance(parsed.get("answer"), str)
+        if parsed_answer:
+            answer_text = self._clean_answer_text(parsed["answer"])
+        else:
+            answer_text = self._clean_answer_text(generated)
+        if (
+            not parsed_answer
+            and self._extract_json(generated) is not None
+        ) or answer_text.startswith("{"):
+            answer_text = ""
+        return answer_text or self._fallback_answer_text(request)
+
+    @staticmethod
+    def _source_ids_from_answer_citations(
+        answer: str,
+        sources: list[ChatSource],
+    ) -> list[str]:
+        source_ids: list[str] = []
+        for match in re.findall(r"\[\s*(\d+)\s*\]", answer):
+            index = int(match)
+            if 1 <= index <= len(sources):
+                source_id = sources[index - 1].chunk_id
+                if source_id not in source_ids:
+                    source_ids.append(source_id)
+        return source_ids
 
     def _response_from_generation(
         self,
@@ -1142,16 +1225,85 @@ class QwenEngine:
             if disable_adapter and self._adapter_loaded and hasattr(model, "disable_adapter")
             else nullcontext()
         )
+        started_at = time.perf_counter()
         with adapter_context:
             with torch.inference_mode():
+                if self._is_cuda_device(input_device):
+                    torch.cuda.synchronize(input_device)
                 output_ids = model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
                     do_sample=False,
                     pad_token_id=tokenizer.eos_token_id,
                 )
+                if self._is_cuda_device(input_device):
+                    torch.cuda.synchronize(input_device)
+        elapsed_seconds = time.perf_counter() - started_at
         generated = output_ids[0][inputs["input_ids"].shape[-1] :]
+        self._log_generation_metrics(
+            model,
+            torch_module=torch,
+            input_tokens=int(inputs["input_ids"].shape[-1]),
+            new_tokens=int(generated.shape[-1]),
+            elapsed_seconds=elapsed_seconds,
+            max_new_tokens=max_new_tokens,
+            disable_adapter=disable_adapter,
+        )
         return tokenizer.decode(generated, skip_special_tokens=True).strip()
+
+    @staticmethod
+    def _is_cuda_device(device: Any) -> bool:
+        return str(getattr(device, "type", device)).startswith("cuda")
+
+    @staticmethod
+    def _log_generation_metrics(
+        model: Any,
+        *,
+        torch_module: Any,
+        input_tokens: int,
+        new_tokens: int,
+        elapsed_seconds: float,
+        max_new_tokens: int,
+        disable_adapter: bool,
+    ) -> None:
+        tokens_per_second = (
+            new_tokens / elapsed_seconds if elapsed_seconds > 0 else None
+        )
+        gpu_name = None
+        if torch_module.cuda.is_available():
+            try:
+                gpu_name = torch_module.cuda.get_device_name(0)
+            except Exception:
+                gpu_name = None
+        is_loaded_in_4bit = bool(getattr(model, "is_loaded_in_4bit", False))
+        if not is_loaded_in_4bit:
+            base_model = getattr(model, "base_model", None)
+            is_loaded_in_4bit = bool(
+                getattr(base_model, "is_loaded_in_4bit", False)
+            )
+        print(
+            json.dumps(
+                {
+                    "event": "qwen_generate",
+                    "input_tokens": input_tokens,
+                    "new_tokens": new_tokens,
+                    "elapsed_seconds": round(elapsed_seconds, 3),
+                    "tokens_per_second": (
+                        round(tokens_per_second, 3)
+                        if tokens_per_second is not None
+                        else None
+                    ),
+                    "max_new_tokens": max_new_tokens,
+                    "disable_adapter": disable_adapter,
+                    "cuda_available": bool(torch_module.cuda.is_available()),
+                    "gpu_name": gpu_name,
+                    "hf_device_map": str(getattr(model, "hf_device_map", None)),
+                    "is_loaded_in_4bit": is_loaded_in_4bit,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
 
     @staticmethod
     def _clean_answer_text(text: str) -> str:
@@ -1224,6 +1376,27 @@ class QwenEngine:
             if label and label in text:
                 return label, None, None, None, None
         return "기타", None, None, None, None
+
+    @staticmethod
+    def _answer_text_instructions(request: AnswerRequest) -> str:
+        if request.answer_type == "document_qa":
+            return (
+                "Return 2-4 concise sentences. Summarize only what the retrieved "
+                "document evidence verifies. If the document/version/model is not "
+                "clear from evidence, say that it must be checked."
+            )
+        if request.answer_type == "component_info":
+            return (
+                "Return 2-4 concise sentences. Explain what the component is, its "
+                "main role, and one verified caution if evidence supports it. "
+                "Do not give installation or repair steps."
+            )
+        return (
+            "Return 3-5 concise sentences. Mention verified pre-checks and major "
+            "hazards only from evidence. Do not approve the work. If evidence is "
+            "insufficient, say that the manufacturer manual and site safety manager "
+            "must be checked before work starts."
+        )
 
     @staticmethod
     def _answer_format_for_type(request: AnswerRequest) -> str:

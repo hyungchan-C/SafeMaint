@@ -11,6 +11,7 @@ from vision_service.config import Settings
 from vision_service.catalog_matcher import CatalogImageMatcher, _feature
 from PIL import Image, ImageDraw
 import numpy as np
+from pypdf import PdfWriter
 
 
 def test_json_object_accepts_fenced_model_output() -> None:
@@ -92,3 +93,65 @@ def test_small_part_search_uses_overlapping_detail_views() -> None:
     assert len({view.size for view in views[1:]}) == 1
     assert views[1].width < image.width
     assert views[1].height < image.height
+
+
+def test_pdf_page_index_uses_full_page_and_overlapping_regions() -> None:
+    image = Image.new("RGB", (1200, 1600), "white")
+
+    views = CatalogImageMatcher._page_views(image)
+
+    assert len(views) == 5
+    assert views[0] == (image, None)
+    assert all(box is not None for _, box in views[1:])
+    assert all(view.width > image.width // 2 for view, _ in views[1:])
+    assert all(view.height > image.height // 2 for view, _ in views[1:])
+
+
+def test_pdf_index_renders_three_pages_for_vector_search(tmp_path, monkeypatch) -> None:
+    pdf_path = tmp_path / "three-pages.pdf"
+    writer = PdfWriter()
+    for _ in range(3):
+        writer.add_blank_page(width=600, height=800)
+    with pdf_path.open("wb") as output:
+        writer.write(output)
+
+    matcher = CatalogImageMatcher(str(tmp_path / "index"), 0.5)
+    monkeypatch.setattr(
+        matcher.embedder,
+        "encode_many",
+        lambda images: np.ones((len(images), 4), dtype=np.float32) / 2,
+    )
+    monkeypatch.setattr(
+        matcher.embedder,
+        "encode",
+        lambda _image: np.ones(4, dtype=np.float32) / 2,
+    )
+
+    summary = matcher.index_pdf(pdf_path, pdf_path.name)
+
+    assert summary.page_count == 3
+    assert summary.image_count == 15
+    assert summary.index_version.startswith("safemaint-page-matrix-v5:")
+    assert matcher.resolve_image(summary.catalog_id, 2, 1).name == "page-0002.jpg"
+
+
+def test_analyzer_warmup_preloads_qwen_when_enabled(monkeypatch) -> None:
+    analyzer = CatalogAnalyzer(Settings(enable_qwen=True))
+    calls: list[str] = []
+    monkeypatch.setattr(analyzer, "_load_qwen", lambda: calls.append("qwen"))
+
+    analyzer.warmup()
+
+    assert calls == ["qwen"]
+
+
+def test_catalog_matcher_warmup_initializes_image_and_text_paths(tmp_path, monkeypatch) -> None:
+    matcher = CatalogImageMatcher(str(tmp_path), 0.5)
+    calls: list[str] = []
+    monkeypatch.setattr(matcher.embedder, "encode_many", lambda _images: np.ones((1, 4)))
+    monkeypatch.setattr(matcher.embedder, "classify", lambda _vectors: calls.append("classify"))
+    monkeypatch.setattr(matcher.embedder, "has_visible_text", lambda _vectors: calls.append("text"))
+
+    matcher.warmup()
+
+    assert calls == ["classify", "text"]

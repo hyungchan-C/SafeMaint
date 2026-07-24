@@ -4,7 +4,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
-from httpx import Client, HTTPError
+from httpx import Client, HTTPError, RequestError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.db.models import Document, DocumentVersion, User
 from app.db.session import get_db
 from app.schemas.chat import RetrievalAccessScope
+from app.services.document_access import require_accessible_document
 
 
 router = APIRouter(prefix="/vision", tags=["vision"])
@@ -39,38 +40,6 @@ def _detail(response: object, fallback: str) -> str:
         return fallback
 
 
-def _can_access_document(
-    document: Document,
-    current_user: User,
-    access_scope: RetrievalAccessScope,
-) -> bool:
-    if document.lifecycle_status == "deleted":
-        return False
-    if document.created_by_user_id == current_user.id:
-        return True
-    if document.access_level == "public":
-        return True
-    if document.access_level == "private" or not access_scope.allow_company:
-        return False
-    return access_scope.all_sites or (
-        document.site_id is not None
-        and str(document.site_id) in access_scope.site_ids
-    )
-
-
-def _require_accessible_document(
-    db: Session,
-    document_id: UUID,
-    current_user: User,
-    access_scope: RetrievalAccessScope,
-) -> Document:
-    document = db.get(Document, document_id)
-    if document is None or not _can_access_document(document, current_user, access_scope):
-        # Do not reveal whether an inaccessible document exists.
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "문서를 찾을 수 없습니다.")
-    return document
-
-
 def _catalog_id_for_match(document: Document) -> str:
     metadata = document.metadata_json or {}
     catalog_id = str(metadata.get(CATALOG_METADATA_KEY) or "")
@@ -82,6 +51,14 @@ def _catalog_id_for_match(document: Document) -> str:
             "선택한 문서는 이전 비전 인덱스 형식입니다. 문서 목록에서 비전 재인덱싱을 실행해 주세요.",
         )
     return catalog_id
+
+
+def _current_catalog_id(document: Document) -> str | None:
+    """Return the catalog id only when the document has a current vision index."""
+    metadata = document.metadata_json or {}
+    catalog_id = str(metadata.get(CATALOG_METADATA_KEY) or "")
+    index_version = str(metadata.get(CATALOG_INDEX_VERSION_KEY) or "")
+    return catalog_id if catalog_id and index_version else None
 
 
 def _read_upload(file: UploadFile, *, limit: int, expected: str) -> bytes:
@@ -112,12 +89,21 @@ def _forward_content(
     fallback: str,
     data: dict[str, str] | None = None,
 ) -> dict[str, object]:
+    service_url = settings.vision_service_url.rstrip("/")
+    if not service_url:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "비전 서비스가 설정되지 않았습니다. Colab 비전 노트북을 실행한 뒤 출력된 "
+            "VISION_SERVICE_URL과 VISION_API_KEY를 .env에 설정하고 backend를 재시작해 주세요.",
+        )
     try:
+        headers = {"Authorization": f"Bearer {settings.vision_api_key}"} if settings.vision_api_key else None
         with Client(timeout=900.0) as client:
             response = client.post(
-                f"{settings.vision_service_url.rstrip('/')}{path}",
+                f"{service_url}{path}",
                 files={"file": (filename, content, content_type)},
                 data=data,
+                headers=headers,
             )
         if response.is_error:
             raise HTTPException(response.status_code, _detail(response, fallback))
@@ -127,6 +113,13 @@ def _forward_content(
         return payload
     except HTTPException:
         raise
+    except RequestError as error:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "비전 서비스에 연결할 수 없습니다. Colab 런타임과 ngrok 주소가 살아 있는지 확인하고, "
+            "노트북이 출력한 VISION_SERVICE_URL과 VISION_API_KEY를 .env에 반영한 뒤 "
+            "backend를 재시작해 주세요.",
+        ) from error
     except (HTTPError, OSError, ValueError) as error:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -145,15 +138,17 @@ def catalog_image(
 ) -> Response:
     if page < 1 or image_index < 1:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "후보 이미지를 찾을 수 없습니다.")
-    document = _require_accessible_document(db, document_id, current_user, access_scope)
+    document = require_accessible_document(db, document_id, current_user, access_scope)
     catalog_id = str((document.metadata_json or {}).get(CATALOG_METADATA_KEY) or "")
     if not catalog_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "카탈로그 인덱스를 찾을 수 없습니다.")
     try:
+        headers = {"Authorization": f"Bearer {settings.vision_api_key}"} if settings.vision_api_key else None
         with Client(timeout=30.0) as client:
             response = client.get(
                 f"{settings.vision_service_url.rstrip('/')}/v1/catalog/image/"
-                f"{catalog_id}/{page}/{image_index}"
+                f"{catalog_id}/{page}/{image_index}",
+                headers=headers,
             )
         if response.is_error:
             raise HTTPException(response.status_code, _detail(response, "후보 이미지를 찾을 수 없습니다."))
@@ -175,7 +170,7 @@ def index_catalog(
     db: Annotated[Session, Depends(get_db)],
     document_id: Annotated[UUID, Form()],
 ) -> dict[str, object]:
-    document = _require_accessible_document(db, document_id, current_user, access_scope)
+    document = require_accessible_document(db, document_id, current_user, access_scope)
     if document.created_by_user_id != current_user.id and not access_scope.all_sites:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "문서를 찾을 수 없습니다.")
     version = db.scalar(
@@ -245,10 +240,19 @@ def match_catalog(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "analysis_mode는 fast 또는 deep이어야 합니다.")
     selected_ids = _parse_document_ids(document_ids)
     catalog_to_document: dict[str, str] = {}
+    skipped_documents: list[str] = []
     for document_id in selected_ids:
-        document = _require_accessible_document(db, document_id, current_user, access_scope)
-        catalog_id = _catalog_id_for_match(document)
+        document = require_accessible_document(db, document_id, current_user, access_scope)
+        catalog_id = _current_catalog_id(document)
+        if catalog_id is None:
+            skipped_documents.append(document.title)
+            continue
         catalog_to_document[catalog_id] = str(document.id)
+    if selected_ids and not catalog_to_document:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "선택한 문서에 최신 비전 인덱스가 없습니다. 문서 목록에서 비전 재인덱싱을 실행해 주세요.",
+        )
 
     content = _read_upload(file, limit=settings.vision_image_max_upload_bytes, expected="image")
     payload = _forward_content(
@@ -276,6 +280,16 @@ def match_catalog(
             safe_candidate["document_id"] = document_id
             safe_candidates.append(safe_candidate)
     payload["catalog_candidates"] = safe_candidates
+    if skipped_documents:
+        warnings = payload.get("warnings")
+        safe_warnings = [str(value) for value in warnings] if isinstance(warnings, list) else []
+        names = ", ".join(skipped_documents[:3])
+        remainder = len(skipped_documents) - 3
+        suffix = f" 외 {remainder}개" if remainder > 0 else ""
+        safe_warnings.append(
+            f"구형 비전 인덱스 문서 {len(skipped_documents)}개를 검색에서 제외했습니다: {names}{suffix}"
+        )
+        payload["warnings"] = safe_warnings
     return payload
 
 

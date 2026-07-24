@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.db.models import (
@@ -123,6 +123,31 @@ class AssessmentRepository:
             )
         )
         return self.session.scalar(statement)
+
+    def list_assessments(
+        self,
+        *,
+        requester_user_id: UUID,
+        all_sites: bool,
+        site_ids: list[str],
+    ) -> list[Assessment]:
+        """`all_sites` 권한이 있으면 전체를, 없으면 본인 것 + 배정된 사업장 것만 본다."""
+
+        statement = (
+            select(Assessment)
+            .options(
+                selectinload(Assessment.checklist_items),
+                selectinload(Assessment.created_by_user),
+            )
+            .order_by(Assessment.created_at.desc())
+        )
+        if not all_sites:
+            conditions = [Assessment.created_by_user_id == requester_user_id]
+            parsed_site_ids = [UUID(site_id) for site_id in site_ids]
+            if parsed_site_ids:
+                conditions.append(Assessment.site_id.in_(parsed_site_ids))
+            statement = statement.where(or_(*conditions))
+        return list(self.session.scalars(statement).all())
 
     def get_checklist_item_for_update(
         self,

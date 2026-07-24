@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -12,17 +13,21 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
+    get_retrieval_access_scope,
     require_document_approve,
+    require_document_delete,
     require_document_read,
     require_document_upload,
 )
 from app.core.config import settings
 from app.db.models import (
+    AuditEvent,
     Document,
     DocumentProcessingJob,
     DocumentType,
@@ -30,12 +35,14 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
+from app.schemas.chat import RetrievalAccessScope
 from app.schemas.documents import (
     ApproveDocumentResponse,
     ReviewQueueDocumentSummary,
     UploadDocumentResponse,
     UserDocumentSummary,
 )
+from app.services.document_access import require_accessible_document
 from app.services.document_approval import (
     DocumentApprovalConflictError,
     DocumentApprovalNotFoundError,
@@ -89,6 +96,33 @@ def _processing_summary(
         else None
     )
     return extractor, fallback_used, processing_warning
+
+
+def _resolve_document_version(
+    db: Session,
+    document: Document,
+    version_id: UUID | None,
+) -> DocumentVersion:
+    if version_id is not None:
+        version = db.scalar(
+            select(DocumentVersion).where(
+                DocumentVersion.id == version_id,
+                DocumentVersion.document_id == document.id,
+            )
+        )
+    else:
+        version = db.scalar(
+            select(DocumentVersion)
+            .where(DocumentVersion.document_id == document.id)
+            .order_by(
+                DocumentVersion.is_active.desc(),
+                DocumentVersion.version_number.desc(),
+            )
+            .limit(1)
+        )
+    if version is None or version.status == "deleted":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "문서 파일을 찾을 수 없습니다.")
+    return version
 
 
 @router.get("/mine", response_model=list[UserDocumentSummary])
@@ -221,6 +255,36 @@ def list_document_review_queue(
     return summaries
 
 
+@router.get("/{document_id}/file")
+def get_document_file(
+    document_id: UUID,
+    current_user: Annotated[User, Depends(require_document_read)],
+    access_scope: Annotated[RetrievalAccessScope, Depends(get_retrieval_access_scope)],
+    db: Annotated[Session, Depends(get_db)],
+    version_id: Annotated[UUID | None, Query()] = None,
+) -> FileResponse:
+    """채팅 근거 문서를 원문 그대로 열람할 수 있도록 저장된 PDF를 반환한다.
+
+    version_id를 지정하면(예: 인용된 근거의 document_version_id) 이후 새 버전이
+    올라와도 인용 당시 그 버전을 그대로 볼 수 있다. 지정하지 않으면 활성 버전 중
+    최신 버전을 돌려준다.
+    """
+
+    document = require_accessible_document(db, document_id, current_user, access_scope)
+    version = _resolve_document_version(db, document, version_id)
+    path = Path(version.storage_path)
+    if not path.is_file():
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "저장된 문서를 읽지 못했습니다."
+        )
+    return FileResponse(
+        path,
+        media_type=version.mime_type or "application/pdf",
+        filename=version.original_filename,
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
 @router.post(
     "/upload",
     response_model=UploadDocumentResponse,
@@ -287,6 +351,32 @@ def upload_document(
             Path(settings.document_storage_dir),
             max_bytes=settings.document_max_upload_bytes,
         )
+
+        # 같은 사용자가 내용이 완전히 동일한 파일을 다시 올리는 경우(같은 파일을
+        # 실수로 두 번 선택하거나, 파일명만 바꿔 다시 올리는 경우 등) 새 버전을
+        # 만들지 않고 막는다. 그렇지 않으면 이미 처리 완료된 내용을 worker가
+        # docling으로 처음부터 다시 처리하게 된다.
+        duplicate_version = db.scalar(
+            select(DocumentVersion)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(
+                DocumentVersion.sha256 == staged_upload.sha256,
+                DocumentVersion.status != "deleted",
+                Document.lifecycle_status != "deleted",
+                Document.created_by_user_id == current_user.id,
+            )
+            .order_by(DocumentVersion.version_number.desc())
+            .limit(1)
+        )
+        if duplicate_version is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "동일한 내용의 파일이 이미 등록되어 있습니다: "
+                    f"{duplicate_version.original_filename} "
+                    f"(문서: {duplicate_version.document.title})."
+                ),
+            )
 
         document_type = db.scalar(
             select(DocumentType).where(
@@ -462,3 +552,37 @@ def approve_document(
         status=version.status,
         is_active=version.is_active,
     )
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_document(
+    document_id: UUID,
+    current_user: Annotated[User, Depends(require_document_delete)],
+    access_scope: Annotated[RetrievalAccessScope, Depends(get_retrieval_access_scope)],
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    """문서를 소프트 삭제한다(레코드/원본 파일은 남기고 접근·검색 대상에서만 제외).
+
+    RAG 검색은 활성 문서만 대상으로 하며, worker의 완료 상태 전이도 삭제 문서를
+    덮어쓰지 않도록 보호한다. 처리 중인 원본 파일은 즉시 지우지 않아 worker의 파일
+    접근 실패를 피하고, 삭제된 문서와 청크는 검색과 열람에서 제외한다.
+    """
+
+    document = require_accessible_document(
+        db,
+        document_id,
+        current_user,
+        access_scope,
+    )
+
+    document.lifecycle_status = "deleted"
+    document.deleted_at = datetime.now(timezone.utc)
+    db.add(
+        AuditEvent(
+            event_type="document.deleted",
+            actor_user_id=current_user.id,
+            entity_type="document",
+            entity_id=document.id,
+        )
+    )
+    db.commit()

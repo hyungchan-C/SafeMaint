@@ -67,6 +67,7 @@ class Settings:
         "LLM_REASONING_EFFORT", "none", {"none", "low", "medium", "high"}
     )
     vision_service_url: str = getenv("VISION_SERVICE_URL", "http://vision:8020")
+    vision_api_key: str = getenv("VISION_API_KEY", "")
     vision_image_max_upload_bytes: int = int(
         getenv("VISION_IMAGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))
     )
@@ -84,6 +85,9 @@ class Settings:
     qwen_api_key: str = getenv("QWEN_API_KEY", "")
     qwen_timeout_seconds: float = float(getenv("QWEN_TIMEOUT_SECONDS", "600"))
     qwen_allow_company_context: bool = _bool_env("QWEN_ALLOW_COMPANY_CONTEXT", False)
+    qwen_intent_classify_enabled: bool = _bool_env(
+        "QWEN_INTENT_CLASSIFY_ENABLED", True
+    )
     question_intent_confidence_threshold: float = float(
         getenv("QUESTION_INTENT_CONFIDENCE_THRESHOLD", "0.8")
     )
