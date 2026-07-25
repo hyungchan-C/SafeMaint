@@ -127,6 +127,58 @@ def _forward_content(
         ) from error
 
 
+def _forward_file(
+    path: str,
+    *,
+    filename: str,
+    file_path: Path,
+    content_type: str,
+    fallback: str,
+    data: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """Forward a stored file as a streaming multipart body."""
+    service_url = settings.vision_service_url.rstrip("/")
+    if not service_url:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "비전 서비스가 설정되지 않았습니다. Colab 비전 노트북을 실행한 뒤 출력된 "
+            "VISION_SERVICE_URL과 VISION_API_KEY를 .env에 설정하고 backend를 재시작해 주세요.",
+        )
+    try:
+        headers = (
+            {"Authorization": f"Bearer {settings.vision_api_key}"}
+            if settings.vision_api_key
+            else None
+        )
+        with file_path.open("rb") as content, Client(timeout=900.0) as client:
+            response = client.post(
+                f"{service_url}{path}",
+                files={"file": (filename, content, content_type)},
+                data=data,
+                headers=headers,
+            )
+        if response.is_error:
+            raise HTTPException(response.status_code, _detail(response, fallback))
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, fallback)
+        return payload
+    except HTTPException:
+        raise
+    except RequestError as error:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "비전 서비스에 연결할 수 없습니다. Colab 런타임과 ngrok 주소가 살아 있는지 확인하고, "
+            "노트북이 출력한 VISION_SERVICE_URL과 VISION_API_KEY를 .env에 반영한 뒤 "
+            "backend를 재시작해 주세요.",
+        ) from error
+    except (HTTPError, OSError, ValueError) as error:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "로컬 비전 서비스에 연결할 수 없습니다.",
+        ) from error
+
+
 @router.get("/catalog/image/{document_id}/{page}/{image_index}")
 def catalog_image(
     document_id: UUID,
@@ -181,20 +233,25 @@ def index_catalog(
     )
     if version is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "인덱싱할 문서 버전이 없습니다.")
+    storage_path = Path(version.storage_path)
     try:
-        with Path(version.storage_path).open("rb") as source:
-            content = source.read(settings.document_max_upload_bytes + 1)
+        file_size = storage_path.stat().st_size
+        with storage_path.open("rb") as source:
+            header = source.read(len(PDF_MAGIC))
     except OSError as error:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "저장된 PDF를 읽지 못했습니다.") from error
-    if len(content) > settings.document_max_upload_bytes:
+    if (
+        settings.document_max_upload_bytes is not None
+        and file_size > settings.document_max_upload_bytes
+    ):
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "저장된 PDF가 허용 크기를 초과합니다.")
-    if not content.startswith(PDF_MAGIC):
+    if header != PDF_MAGIC:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "저장된 PDF 헤더가 올바르지 않습니다.")
 
-    payload = _forward_content(
+    payload = _forward_file(
         "/v1/catalog/index",
         filename=version.original_filename,
-        content=content,
+        file_path=storage_path,
         content_type="application/pdf",
         fallback="카탈로그 이미지 인덱싱에 실패했습니다.",
     )

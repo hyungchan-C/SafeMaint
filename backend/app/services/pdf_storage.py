@@ -71,7 +71,7 @@ def stage_pdf_upload(
     source: BinaryIO,
     storage_dir: Path,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     chunk_bytes: int = PDF_UPLOAD_CHUNK_BYTES,
 ) -> StagedPdfUpload:
     """Stream an uploaded PDF into a temporary file in ``storage_dir``.
@@ -81,7 +81,7 @@ def stage_pdf_upload(
     ``cleanup`` is called.
     """
 
-    if max_bytes <= 0:
+    if max_bytes is not None and max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
     if chunk_bytes <= 0:
         raise ValueError("chunk_bytes must be positive")
@@ -121,7 +121,7 @@ def stage_pdf_upload(
                         raise InvalidPdfHeaderError("PDF 파일 헤더가 올바르지 않습니다.")
 
                 next_size = file_size + len(chunk)
-                if next_size > max_bytes:
+                if max_bytes is not None and next_size > max_bytes:
                     raise PdfUploadTooLargeError(
                         f"파일 크기는 {max_bytes} 바이트를 넘을 수 없습니다."
                     )

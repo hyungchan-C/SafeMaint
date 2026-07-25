@@ -93,6 +93,13 @@ def test_repeated_section_titles_create_unique_chunk_index(monkeypatch, tmp_path
             },
         ),
     )
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("PDF hashing must stream from the file")
+        ),
+    )
 
     result = pdf_pipeline.process_pdf(
         str(pdf_path),
@@ -109,6 +116,54 @@ def test_repeated_section_titles_create_unique_chunk_index(monkeypatch, tmp_path
     assert all(c["document_external_id"] == result["document"]["external_id"] for c in chunks)
     assert len({c["content_hash"] for c in chunks}) == 2
     assert result["processing_metadata"]["extractor"] == "docling"
+
+
+def test_pipeline_progress_holds_chunking_percent_until_total_is_known(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "progress.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 progress")
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "extract_sections",
+        lambda _path, **_kwargs: pdf_pipeline.SectionExtractionResult(
+            sections=[
+                {
+                    "header": "안전",
+                    "section_path": ["안전"],
+                    "start_page": 1,
+                    "end_page": 1,
+                    "blocks": [{"type": "text", "text": "전원을 차단합니다."}],
+                },
+                {
+                    "header": "점검",
+                    "section_path": ["점검"],
+                    "start_page": 2,
+                    "end_page": 2,
+                    "blocks": [{"type": "text", "text": "잠금 상태를 확인합니다."}],
+                },
+            ],
+            processing_metadata={"extractor": "docling"},
+        ),
+    )
+    updates: list[tuple[str, int, dict[str, int]]] = []
+
+    result = pdf_pipeline.process_pdf(
+        str(pdf_path),
+        product_type="센서",
+        model_name="M1",
+        total_pages=2,
+        progress_callback=lambda stage, percent, _message, counters: updates.append(
+            (stage, percent, dict(counters))
+        ),
+    )
+
+    chunking_updates = [update for update in updates if update[0] == "chunking"]
+    assert result["chunks"]
+    assert all(percent == 50 for _, percent, _ in chunking_updates[:-1])
+    assert chunking_updates[-1][1] == 65
+    assert chunking_updates[-1][2]["total_chunks"] == len(result["chunks"])
 
 
 def test_docling_success_does_not_call_pymupdf(monkeypatch, tmp_path: Path) -> None:
@@ -262,6 +317,111 @@ def test_pdf_file_and_page_limits_are_rejected(
                 max_pages=1,
             ),
         )
+
+
+def test_docling_file_and_page_zero_parse_as_unlimited(monkeypatch) -> None:
+    monkeypatch.setenv("DOCLING_MAX_FILE_BYTES", "0")
+    monkeypatch.setenv("DOCLING_MAX_PAGES", "0")
+
+    runtime = pdf_pipeline.DoclingRuntimeSettings.from_env()
+
+    assert runtime.max_file_bytes is None
+    assert runtime.max_pages is None
+
+
+def test_docling_negative_limit_is_rejected(monkeypatch) -> None:
+    monkeypatch.setenv("DOCLING_MAX_PAGES", "-1")
+
+    with pytest.raises(ValueError, match="zero or greater"):
+        pdf_pipeline.DoclingRuntimeSettings.from_env()
+
+
+def test_unlimited_docling_runtime_skips_preflight_limits(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unlimited.pdf"
+    _save_text_pdf(path, pages=2)
+    runtime = pdf_pipeline.DoclingRuntimeSettings(
+        max_file_bytes=None,
+        max_pages=None,
+    )
+    monkeypatch.setattr(
+        pdf_pipeline, "validate_docling_runtime", lambda _runtime: "2.113.0"
+    )
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "extract_sections_with_docling",
+        lambda _path, _runtime: (_sections(), False),
+    )
+
+    result = pdf_pipeline.extract_sections(str(path), runtime=runtime)
+
+    assert result.sections == _sections()
+
+
+def test_unlimited_docling_convert_omits_limit_arguments(monkeypatch) -> None:
+    calls: list[dict[str, int]] = []
+
+    class EmptyDocument:
+        @staticmethod
+        def iterate_items():
+            return iter(())
+
+    class FakeConverter:
+        @staticmethod
+        def convert(_path: str, **kwargs):
+            calls.append(kwargs)
+            return type("Result", (), {"document": EmptyDocument()})()
+
+    monkeypatch.setattr(pdf_pipeline, "_needs_ocr", lambda _path: False)
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "_build_converter",
+        lambda _do_ocr, _runtime: FakeConverter(),
+    )
+
+    pdf_pipeline.extract_sections_with_docling(
+        "unlimited.pdf",
+        pdf_pipeline.DoclingRuntimeSettings(
+            max_file_bytes=None,
+            max_pages=None,
+        ),
+    )
+
+    assert calls == [{}]
+
+
+def test_positive_docling_convert_passes_limit_arguments(monkeypatch) -> None:
+    calls: list[dict[str, int]] = []
+
+    class EmptyDocument:
+        @staticmethod
+        def iterate_items():
+            return iter(())
+
+    class FakeConverter:
+        @staticmethod
+        def convert(_path: str, **kwargs):
+            calls.append(kwargs)
+            return type("Result", (), {"document": EmptyDocument()})()
+
+    monkeypatch.setattr(pdf_pipeline, "_needs_ocr", lambda _path: False)
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "_build_converter",
+        lambda _do_ocr, _runtime: FakeConverter(),
+    )
+
+    pdf_pipeline.extract_sections_with_docling(
+        "limited.pdf",
+        pdf_pipeline.DoclingRuntimeSettings(
+            max_file_bytes=100,
+            max_pages=5,
+        ),
+    )
+
+    assert calls == [{"max_file_size": 100, "max_num_pages": 5}]
 
 
 def test_docling_settings_parse_false_and_thread_count(monkeypatch) -> None:

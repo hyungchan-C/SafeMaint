@@ -4,7 +4,13 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import AuditEvent, Document, DocumentVersion, User
+from app.db.models import (
+    AuditEvent,
+    Document,
+    DocumentProcessingJob,
+    DocumentVersion,
+    User,
+)
 
 
 class DocumentApprovalNotFoundError(LookupError):
@@ -69,6 +75,18 @@ def approve_document_version(
         version.approved_at = now
         document.current_version_id = version.id
         document.lifecycle_status = "active"
+        processing_job = db.scalar(
+            select(DocumentProcessingJob).where(
+                DocumentProcessingJob.document_version_id == version.id
+            )
+        )
+        if processing_job is not None:
+            processing_job.processing_stage = "completed"
+            processing_job.progress_percent = 100
+            processing_job.progress_message = (
+                "승인이 완료되어 RAG 검색에 사용할 수 있습니다."
+            )
+            processing_job.progress_updated_at = now
         db.add(
             AuditEvent(
                 event_type="DOCUMENT_VERSION_APPROVED",

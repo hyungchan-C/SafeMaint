@@ -176,8 +176,8 @@ class CatalogImageMatcher:
         root: str,
         threshold: float,
         *,
-        max_pages: int = 2000,
-        max_images: int = 12000,
+        max_pages: int | None = 2000,
+        max_images: int | None = 12000,
         max_image_pixels: int = 40_000_000,
         embedding_model: str = "google/siglip2-base-patch16-naflex",
         embedding_device: str = "cpu",
@@ -239,9 +239,13 @@ class CatalogImageMatcher:
         return [(image, None), *((image.crop(box), box) for box in boxes)]
 
     def index_pdf(self, pdf_path: Path, filename: str) -> CatalogIndexResponse:
-        data = pdf_path.read_bytes()
         index_version = f"safemaint-page-matrix-v5:{self.embedding_model}"
-        catalog_id = hashlib.sha256(data + index_version.encode()).hexdigest()[:20]
+        digest = hashlib.sha256()
+        with pdf_path.open("rb") as source:
+            while chunk := source.read(4 * 1024 * 1024):
+                digest.update(chunk)
+        digest.update(index_version.encode())
+        catalog_id = digest.hexdigest()[:20]
         target = self.root / catalog_id
         manifest_path = target / "manifest.json"
         if manifest_path.exists():
@@ -251,10 +255,10 @@ class CatalogImageMatcher:
             return CatalogIndexResponse(**manifest["summary"])
 
         try:
-            reader = PdfReader(BytesIO(data))
+            reader = PdfReader(str(pdf_path))
         except (PdfReadError, ValueError, OSError) as error:
             raise ValueError("손상되었거나 지원하지 않는 PDF입니다.") from error
-        if len(reader.pages) > self.max_pages:
+        if self.max_pages is not None and len(reader.pages) > self.max_pages:
             raise ValueError(f"PDF 페이지 수는 {self.max_pages}개를 넘을 수 없습니다.")
         target.mkdir(parents=True, exist_ok=True)
         entries: list[dict[str, object]] = []
@@ -269,7 +273,7 @@ class CatalogImageMatcher:
                 "PDF 페이지 렌더러를 시작하지 못했습니다. pypdfium2 설치 상태를 확인해 주세요."
             ) from error
         for page_number, page in enumerate(reader.pages, start=1):
-            if len(entries) >= self.max_images:
+            if self.max_images is not None and len(entries) >= self.max_images:
                 warnings.append(f"이미지는 최대 {self.max_images}개까지만 인덱싱했습니다.")
                 break
             page_text = " ".join((page.extract_text() or "").split())[:1600]
@@ -288,7 +292,7 @@ class CatalogImageMatcher:
                     zip(page_views, page_vectors),
                     start=1,
                 ):
-                    if len(entries) >= self.max_images:
+                    if self.max_images is not None and len(entries) >= self.max_images:
                         break
                     vector_index = len(embeddings)
                     embeddings.append(vector)
@@ -311,6 +315,8 @@ class CatalogImageMatcher:
                 warnings.append(f"{page_number}페이지 이미지 추출 실패: {type(exc).__name__}")
                 continue
             for image_index, embedded in enumerate(page_images, start=1):
+                if self.max_images is not None and len(entries) >= self.max_images:
+                    break
                 try:
                     source_image = Image.open(BytesIO(embedded.data))
                     if source_image.width * source_image.height > self.max_image_pixels:
@@ -363,7 +369,11 @@ class CatalogImageMatcher:
                 continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             filename = manifest["summary"]["filename"]
-            entries = manifest["entries"][: self.max_images]
+            entries = (
+                manifest["entries"]
+                if self.max_images is None
+                else manifest["entries"][: self.max_images]
+            )
             matrix_path = self.root / catalog_id / "embeddings.npy"
             if matrix_path.exists():
                 matrix = np.load(matrix_path, mmap_mode="r", allow_pickle=False)

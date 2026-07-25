@@ -28,6 +28,14 @@ def _choice_env(name: str, default: str, choices: set[str]) -> str:
     return value
 
 
+def _limit_env(name: str, default: int) -> int | None:
+    """Parse a byte/count limit where zero explicitly means unlimited."""
+    value = int(getenv(name, str(default)))
+    if value < 0:
+        raise ValueError(f"{name} must be zero or greater")
+    return None if value == 0 else value
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     app_name: str = "SafeMaint AI"
@@ -111,8 +119,8 @@ class Settings:
         getenv("QWEN_CLASSIFIER_TIMEOUT_SECONDS", "300")
     )
     document_storage_dir: str = getenv("DOCUMENT_STORAGE_DIR", "/data/documents")
-    document_max_upload_bytes: int = int(
-        getenv("DOCUMENT_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024))
+    document_max_upload_bytes: int | None = _limit_env(
+        "DOCUMENT_MAX_UPLOAD_BYTES", 200 * 1024 * 1024
     )
     package_storage_dir: str = getenv("PACKAGE_STORAGE_DIR", "/data/packages")
     public_package_max_bytes: int = int(
