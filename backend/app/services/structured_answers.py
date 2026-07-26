@@ -1211,9 +1211,9 @@ def enriched_structured_answer(
                         or fallback.summary.core_warning,
                     }
                 ),
-                # Deterministic manual evidence keeps equipment-specific checks
-                # that a model may otherwise collapse into generic safety text.
-                "pre_checks": fallback.pre_checks or value.pre_checks,
+                # Pre-check cards must come only from verified manual evidence.
+                # Do not let a model fill missing manufacturer requirements.
+                "pre_checks": fallback.pre_checks,
                 "hazards": value.hazards or fallback.hazards,
                 "manual_steps": value.manual_steps or fallback.manual_steps,
                 "precautions": _dedupe_maintenance_items(
@@ -2807,7 +2807,7 @@ def _maintenance_pre_check_items(
         )
         + TECHNICAL_PRECHECK_TERMS,
         limit=max(limit * 6, 24),
-        allow_fallback=True,
+        allow_fallback=False,
         exclude_risk_only=True,
         exclude_reference_title=True,
     )
@@ -2816,6 +2816,7 @@ def _maintenance_pre_check_items(
         formatter=_pre_check_phrase,
         question=question,
         enforce_question_relevance=False,
+        dedupe_semantic_keys=False,
         limit=limit * 2,
     )
     source_group_by_id = {
@@ -2828,40 +2829,10 @@ def _maintenance_pre_check_items(
             source_group_by_id=source_group_by_id,
         )
     )
-    if len(manual_items) >= limit:
-        return _dedupe_maintenance_items(
-            manual_items,
-            validator=_is_maintenance_pre_check_phrase,
-            limit=limit,
-        )
-    supplemental_selected = _candidate_subset(
-        candidates,
-        groups={PUBLIC_SAFETY_SOURCE_GROUP, COMPANY_SOURCE_GROUP},
-        terms=PRECHECK_TERMS + ACTION_TERMS + STOP_TERMS,
-        limit=max(limit * 4, 16),
-        allow_fallback=False,
-        exclude_risk_only=True,
-        exclude_reference_title=True,
-    )
-    combined_items = [
-        *manual_items,
-        *_formatted_maintenance_items(
-            supplemental_selected,
-            formatter=_pre_check_phrase,
-            question=question,
-            limit=limit * 2,
-        ),
-    ]
-    combined_items.sort(
-        key=lambda item: _pre_check_sort_key(
-            item,
-            question=question,
-            source_group_by_id=source_group_by_id,
-        )
-    )
     return _dedupe_maintenance_items(
-        combined_items,
+        manual_items,
         validator=_is_maintenance_pre_check_phrase,
+        dedupe_semantic_keys=False,
         limit=limit,
     )
 
@@ -3299,6 +3270,7 @@ def _dedupe_maintenance_items(
     items: Iterable[EvidenceBackedItem],
     *,
     validator: Callable[[str], bool] | None = None,
+    dedupe_semantic_keys: bool = True,
     limit: int,
 ) -> list[EvidenceBackedItem]:
     deduped: list[EvidenceBackedItem] = []
@@ -3311,11 +3283,12 @@ def _dedupe_maintenance_items(
         if validator is not None and not validator(content):
             continue
         key = _maintenance_semantic_key(content)
-        if key in seen_keys or content in seen_phrases:
+        if (dedupe_semantic_keys and key in seen_keys) or content in seen_phrases:
             continue
         deduped.append(item.model_copy(update={"content": content}))
         seen_phrases.add(content)
-        seen_keys.add(key)
+        if dedupe_semantic_keys:
+            seen_keys.add(key)
         if len(deduped) >= limit:
             break
     return deduped
@@ -3366,8 +3339,18 @@ def _is_maintenance_pre_check_phrase(content: str) -> bool:
     if _looks_like_reference_only_phrase(text):
         return False
     return any(
-        marker in text
-        for marker in (
+        marker.casefold() in text
+        for marker in PRECHECK_TERMS
+        + TECHNICAL_PRECHECK_TERMS
+        + (
+            "안전 거리",
+            "검출 영역",
+            "검출영역",
+            "가드",
+            "차광판",
+            "외란광",
+            "반사광",
+            "제품 버전",
             "확인",
             "점검",
             "검사",
@@ -3499,125 +3482,78 @@ def _pre_check_phrase(text: str) -> str:
         )
     ):
         return ""
-    if "안전 거리" in lowered or "안전거리" in lowered:
-        return "기계 위험부와 라이트커튼 사이의 안전거리 확보 여부 확인"
-    if (
-        ("검출 영역" in lowered or "검출영역" in lowered)
-        and any(term in lowered for term in ("통과", "우회", "가드"))
+    if not any(
+        term.casefold() in lowered
+        for term in PRECHECK_TERMS
+        + TECHNICAL_PRECHECK_TERMS
+        + (
+            "안전 거리",
+            "검출 영역",
+            "검출영역",
+            "가드",
+            "차광판",
+            "외란광",
+            "반사광",
+            "제품 버전",
+            "여부",
+            "상태",
+            "조건",
+            "기준",
+            "일치",
+            "손상",
+            "오염",
+            "누설",
+            "이상",
+        )
     ):
-        return "위험부 접근 시 검출영역 통과·우회 방지 구조 확인"
-    if (
-        any(term in lowered for term in ("투광기", "수광기", "투/수광기"))
-        and "제품 버전" in lowered
-    ):
-        return "투광기·수광기의 모델 및 제품 버전 일치 여부 확인"
-    if (
-        any(term in lowered for term in ("투광기", "수광기", "투/수광기"))
-        and "광축 표시등" in lowered
-    ):
-        return "투광기·수광기의 상·하단 광축 표시등 정렬 확인"
-    if (
-        any(term in lowered for term in ("여러 세트", "복수", "다수"))
-        and any(term in lowered for term in ("상호 간섭", "상호간섭", "차광판"))
-    ):
-        return "복수 라이트커튼의 상호간섭 방지·차광판 적용 여부 확인"
-    if any(term in lowered for term in ("외란광", "직사광선", "스포트라이트", "반사광")):
-        return "외란광·반사광의 수광기 직접 입사 여부 확인"
-    technical_phrase = _technical_pre_check_phrase(cleaned)
-    if technical_phrase:
-        return technical_phrase
-    key = _maintenance_semantic_key(cleaned)
-    if key == "metal_clearance":
-        return "주변 금속·장애물 이격거리 확인"
-    if key == "interference":
-        return "인접 장치 간 간섭 방지 거리 확인"
-    if key == "detection_distance":
-        return "검출거리와 설정거리 기준 확인"
-    if key == "mounting":
-        return "장착 위치와 고정 상태 확인"
-    if key == "contamination_damage":
-        return "오염·손상 및 보호 조치 확인"
-    if key == "wiring_power":
-        return "정격·전원·배선 조건 확인"
-    if key == "safety_distance":
-        return "안전거리 기준 확인"
-    if key == "alignment":
-        return "검출부 정렬 상태 확인"
-    if key == "detection_response":
-        return "검출·차단 시 설비 반응 확인"
-    if key == "lockout":
-        return "전원 차단/잠금 상태 확인"
-    if key == "emergency_stop":
-        return "비상정지장치 접근·작동 상태 확인"
-    if key == "danger_zone":
-        return "방호구역 내 작업자 유무 확인"
-    if key == "guarding":
-        return "방호장치 설치 위치와 고정 상태 확인"
-    if key in {"cleaning", "machine_stop"}:
-        return "운전 정지 및 재가동 방지 조치 확인"
-    if key == "training":
-        return "작업표준과 취급요령 교육 이수 확인"
-    if key == "maintenance_status":
-        return "정기 정비 이력과 이상 상태 확인"
-    if key == "settings":
-        return "설정값과 기능 적용 상태 확인"
-    if key == "mechanical_rotation":
-        return "회전부 고정·윤활 상태 확인"
-    if "설정" in lowered and "동작" in lowered:
-        return "기능 설정 후 정상 동작 확인"
-    content = _final_card_phrase(cleaned)
-    if not content:
         return ""
-    if content in {"설치 조건 확인", "점검 상태 확인", "검사 상태 확인", "위험요인 확인"}:
-        return ""
-    if content.endswith(("확인", "점검", "검사", "시험")):
-        return content
-    return ""
-
-
-def _technical_pre_check_phrase(text: str) -> str:
-    """Keep product-specific nouns from a manual instead of reducing them to a macro."""
-    cleaned = _clean_source_excerpt(text)
-    if not _has_meaningful_text(cleaned):
-        return ""
-    lowered = cleaned.casefold()
-    if not any(term.casefold() in lowered for term in TECHNICAL_PRECHECK_TERMS):
-        return ""
-    if any(
+    if not any(
         term in lowered
-        for term in (
-            "설치 후",
-            "교체 후",
-            "조립 후",
-            "정비 후",
-            "작업 완료 후",
-            "시운전 후",
+        for term in ACTION_TERMS
+        + (
+            "확인",
+            "점검",
+            "검사",
+            "시험",
+            "측정",
+            "정렬",
+            "확보",
+            "일치",
+            "방지",
+            "적용",
+            "준수",
+            "이어야",
+            "해야",
+            "하지 않",
+            "않도록",
+            "금지",
+            "하십시오",
+            "하세요",
         )
     ):
         return ""
 
     sentence = re.split(r"(?<=[.!?。])\s+", cleaned, maxsplit=1)[0]
     sentence = re.sub(
-        r"(?:반드시\s*)?(?:확인|점검|검사|시험)하(?:십시오|세요|여야 합니다|도록 합니다|기 바랍니다)[.]?$",
+        r"(?:반드시\s*)?(?:확인|점검|검사|시험|측정)하"
+        r"(?:십시오|세요|여야 합니다|도록 합니다|기 바랍니다|여야 한다)[.]?$",
         lambda match: {
             "확인": "확인",
             "점검": "점검",
             "검사": "검사",
             "시험": "시험",
-        }.get(re.search(r"(확인|점검|검사|시험)", match.group(0)).group(1), "확인"),
+            "측정": "측정",
+        }.get(
+            re.search(r"(확인|점검|검사|시험|측정)", match.group(0)).group(1),
+            "확인",
+        ),
         sentence,
     )
-    sentence = re.sub(
-        r"(?:하십시오|하세요|하여야 합니다|해야 합니다|하도록 합니다|기 바랍니다)[.]?$",
-        "",
-        sentence,
-    ).strip()
-    sentence = sentence.rstrip(".,;: ")
-    if not sentence:
+    sentence = sentence.rstrip(" .。")
+    content = _compact_phrase(sentence, max_chars=72)
+    if not content or _looks_like_bad_card_text(content, enforce_length=False):
         return ""
-    if not sentence.endswith(("확인", "점검", "검사", "시험")):
-        sentence = f"{sentence} 여부 확인"
-    return _compact_phrase(sentence, max_chars=72)
+    return content
 
 
 def _hazard_phrase(text: str) -> str:

@@ -1055,7 +1055,8 @@ def test_maintenance_qwen_structure_and_checklist_are_source_validated() -> None
     assert len(response.structured_answer.stop_conditions) == 1
     checklist_contents = [item.content for item in response.checklist_items]
     assert "모델별 설치 기준 확인하기" in checklist_contents
-    assert "설치 위치 확인하기" in checklist_contents
+    assert "라이트커튼의 용도와 설치 전 확인사항 확인하기" in checklist_contents
+    assert "설치 위치 확인하기" not in checklist_contents
     assert len(checklist_contents) <= 5
     assert all(item.evidence_chunk_ids == ["chunk-1"] for item in response.checklist_items)
 

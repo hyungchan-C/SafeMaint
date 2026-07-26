@@ -74,6 +74,46 @@ def test_post_install_product_instruction_is_not_used_as_a_pre_check() -> None:
     )
 
 
+def test_manufacturer_specific_prechecks_keep_each_manual_wording() -> None:
+    manufacturer_a = ChatSource(
+        document_id="bearing-maker-a",
+        chunk_id="maker-a-fit",
+        title="A사 베어링 설치 매뉴얼",
+        source_type="component_manual",
+        excerpt="베어링 설치 전에 축 지름 50 mm와 공차 h6 충족 여부를 확인하십시오.",
+        similarity=0.9,
+    )
+    manufacturer_b = ChatSource(
+        document_id="bearing-maker-b",
+        chunk_id="maker-b-fit",
+        title="B사 베어링 설치 매뉴얼",
+        source_type="component_manual",
+        excerpt="조립 전에 하우징 내경의 긁힘과 타원 변형 상태를 점검하십시오.",
+        similarity=0.9,
+    )
+
+    answer_a = source_based_fallback(
+        "maintenance_guide",
+        [manufacturer_a],
+        question="A사 베어링 설치 전 필수사항을 알려줘.",
+    )
+    answer_b = source_based_fallback(
+        "maintenance_guide",
+        [manufacturer_b],
+        question="B사 베어링 설치 전 필수사항을 알려줘.",
+    )
+
+    assert isinstance(answer_a, MaintenanceAnswerDetails)
+    assert isinstance(answer_b, MaintenanceAnswerDetails)
+    assert [item.content for item in answer_a.pre_checks] == [
+        "베어링 설치 전에 축 지름 50 mm와 공차 h6 충족 여부를 확인"
+    ]
+    assert [item.content for item in answer_b.pre_checks] == [
+        "조립 전에 하우징 내경의 긁힘과 타원 변형 상태를 점검"
+    ]
+    assert answer_a.pre_checks != answer_b.pre_checks
+
+
 @pytest.mark.parametrize(
     ("source_text", "expected"),
     [
@@ -217,10 +257,15 @@ def test_light_curtain_pre_checks_prioritize_three_installation_essentials() -> 
     )
 
     assert isinstance(details, MaintenanceAnswerDetails)
+    assert [item.evidence_chunk_ids for item in details.pre_checks] == [
+        ["light-precheck-0"],
+        ["light-precheck-2"],
+        ["light-precheck-4"],
+    ]
     assert [item.content for item in details.pre_checks] == [
-        "기계 위험부와 라이트커튼 사이의 안전거리 확보 여부 확인",
-        "위험부 접근 시 검출영역 통과·우회 방지 구조 확인",
-        "투광기·수광기의 상·하단 광축 표시등 정렬 확인",
+        excerpts[0].rstrip("."),
+        excerpts[2].rstrip("."),
+        excerpts[4].rstrip("."),
     ]
 
 
@@ -259,6 +304,34 @@ def test_enrichment_prefers_specific_manual_pre_checks_over_generic_model_text()
 
     assert isinstance(enriched, MaintenanceAnswerDetails)
     assert enriched.pre_checks == fallback.pre_checks
+
+
+def test_enrichment_does_not_use_model_prechecks_without_manual_evidence() -> None:
+    summary = MaintenanceSummary(
+        status="안전관리자 확인 필요",
+        risk_level="판단 불가",
+        risk_basis=[],
+        core_warning="근거 확인 필요",
+    )
+    fallback = MaintenanceAnswerDetails(summary=summary, pre_checks=[])
+    model_answer = MaintenanceAnswerDetails(
+        summary=summary,
+        pre_checks=[
+            EvidenceBackedItem(
+                content="장착 위치와 고정 상태 확인",
+                evidence_chunk_ids=["manual-1"],
+            )
+        ],
+    )
+
+    enriched = enriched_structured_answer(
+        model_answer,
+        fallback,
+        expected_type="maintenance_guide",
+    )
+
+    assert isinstance(enriched, MaintenanceAnswerDetails)
+    assert enriched.pre_checks == []
 
 
 @pytest.mark.parametrize(
@@ -369,7 +442,7 @@ def test_component_fallback_never_contains_maintenance_steps() -> None:
     assert "manual_steps" not in details.model_dump()
 
 
-def test_public_maintenance_fallback_builds_precheck_based_tbm() -> None:
+def test_public_maintenance_fallback_does_not_fill_manual_prechecks() -> None:
     source = ChatSource(
         document_id="doc-public",
         chunk_id="public-1",
@@ -389,7 +462,7 @@ def test_public_maintenance_fallback_builds_precheck_based_tbm() -> None:
 
     assert details is not None
     assert details.answer_type == "maintenance_guide"
-    assert details.pre_checks
+    assert details.pre_checks == []
     assert details.hazards
     assert details.manual_steps == []
     assert details.related_regulations_and_incidents
@@ -402,7 +475,7 @@ def test_public_maintenance_fallback_builds_precheck_based_tbm() -> None:
     assert details.related_regulations_and_incidents[0].content.startswith("[안전 가이드]")
 
 
-def test_maintenance_fallback_prioritizes_actionable_prechecks_for_other_work() -> None:
+def test_public_guides_do_not_become_manufacturer_prechecks() -> None:
     def conveyor_source(chunk_id: str, excerpt: str) -> ChatSource:
         return ChatSource(
             document_id=f"doc-{chunk_id}",
@@ -445,16 +518,9 @@ def test_maintenance_fallback_prioritizes_actionable_prechecks_for_other_work() 
     )
 
     assert isinstance(details, MaintenanceAnswerDetails)
-    assert [item.content for item in details.pre_checks] == [
-        "운전 정지 및 재가동 방지 조치 확인",
-        "전원 차단/잠금 상태 확인",
-        "비상정지장치 접근·작동 상태 확인",
-    ]
-    assert {item.content for item in checklist} == {
-        "운전 정지 후 재가동 방지 조치 확인하기",
-        "전원 차단 후 잠금·표지 부착 상태 확인하기",
-        "비상정지장치 접근·작동 상태 점검하기",
-    }
+    assert details.pre_checks == []
+    assert checklist
+    assert all(item.evidence_chunk_ids for item in checklist)
     assert details.precautions
     assert all(
         item.content.endswith(("하기", "않기", "금지"))
@@ -497,11 +563,11 @@ def test_maintenance_sections_have_distinct_styles_for_light_curtain() -> None:
     stop_conditions = [item.content for item in details.stop_conditions]
     checklist_items = [item.content for item in checklist]
 
-    assert "모델별 안전거리 기준 확인" in pre_checks
+    assert "광전자식 방호장치는 안전거리를 유지하여 설치해야 한다" in pre_checks
     assert all(item.endswith("하기") for item in checklist_items)
     assert any(item.endswith("않기") for item in precautions)
     assert all("중지" in item for item in stop_conditions)
-    assert "모델별 안전거리 기준 확인" not in stop_conditions
+    assert "광전자식 방호장치는 안전거리를 유지하여 설치해야 한다" not in stop_conditions
     assert set(pre_checks).isdisjoint(checklist_items)
     assert set(pre_checks).isdisjoint(precautions)
     assert set(pre_checks).isdisjoint(stop_conditions)
