@@ -100,6 +100,38 @@ class QwenClient:
         except ValueError:
             return None
 
+    async def classify_intent(self, request: ChatRequest) -> QueryAnalysis | None:
+        if not self.service_url:
+            return None
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                transport=self.transport,
+                headers=self._headers(),
+            ) as client:
+                response = await client.post(
+                    f"{self.service_url}/v1/intent",
+                    json={
+                        "question": request.question,
+                        "context": self._safe_context(request),
+                    },
+                )
+                response.raise_for_status()
+                body = response.json()
+        except (httpx.HTTPError, ValueError, TypeError):
+            return None
+
+        if not isinstance(body, dict):
+            return None
+        payload = body.get("analysis") if isinstance(body.get("analysis"), dict) else body
+        normalized = self._normalize_analysis_payload(payload)
+        if not normalized.get("question_intent"):
+            return None
+        try:
+            return QueryAnalysis.model_validate(normalized)
+        except ValueError:
+            return None
+
     async def answer(
         self,
         request: ChatRequest,
@@ -131,6 +163,13 @@ class QwenClient:
                             self._source_payload(source)
                             for source in retrieval_response.sources
                         ],
+                        "candidate_structured_answer": (
+                            retrieval_response.structured_answer.model_dump(
+                                mode="json"
+                            )
+                            if retrieval_response.structured_answer is not None
+                            else None
+                        ),
                     },
                 )
         except httpx.TimeoutException as exc:
@@ -245,6 +284,18 @@ class QwenClient:
                 isinstance(nested_payload.get("structured_answer"), dict)
                 or "checklist_items" in nested_payload
                 or "used_source_ids" in nested_payload
+                or any(
+                    key in nested_payload
+                    for key in (
+                        "main_contents",
+                        "one_line_description",
+                        "main_roles",
+                        "pre_checks",
+                        "hazards",
+                        "manual_steps",
+                        "core_warning",
+                    )
+                )
             ):
                 merged = dict(nested_payload)
                 if body.get("model") and not merged.get("model"):
@@ -521,4 +572,5 @@ class QwenClient:
             "keyword_score": source.keyword_score,
             "retrieval_score": source.retrieval_score,
             "reranker_score": source.reranker_score,
+            "document_profile": getattr(source, "document_profile", None),
         }

@@ -125,6 +125,55 @@ def test_chat_service_accepts_grounded_rag_response() -> None:
     assert response.sources[0].similarity == 0.71
 
 
+def test_document_question_keeps_only_one_pdf_document() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answer": "검색 기본 답변",
+                "sources": [
+                    {
+                        **_grounded_source("equipment_manual"),
+                        "document_id": "doc-a",
+                        "chunk_id": "chunk-a-1",
+                        "original_filename": "conveyor-a.pdf",
+                        "excerpt": "A 문서의 컨베이어 점검 내용",
+                    },
+                    {
+                        **_grounded_source("equipment_manual"),
+                        "document_id": "doc-b",
+                        "chunk_id": "chunk-b-1",
+                        "original_filename": "conveyor-b.pdf",
+                        "excerpt": "B 문서의 관련 없는 점검 내용",
+                    },
+                    {
+                        **_grounded_source("equipment_manual"),
+                        "document_id": "doc-a",
+                        "chunk_id": "chunk-a-2",
+                        "original_filename": "conveyor-a.pdf",
+                        "excerpt": "A 문서의 교체 내용",
+                    },
+                ],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+        ).answer(ChatRequest(question="이 PDF 요약해줘."))
+    )
+
+    assert response.answer_type == "document_qa"
+    assert {source.document_id for source in response.sources} == {"doc-a"}
+    assert [source.chunk_id for source in response.sources] == [
+        "chunk-a-1",
+        "chunk-a-2",
+    ]
+
+
 def test_team_qwen_classification_is_used_for_retrieval() -> None:
     def classifier_handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/classify"
@@ -361,7 +410,8 @@ def test_company_evidence_is_never_sent_to_external_model() -> None:
     )
 
     assert response.generation_mode == "template"
-    assert response.answer == "Local grounded template answer"
+    assert response.answer != "Local grounded template answer"
+    assert "근거 문서" in response.answer
     assert "회사 문서" in (response.warning or "")
 
 
@@ -370,7 +420,11 @@ def test_chat_service_uses_qwen_classification_and_answer() -> None:
         async def classify(self, request: ChatRequest) -> QueryAnalysis:
             assert request.analysis is not None
             assert "bearing" in request.analysis.search_keywords
-            return QueryAnalysis(occurrence_type="caught-in")
+            return QueryAnalysis(
+                occurrence_type="caught-in",
+                explicit_risk_factors=["caught-in", "감전", "화재"],
+                search_keywords=["caught-in"],
+            )
 
         async def answer(
             self,
@@ -428,7 +482,9 @@ def test_chat_service_uses_qwen_classification_and_answer() -> None:
 
     assert response.generation_mode == "qwen"
     assert response.model == "qwen-test"
-    assert response.answer == "Qwen grounded answer [1]"
+    assert response.answer != "Qwen grounded answer [1]"
+    assert "예상 핵심 위험은 끼임입니다" in response.answer
+    assert response.answer.endswith("안전관리자 확인을 받으세요.")
 
 
 def test_chat_service_can_skip_qwen_intent_classification() -> None:
@@ -470,15 +526,24 @@ def test_chat_service_can_skip_qwen_intent_classification() -> None:
             qwen_enabled=True,
             qwen_allow_company_context=True,
             qwen_intent_classify_enabled=False,
+            qwen_accident_classify_enabled=False,
         ).answer(ChatRequest(question="light curtain installation"))
     )
 
     assert response.generation_mode == "qwen"
-    assert response.answer == "Fast Qwen answer [1]"
+    assert response.answer != "Fast Qwen answer [1]"
+    assert response.answer.endswith("안전관리자와 확인하세요.")
 
 
 def test_low_confidence_qwen_intent_returns_clarification_before_retrieval() -> None:
     class MisclassifyingQwenClient:
+        async def classify_intent(self, request: ChatRequest) -> QueryAnalysis:
+            return QueryAnalysis(
+                question_intent="clarification_required",
+                intent_confidence=0.0,
+                clarification_question="어떤 위험 요소나 주의사항이 있나요?",
+            )
+
         async def classify(self, request: ChatRequest) -> QueryAnalysis:
             return QueryAnalysis(
                 question_intent="clarification_required",
@@ -504,7 +569,7 @@ def test_low_confidence_qwen_intent_returns_clarification_before_retrieval() -> 
             qwen_client=MisclassifyingQwenClient(),  # type: ignore[arg-type]
             qwen_enabled=True,
             qwen_allow_company_context=True,
-        ).answer(ChatRequest(question="라이트 커튼을 설치하려고 해."))
+        ).answer(ChatRequest(question="라이트커튼 관련해서 알려줘."))
     )
 
     assert response.answer_type == "clarification_required"
@@ -515,7 +580,7 @@ def test_low_confidence_qwen_intent_returns_clarification_before_retrieval() -> 
 
 def test_high_confidence_qwen_intent_overrides_local_rule_fallback() -> None:
     class IntentQwenClient:
-        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+        async def classify_intent(self, request: ChatRequest) -> QueryAnalysis:
             return QueryAnalysis(
                 question_intent="component_info",
                 intent_confidence=0.97,
@@ -526,6 +591,9 @@ def test_high_confidence_qwen_intent_overrides_local_rule_fallback() -> None:
                 energy_sources=["전기"],
                 search_keywords=["라이트커튼 수광기"],
             )
+
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            raise AssertionError("Component-info intent should not run accident classify")
 
         async def answer(
             self,
@@ -567,7 +635,55 @@ def test_high_confidence_qwen_intent_overrides_local_rule_fallback() -> None:
             qwen_client=IntentQwenClient(),  # type: ignore[arg-type]
             qwen_enabled=True,
             qwen_allow_company_context=True,
-        ).answer(ChatRequest(question="라이트커튼 설치 방법을 알려줘."))
+        ).answer(ChatRequest(question="라이트커튼 관련해서 알려줘."))
+    )
+
+    assert response.answer_type == "component_info"
+    assert response.generation_mode == "qwen"
+
+
+def test_null_confidence_qwen_intent_can_resolve_local_clarification() -> None:
+    class IntentQwenClient:
+        async def classify_intent(self, request: ChatRequest) -> QueryAnalysis:
+            return QueryAnalysis(question_intent="component_info")
+
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            raise AssertionError("Component-info intent should not run accident classify")
+
+        async def answer(
+            self,
+            request: ChatRequest,
+            retrieval_response: ChatResponse,
+        ) -> QwenGeneratedAnswer:
+            assert request.analysis is not None
+            assert request.analysis.question_intent == "component_info"
+            return QwenGeneratedAnswer(
+                "비상정지 스위치는 설비를 정지시키는 안전 부품입니다 [1].",
+                "qwen-test",
+                used_source_ids=("chunk-1",),
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["analysis"]["question_intent"] == "component_info"
+        return httpx.Response(
+            200,
+            json={
+                "answer": "검색 기본 답변",
+                "sources": [_grounded_source("public_guide")],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    response = asyncio.run(
+        ChatService(
+            service_url="http://rag.test",
+            transport=httpx.MockTransport(handler),
+            openai_enabled=False,
+            qwen_client=IntentQwenClient(),  # type: ignore[arg-type]
+            qwen_enabled=True,
+            qwen_allow_company_context=True,
+        ).answer(ChatRequest(question="비상정지 스위치는 뭐 하는 부품이야?"))
     )
 
     assert response.answer_type == "component_info"
@@ -764,7 +880,8 @@ def test_local_vision_summary_is_never_sent_to_external_answer_model() -> None:
     )
 
     assert response.generation_mode == "template"
-    assert response.answer == "Local grounded template answer"
+    assert response.answer != "Local grounded template answer"
+    assert "현장 OCR 비밀값" not in response.answer
     assert "로컬 이미지 분석" in (response.warning or "")
 
 
@@ -822,6 +939,8 @@ def test_component_question_returns_component_structure_without_procedure() -> N
     assert response.structured_answer.answer_type == "component_info"
     assert response.checklist_items == []
     assert "manual_steps" not in response.structured_answer.model_dump()
+    assert response.answer != "검색된 근거를 기준으로 부품의 역할과 주의사항을 요약했습니다."
+    assert "장치" in response.answer
 
 
 def test_ambiguous_question_returns_clarification_without_retrieval() -> None:
@@ -934,10 +1053,13 @@ def test_maintenance_qwen_structure_and_checklist_are_source_validated() -> None
     assert response.structured_answer.answer_type == "maintenance_guide"
     assert len(response.structured_answer.hazards) == 1
     assert len(response.structured_answer.stop_conditions) == 1
-    assert [item.content for item in response.checklist_items] == ["설치 위치 기준 확인"]
+    assert [item.content for item in response.checklist_items] == [
+        "모델별 설치 기준 확인하기",
+        "설치 위치 확인하기"
+    ]
 
 
-def test_qwen_empty_component_sections_are_not_rule_backfilled() -> None:
+def test_qwen_empty_component_sections_are_backfilled_from_verified_candidates() -> None:
     class EmptySectionQwenClient:
         async def classify(self, request: ChatRequest) -> QueryAnalysis:
             return QueryAnalysis(
@@ -994,10 +1116,10 @@ def test_qwen_empty_component_sections_are_not_rule_backfilled() -> None:
 
     assert response.answer_type == "component_info"
     assert isinstance(response.structured_answer, ComponentAnswerDetails)
-    assert response.structured_answer.one_line_description.startswith("PC 설정 툴")
-    assert response.structured_answer.main_roles == []
-    assert response.structured_answer.usage_locations == []
-    assert response.structured_answer.precautions == []
+    assert response.structured_answer.one_line_description.startswith("라이트 커튼은")
+    assert "광전자식 방호장치" in response.answer
+    assert response.structured_answer.main_roles
+    assert response.structured_answer.precautions
 
 
 def test_qwen_receives_compact_sources_to_avoid_colab_ngrok_timeout() -> None:
@@ -1021,7 +1143,7 @@ def test_qwen_receives_compact_sources_to_avoid_colab_ngrok_timeout() -> None:
             retrieval_response: ChatResponse,
         ) -> QwenGeneratedAnswer:
             assert len(retrieval_response.sources) == 3
-            assert all(len(source.excerpt) <= 903 for source in retrieval_response.sources)
+            assert all(len(source.excerpt) <= 183 for source in retrieval_response.sources)
             return QwenGeneratedAnswer(
                 "Qwen compact answer [1]",
                 "qwen-test",
@@ -1066,7 +1188,9 @@ def test_qwen_receives_compact_sources_to_avoid_colab_ngrok_timeout() -> None:
     )
 
     assert response.generation_mode == "qwen"
-    assert response.answer == "Qwen compact answer [1]"
+    assert response.answer != "Qwen compact answer [1]"
+    assert "프레스 내부를 청소 전에는" in response.answer
+    assert "예상 핵심 위험은 끼임입니다" in response.answer
     assert len(response.sources) == 3
 
 
@@ -1126,6 +1250,52 @@ def test_maintenance_qwen_source_selection_keeps_relevant_incident_with_limit_tw
     assert len(selected) == 2
     assert "incident-1" in {source.chunk_id for source in selected}
     assert len({source.document_id for source in selected}) == 2
+
+
+def test_maintenance_qwen_source_selection_filters_light_curtain_mismatches() -> None:
+    sources = [
+        {
+            **_grounded_source("public_incident"),
+            "document_id": "conveyor-doc",
+            "chunk_id": "conveyor-cleaning",
+            "title": "벨트콘베이어 청소작업중 협착사고",
+            "original_filename": "conveyor-cleaning.pdf",
+            "section": "협착사고",
+            "excerpt": "벨트콘베이어 하부 캐리어 풀리 위험점에 방호울과 비상정지스위치를 설치한다.",
+            "similarity": 0.9,
+            "reranker_score": 0.9,
+        },
+        {
+            **_grounded_source("public_guide"),
+            "document_id": "curtain-wall-doc",
+            "chunk_id": "curtain-wall",
+            "title": "금속 커튼월(Curtain wall) 안전작업 지침",
+            "original_filename": "curtain-wall.pdf",
+            "section": "커튼월 설치",
+            "excerpt": "커튼월 설치작업 전 작업계획서를 작성하고 양중장비를 확인한다.",
+            "similarity": 0.95,
+            "reranker_score": 0.95,
+        },
+        {
+            **_grounded_source("public_guide"),
+            "document_id": "photoelectric-doc",
+            "chunk_id": "photoelectric",
+            "title": "광전자식 방호장치 설치 지침",
+            "original_filename": "photoelectric-guard.pdf",
+            "section": "광전자식 방호장치",
+            "excerpt": "광전자식 방호장치는 위험한 움직임을 멈출 수 있는 안전거리에 설치한다.",
+            "similarity": 0.7,
+            "reranker_score": 0.7,
+        },
+    ]
+
+    selected = ChatService._select_maintenance_qwen_sources(
+        "라이트 커튼 설치 할 거야",
+        [ChatSource.model_validate(source) for source in sources],
+        limit=2,
+    )
+
+    assert [source.chunk_id for source in selected] == ["photoelectric"]
 
 
 def test_qwen_focused_excerpt_cleans_dataset_prefix_and_table_fragments() -> None:
@@ -1225,8 +1395,9 @@ def test_invalid_qwen_source_reference_falls_back_without_500() -> None:
         ).answer(ChatRequest(question="라이트커튼이 무슨 장비야?"))
     )
 
-    assert response.answer == "검증된 검색 fallback"
+    assert response.answer != "검증된 검색 fallback"
     assert response.answer_type == "component_info"
+    assert "장치" in response.answer
     assert "검색되지 않은 출처" in (response.warning or "")
 
 

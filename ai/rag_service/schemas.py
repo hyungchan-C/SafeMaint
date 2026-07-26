@@ -96,6 +96,7 @@ class ChatSource(BaseModel):
     keyword_score: float = Field(default=0.0, ge=0.0)
     retrieval_score: float = Field(default=0.0, ge=0.0)
     reranker_score: float = Field(default=0.0, ge=0.0)
+    document_profile: dict | None = None
 
 
 class ChatResponse(BaseModel):

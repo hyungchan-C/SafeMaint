@@ -13,6 +13,16 @@ def _optional_csv_env(name: str) -> tuple[str, ...] | None:
     return values or None
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw_value = getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if not normalized:
+        return default
+    return normalized in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     database_url: str = getenv(
@@ -28,7 +38,7 @@ class Settings:
         getenv("RAG_DOCUMENT_NEIGHBOR_WINDOW", "1")
     )
     component_top_k: int = int(getenv("RAG_COMPONENT_TOP_K", "5"))
-    maintenance_top_k: int = int(getenv("RAG_MAINTENANCE_TOP_K", "8"))
+    maintenance_top_k: int = int(getenv("RAG_MAINTENANCE_TOP_K", "16"))
     candidate_k: int = int(getenv("RAG_CANDIDATE_K", "30"))
     max_chunks_per_document: int = int(
         getenv("RAG_MAX_CHUNKS_PER_DOCUMENT", "2")
@@ -73,6 +83,14 @@ class Settings:
     worker_heartbeat_seconds: float = float(
         getenv("DOCUMENT_WORKER_HEARTBEAT_SECONDS", "30")
     )
+    qwen_enabled: bool = _bool_env("QWEN_ENABLED", False)
+    document_profile_extraction_enabled: bool = _bool_env(
+        "DOCUMENT_PROFILE_EXTRACTION_ENABLED",
+        qwen_enabled,
+    )
+    qwen_service_url: str = getenv("QWEN_SERVICE_URL", "").rstrip("/")
+    qwen_api_key: str = getenv("QWEN_API_KEY", "")
+    qwen_timeout_seconds: float = float(getenv("QWEN_TIMEOUT_SECONDS", "600"))
 
 
 settings = Settings()

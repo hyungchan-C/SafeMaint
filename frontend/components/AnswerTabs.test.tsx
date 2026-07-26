@@ -87,6 +87,9 @@ const maintenanceAnswer: MaintenanceAnswerDetails = {
   manual_steps: [
     { content: "광축 정렬 상태를 확인합니다.", evidence_chunk_ids: ["manual-chunk"] },
   ],
+  precautions: [
+    { content: "정렬 상태 유지", evidence_chunk_ids: ["manual-chunk"] },
+  ],
   stop_conditions: [
     { content: "안전거리 기준을 확인하지 못한 경우", evidence_chunk_ids: ["law-chunk"] },
   ],
@@ -197,7 +200,6 @@ describe("AnswerTabs", () => {
 
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "문서 개요",
-      "주요 내용",
       "관련 항목",
       "출처",
     ]);

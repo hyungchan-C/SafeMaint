@@ -6,12 +6,15 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from qwen_service.config import settings
-from qwen_service.model import QwenEngine
+from qwen_service.model import QwenAnswerGenerationError, QwenEngine
 from qwen_service.schemas import (
     AnswerRequest,
     AnswerResponse,
     ClassifyRequest,
     ClassifyResponse,
+    DocumentProfileRequest,
+    DocumentProfileResponse,
+    IntentClassifyResponse,
 )
 
 
@@ -55,6 +58,14 @@ async def classify(
     return await engine.classify(payload)
 
 
+@app.post("/v1/intent", response_model=IntentClassifyResponse)
+async def intent(
+    payload: ClassifyRequest,
+    _: None = Depends(require_api_key),
+) -> IntentClassifyResponse:
+    return await engine.intent(payload)
+
+
 @app.post("/v1/answer", response_model=AnswerResponse)
 async def answer(
     payload: AnswerRequest,
@@ -62,6 +73,30 @@ async def answer(
 ) -> AnswerResponse:
     try:
         return await engine.answer(payload)
+    except QwenAnswerGenerationError as exc:
+        logger.warning("Qwen answer validation failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Qwen did not produce a valid compact answer.",
+        ) from exc
     except Exception:
-        logger.exception("Qwen answer generation failed; returning safe fallback.")
-        return engine._fallback_answer(payload, "")
+        logger.exception("Qwen answer generation failed.")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Qwen answer generation failed.",
+        )
+
+
+@app.post("/v1/document-profile", response_model=DocumentProfileResponse)
+async def document_profile(
+    payload: DocumentProfileRequest,
+    _: None = Depends(require_api_key),
+) -> DocumentProfileResponse:
+    try:
+        return await engine.document_profile(payload)
+    except Exception:
+        logger.exception("Qwen document profile extraction failed.")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Qwen document profile extraction failed.",
+        )

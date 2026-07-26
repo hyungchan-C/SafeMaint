@@ -138,7 +138,7 @@ function NaturalAnswer({ answer }: { answer: string }) {
     <section className="answer-tab-natural" aria-label="AI 핵심 답변">
       <div className="answer-tab-natural-heading">
         <strong>AI 핵심 답변</strong>
-        <span>검색 근거를 바탕으로 생성된 원문 답변</span>
+        <span>검색 근거를 바탕으로 요약한 답변</span>
       </div>
       <p>{answer}</p>
     </section>
@@ -290,21 +290,16 @@ export default function AnswerTabs({
                 <span>안전관리자 확인</span>
                 <strong>{structuredAnswer.summary.status}</strong>
               </div>
-              <div>
-                <span>예상 위험도</span>
-                <strong>별도 위험성평가 필요</strong>
-                <small>모델 판단값: {structuredAnswer.summary.risk_level}</small>
-              </div>
             </section>
             <AnswerSection title="핵심 경고" tone="warning">
               <p>{structuredAnswer.summary.core_warning}</p>
             </AnswerSection>
-            <AnswerSection title="위험 판단 근거">
-              {evidenceList(
-                structuredAnswer.summary.risk_basis,
-                "별도 위험성평가가 필요합니다.",
-              )}
-            </AnswerSection>
+            {structuredAnswer.summary.risk_basis.length > 0 && (
+              <AnswerSection title="위험 판단 근거">
+                {evidenceList(structuredAnswer.summary.risk_basis)}
+              </AnswerSection>
+            )}
+            {warning && <p className="answer-tab-warning">⚠ {warning}</p>}
           </div>
         ),
       },
@@ -337,7 +332,10 @@ export default function AnswerTabs({
         content: (
           <div className="answer-tab-stack">
             <AnswerSection title="작업 시 주의사항" tone="warning">
-              <p>{structuredAnswer.summary.core_warning}</p>
+              {evidenceList(
+                structuredAnswer.precautions,
+                "확인된 주의사항이 없습니다.",
+              )}
             </AnswerSection>
             <AnswerSection title="즉시 작업을 중지해야 하는 조건" tone="danger">
               {evidenceList(structuredAnswer.stop_conditions)}
@@ -400,6 +398,7 @@ export default function AnswerTabs({
             <AnswerSection title="주요 역할">
               {evidenceList(structuredAnswer.main_roles)}
             </AnswerSection>
+            {warning && <p className="answer-tab-warning">⚠ {warning}</p>}
           </div>
         ),
       },
@@ -474,16 +473,8 @@ export default function AnswerTabs({
                 </dl>
               ) : <p className="answer-tab-empty">확인된 문서 메타데이터가 없습니다.</p>}
             </section>
+            {warning && <p className="answer-tab-warning">⚠ {warning}</p>}
           </div>
-        ),
-      },
-      {
-        id: "main-contents",
-        label: "주요 내용",
-        content: (
-          <AnswerSection title="문서의 주요 내용">
-            {evidenceList(structuredAnswer.main_contents)}
-          </AnswerSection>
         ),
       },
       {

@@ -5,6 +5,9 @@ import pytest
 from rag_service.config import Settings
 from rag_service.retrieval import (
     PgvectorRetriever,
+    domain_phrase_query_terms,
+    maintenance_query_expansions,
+    _term_matches,
     normalize_document_ids,
     normalize_source_types,
     normalize_text,
@@ -30,6 +33,13 @@ def test_legacy_source_type_aliases_map_to_canonical_document_types() -> None:
         "public_incident",
         "equipment_manual",
         "public_law",
+    )
+
+
+def test_korean_compound_topic_matches_spaced_manual_text() -> None:
+    assert _term_matches(
+        "라이트커튼",
+        "설치 시 라이트 커튼의 기능을 다시 설정하십시오.",
     )
 
 
@@ -72,7 +82,8 @@ def test_specific_question_excludes_unrelated_form_context() -> None:
 
     query = retriever.build_search_query(request)
 
-    assert query == "라이트커튼 설치시 주의사항"
+    assert query.startswith("라이트커튼 설치시 주의사항")
+    assert "광전자식 방호장치" in query
     assert "컨베이어" not in query
     assert "이물질" not in query
 
@@ -90,6 +101,138 @@ def test_classifier_label_does_not_override_specific_question_topic() -> None:
     retriever = PgvectorRetriever(Settings(), embedder=object())  # type: ignore[arg-type]
 
     assert retriever.build_search_query(request) == "베어링 교체작업"
+
+
+def test_maintenance_query_expands_public_safety_terms() -> None:
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "컨베이어 청소할 때 작업 전 확인사항 알려줘",
+            "analysis": {"question_intent": "maintenance_guide"},
+        }
+    )
+    retriever = PgvectorRetriever(Settings(), embedder=object())  # type: ignore[arg-type]
+
+    query = retriever.build_search_query(request)
+
+    assert "컨베이어 청소할 때 작업 전 확인사항 알려줘" in query
+    assert "전원" in query
+    assert "차단" in query
+    assert "끼임" in query
+    assert "협착" in query
+
+
+def test_maintenance_query_expansion_is_action_specific() -> None:
+    assert maintenance_query_expansions("컨베이어 청소 작업") == (
+        "청소",
+        "정지",
+        "전원",
+        "차단",
+        "잠금",
+        "재가동",
+        "끼임",
+        "협착",
+        "사고",
+        "예방",
+    )
+
+
+def test_maintenance_public_safety_match_survives_equipment_topic_gap() -> None:
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "컨베이어 청소할 때 작업 전 확인사항 알려줘",
+            "analysis": {"question_intent": "maintenance_guide"},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(min_similarity=0.1, maintenance_top_k=4),
+        embedder=object(),  # type: ignore[arg-type]
+    )
+    safety_row = {
+        "document_id": "public-cleaning-safety",
+        "chunk_id": "chunk-cleaning-safety",
+        "title": "청소 작업 사고 예방 지침",
+        "source_type": "public_guide",
+        "document_scope": "public",
+        "original_filename": "cleaning-safety.pdf",
+        "document_version": 1,
+        "section": "청소 작업 전 확인",
+        "content": "기계 청소 작업 전에는 운전을 정지하고 전원을 차단하며 잠금 조치로 끼임 사고를 예방한다.",
+        "content_hash": "p" * 64,
+        "page": 2,
+        "page_start": 2,
+        "page_end": 2,
+        "publisher": "public source",
+        "url": None,
+        "similarity": 0.75,
+        "postgres_keyword_score": 0.1,
+    }
+
+    results = retriever._rerank(request, [safety_row])
+
+    assert [result.chunk_id for result in results] == ["chunk-cleaning-safety"]
+
+
+def test_domain_phrase_query_expands_light_curtain_aliases() -> None:
+    terms = domain_phrase_query_terms("라이트 커튼 설치 작업")
+
+    assert "라이트커튼" in terms
+    assert "광전자식 방호장치" in terms
+    assert "ESPE" in terms
+
+
+def test_light_curtain_query_keeps_photoelectric_sources_before_curtain_wall() -> None:
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "라이트 커튼 설치 할 거야",
+            "analysis": {"question_intent": "maintenance_guide"},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(min_similarity=0.1, maintenance_top_k=4),
+        embedder=object(),  # type: ignore[arg-type]
+    )
+    curtain_wall = {
+        "document_id": "public-curtain-wall",
+        "chunk_id": "chunk-curtain-wall",
+        "title": "금속 커튼월(Curtain wall) 안전작업 지침",
+        "source_type": "public_guide",
+        "document_scope": "public",
+        "original_filename": "curtain-wall.pdf",
+        "document_version": 1,
+        "section": "설치 시 안전조치",
+        "content": "커튼월 설치작업 전 작업계획서를 작성하고 양중장비와 작업발판을 확인한다.",
+        "content_hash": "q" * 64,
+        "page": 2,
+        "page_start": 2,
+        "page_end": 2,
+        "publisher": "public source",
+        "url": None,
+        "similarity": 0.95,
+        "postgres_keyword_score": 0.3,
+    }
+    photoelectric = {
+        "document_id": "public-photoelectric",
+        "chunk_id": "chunk-photoelectric",
+        "title": "광전자식 방호장치 설치 지침",
+        "source_type": "public_guide",
+        "document_scope": "public",
+        "original_filename": "photoelectric.pdf",
+        "document_version": 1,
+        "section": "광전자식 방호장치",
+        "content": "광전자식 방호장치는 위험한 움직임을 멈출 수 있는 안전거리에 설치하고 광축을 확인한다.",
+        "content_hash": "r" * 64,
+        "page": 5,
+        "page_start": 5,
+        "page_end": 5,
+        "publisher": "public source",
+        "url": None,
+        "similarity": 0.75,
+        "postgres_keyword_score": 0.1,
+    }
+
+    results = retriever._rerank(request, [curtain_wall, photoelectric])
+
+    assert [result.chunk_id for result in results] == ["chunk-photoelectric"]
 
 
 def test_default_access_scope_is_strict_public_only() -> None:

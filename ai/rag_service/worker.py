@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from contextlib import contextmanager
@@ -9,6 +10,8 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import psycopg
 import numpy as np
@@ -44,6 +47,12 @@ class ClaimedJob:
     title: str
     original_filename: str
     document_type: str
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentProfileExtraction:
+    profile: dict[str, Any] | None
     metadata: dict[str, Any]
 
 
@@ -385,6 +394,152 @@ def _process(job: ClaimedJob):
     )
 
 
+def _document_profile_sample(chunks: tuple[ProcessedChunk, ...]) -> str:
+    selected: list[str] = []
+    seen_hashes: set[str] = set()
+    signal_terms = (
+        "모델",
+        "형식",
+        "사양",
+        "정격",
+        "설치",
+        "장착",
+        "배선",
+        "결선",
+        "주의",
+        "경고",
+        "기능",
+        "설정",
+        "부품",
+        "구성",
+    )
+    for chunk in chunks[:12]:
+        if chunk.content_hash not in seen_hashes:
+            selected.append(chunk.content)
+            seen_hashes.add(chunk.content_hash)
+    for chunk in chunks[12:80]:
+        text = chunk.content
+        if chunk.content_hash in seen_hashes:
+            continue
+        if any(term in text for term in signal_terms):
+            selected.append(text)
+            seen_hashes.add(chunk.content_hash)
+        if len(selected) >= 20:
+            break
+    sample = "\n\n".join(selected)
+    return sample[:18000]
+
+
+def _extract_document_profile(
+    job: ClaimedJob,
+    processed_chunks: tuple[ProcessedChunk, ...],
+) -> DocumentProfileExtraction:
+    if not settings.document_profile_extraction_enabled:
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={"enabled": False, "status": "skipped"},
+        )
+    if not settings.qwen_service_url:
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={
+                "enabled": True,
+                "status": "skipped",
+                "reason": "QWEN_SERVICE_URL is not configured.",
+            },
+        )
+    sample_text = _document_profile_sample(processed_chunks)
+    if not sample_text.strip():
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={
+                "enabled": True,
+                "status": "skipped",
+                "reason": "No text sample was available.",
+            },
+        )
+    payload = {
+        "title": job.title,
+        "original_filename": job.original_filename,
+        "manufacturer": _metadata_value(job.metadata, "manufacturer", "제조사"),
+        "product_type": _metadata_value(job.metadata, "product_type", "제품군"),
+        "model_name": _metadata_value(
+            job.metadata,
+            "model_name",
+            "model_number",
+            "모델명",
+        ),
+        "document_type": job.document_type,
+        "sample_text": sample_text,
+    }
+    url = f"{settings.qwen_service_url}/v1/document-profile"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "true",
+    }
+    if settings.qwen_api_key:
+        headers["Authorization"] = f"Bearer {settings.qwen_api_key}"
+    request = Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=settings.qwen_timeout_seconds) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        logger.warning(
+            "Qwen document profile request failed document_id=%s status=%s detail=%s",
+            job.document_id,
+            exc.code,
+            detail,
+        )
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={
+                "enabled": True,
+                "status": "failed",
+                "reason": f"HTTP {exc.code}: {detail}",
+            },
+        )
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Qwen document profile request failed document_id=%s error=%s",
+            job.document_id,
+            exc,
+        )
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={
+                "enabled": True,
+                "status": "failed",
+                "reason": str(exc)[:300],
+            },
+        )
+    profile = body.get("document_profile") if isinstance(body, dict) else None
+    if not isinstance(profile, dict):
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={
+                "enabled": True,
+                "status": "failed",
+                "reason": "Response did not contain document_profile.",
+            },
+        )
+    return DocumentProfileExtraction(
+        profile=profile,
+        metadata={
+            "enabled": True,
+            "status": "ready",
+            "model": body.get("model"),
+            "schema_version": 1,
+        },
+    )
+
+
 def _extract(path: Path) -> tuple[int, list[tuple[int, str]]]:
     """Backward-compatible test helper backed by the common PDF pipeline."""
     result = process_document_pdf(
@@ -432,6 +587,19 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
         "processed_chunks": total_chunks,
         "total_chunks": total_chunks,
         "embedded_chunks": 0,
+    }
+    _report_progress(
+        job,
+        "chunking",
+        60,
+        "문서 구조화 메타데이터를 확인하고 있습니다.",
+        base_counters,
+        force=True,
+    )
+    profile_extraction = _extract_document_profile(job, processed.chunks)
+    processing_metadata = {
+        **processed.processing_metadata,
+        "document_profile_extraction": profile_extraction.metadata,
     }
     _report_progress(
         job,
@@ -567,7 +735,7 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
                 """,
                 (
                     processed.page_count,
-                    Jsonb(processed.processing_metadata),
+                    Jsonb(processing_metadata),
                     now,
                     job.version_id,
                 ),
@@ -602,14 +770,40 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
                 ),
             )
             cursor.execute(
-                """
-                UPDATE documents
-                SET lifecycle_status = 'review_required', updated_at = %s
-                WHERE id = %s
-                  AND current_version_id IS NULL
-                  AND lifecycle_status <> 'deleted'
-                """,
-                (now, job.document_id),
+                (
+                    """
+                    UPDATE documents
+                    SET lifecycle_status = 'review_required',
+                        metadata = COALESCE(metadata, '{}'::jsonb) || %s,
+                        updated_at = %s
+                    WHERE id = %s
+                      AND current_version_id IS NULL
+                      AND lifecycle_status <> 'deleted'
+                    """
+                    if profile_extraction.profile is not None
+                    else """
+                    UPDATE documents
+                    SET lifecycle_status = 'review_required', updated_at = %s
+                    WHERE id = %s
+                      AND current_version_id IS NULL
+                      AND lifecycle_status <> 'deleted'
+                    """
+                ),
+                (
+                    (
+                        Jsonb(
+                            {
+                                "document_profile": profile_extraction.profile,
+                                "document_profile_schema_version": 1,
+                                "document_profile_source": "qwen",
+                            }
+                        ),
+                        now,
+                        job.document_id,
+                    )
+                    if profile_extraction.profile is not None
+                    else (now, job.document_id)
+                ),
             )
             _audit(
                 cursor,
@@ -620,23 +814,23 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
                     "attempt": job.attempts,
                     "chunk_count": len(processed.chunks),
                     "page_count": processed.page_count,
-                    **_processing_audit_payload(processed.processing_metadata),
+                    **_processing_audit_payload(processing_metadata),
                 },
             )
         connection.commit()
     with _progress_lock:
         _last_progress_write.pop(job.job_id, None)
-    log_method = logger.warning if processed.processing_metadata.get("fallback_used") else logger.info
+    log_method = logger.warning if processing_metadata.get("fallback_used") else logger.info
     log_method(
         "PDF processing completed document_id=%s document_version_id=%s "
         "filename=%s extractor=%s extractor_version=%s fallback_used=%s ocr_used=%s",
         job.document_id,
         job.version_id,
         job.original_filename,
-        processed.processing_metadata.get("extractor"),
-        processed.processing_metadata.get("extractor_version"),
-        bool(processed.processing_metadata.get("fallback_used")),
-        bool(processed.processing_metadata.get("ocr_used")),
+        processing_metadata.get("extractor"),
+        processing_metadata.get("extractor_version"),
+        bool(processing_metadata.get("fallback_used")),
+        bool(processing_metadata.get("ocr_used")),
     )
 
 

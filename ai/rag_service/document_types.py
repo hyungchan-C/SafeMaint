@@ -37,6 +37,7 @@ MAINTENANCE_DOCUMENT_TYPES = (
     "company_policy",
     "public_law",
     "public_guide",
+    "public_media",
     "public_incident",
 )
 
