@@ -226,4 +226,25 @@ describe("AnswerTabs", () => {
       .toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("SFL-라이트커튼-설치매뉴얼.pdf")).toBeInTheDocument();
   });
+
+  it("does not render empty reference or unverified sections", () => {
+    renderTabs(
+      {
+        ...maintenanceAnswer,
+        related_regulations_and_incidents: [],
+        additional_information_needed: [],
+      },
+      [manualSource, lawSource, incidentSource],
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "안전·중지" }));
+    expect(screen.queryByText("추가 확인이 필요한 내용")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "근거" }));
+    expect(screen.queryByText("관련 법령")).not.toBeInTheDocument();
+    expect(screen.queryByText("안전 가이드·회사 기준")).not.toBeInTheDocument();
+    expect(screen.queryByText("사고사례")).not.toBeInTheDocument();
+    expect(screen.queryByText("산업안전보건기준.pdf")).not.toBeInTheDocument();
+    expect(screen.queryByText("프레스_사고사례.pdf")).not.toBeInTheDocument();
+  });
 });

@@ -57,3 +57,16 @@ def test_ambiguous_component_question_requests_clarification() -> None:
 
 def test_pronoun_only_how_to_request_requires_clarification() -> None:
     assert _intent("이거 어떻게 해?") == "clarification_required"
+
+
+def test_intent_classification_is_not_tied_to_vision_sensor_examples() -> None:
+    cases = {
+        "펌프 설치할 거야": "maintenance_guide",
+        "펌프 문서 요약해줘": "document_qa",
+        "펌프가 뭐야?": "component_info",
+        "차단기 교체 방법 알려줘": "maintenance_guide",
+        "차단기 매뉴얼 요약해줘": "document_qa",
+        "차단기가 뭐야?": "component_info",
+    }
+
+    assert {question: _intent(question) for question in cases} == cases

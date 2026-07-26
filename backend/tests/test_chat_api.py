@@ -1053,10 +1053,54 @@ def test_maintenance_qwen_structure_and_checklist_are_source_validated() -> None
     assert response.structured_answer.answer_type == "maintenance_guide"
     assert len(response.structured_answer.hazards) == 1
     assert len(response.structured_answer.stop_conditions) == 1
-    assert [item.content for item in response.checklist_items] == [
-        "모델별 설치 기준 확인하기",
-        "설치 위치 확인하기"
-    ]
+    checklist_contents = [item.content for item in response.checklist_items]
+    assert "모델별 설치 기준 확인하기" in checklist_contents
+    assert "설치 위치 확인하기" in checklist_contents
+    assert len(checklist_contents) <= 5
+    assert all(item.evidence_chunk_ids == ["chunk-1"] for item in response.checklist_items)
+
+
+def test_maintenance_summary_prioritizes_verified_manual_steps() -> None:
+    response = ChatResponse(
+        answer="기존 일반 안전요약",
+        answer_type="maintenance_guide",
+        structured_answer=MaintenanceAnswerDetails(
+            summary=MaintenanceSummary(
+                status="안전관리자 확인 필요",
+                risk_level="판단 불가",
+                risk_basis=[],
+                core_warning="교체 후 안전 기능을 검증하세요.",
+            ),
+            pre_checks=[
+                EvidenceBackedItem(
+                    content="오동작 위험을 확인합니다.",
+                    evidence_chunk_ids=["chunk-1"],
+                )
+            ],
+            manual_steps=[
+                EvidenceBackedItem(
+                    content="전원을 차단합니다.",
+                    evidence_chunk_ids=["chunk-1"],
+                ),
+                EvidenceBackedItem(
+                    content="교체한 수광기에 저장된 설정을 전송합니다.",
+                    evidence_chunk_ids=["chunk-1"],
+                ),
+            ],
+        ),
+        retrieval_mode="hybrid",
+    )
+
+    answer = ChatService._short_grounded_answer(
+        ChatRequest(question="라이트커튼을 교체해야 해. 어떻게 해야 할까?"),
+        response,
+    )
+
+    assert answer.startswith("매뉴얼에서 확인된 라이트커튼 교체 절차입니다.")
+    assert "1. 전원을 차단합니다." in answer
+    assert "2. 교체한 수광기에 저장된 설정을 전송합니다." in answer
+    assert "오동작 위험을 확인합니다." not in answer
+    assert "교체 후 안전 기능을 검증하세요." not in answer
 
 
 def test_qwen_empty_component_sections_are_backfilled_from_verified_candidates() -> None:
