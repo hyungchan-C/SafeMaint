@@ -1,5 +1,19 @@
 import type { ChatSource } from "@/types/chat";
 
+const SOURCE_TYPE_LABELS: Record<string, string> = {
+  equipment_manual: "설비 매뉴얼",
+  component_manual: "부품 매뉴얼",
+  company_policy: "회사 기준",
+  public_law: "법령",
+  public_guide: "안전 가이드",
+  public_media: "안전자료",
+  public_incident: "사고사례",
+};
+
+function sourceTypeLabel(sourceType: string) {
+  return SOURCE_TYPE_LABELS[sourceType] ?? sourceType;
+}
+
 function SourceCard({
   source,
   number,
@@ -22,7 +36,7 @@ function SourceCard({
     >
       <div className="chat-source-heading">
         <span className="source-number">근거 {number}</span>
-        <span>{source.source_type} · 유사도 {(source.similarity * 100).toFixed(1)}%</span>
+        <span>{sourceTypeLabel(source.source_type)} · 유사도 {(source.similarity * 100).toFixed(1)}%</span>
       </div>
       <strong>{source.original_filename || source.title}</strong>
       <small className="chat-source-location">{[pageLabel, source.section ? `섹션: ${source.section}` : null, source.document_version ? `버전 ${source.document_version}` : null].filter(Boolean).join(" · ")}</small>

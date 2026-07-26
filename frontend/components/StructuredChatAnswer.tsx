@@ -203,7 +203,6 @@ export default function StructuredChatAnswer({
       <div className="structured-answer document-answer">
         <span className="answer-type-label">문서 내용 답변</span>
         <section className="document-overview"><h3>문서 개요</h3>{overview.length ? <dl>{overview.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl> : <p>확인된 문서 메타데이터가 없습니다.</p>}</section>
-        <section className="structured-section"><h4>주요 내용</h4><EvidenceList items={answer.main_contents} sourceNumbers={sourceNumbers} /></section>
         <section className="structured-columns">
           <div><h4>관련 장비·부품</h4><TextList items={[...answer.related_equipment, ...answer.related_components]} /></div>
           <div><h4>문서에서 확인할 수 있는 작업</h4><TextList items={answer.supported_tasks} /></div>
@@ -233,12 +232,10 @@ export default function StructuredChatAnswer({
       <span className="answer-type-label">유지보수 작업 안내</span>
       <section className="maintenance-summary risk-판단-불가">
         <div><span>상태</span><strong>{answer.summary.status}</strong></div>
-        <div>
-          <span>위험성평가</span>
-          <strong>별도 위험성평가 필요</strong>
-        </div>
         <p>{answer.summary.core_warning}</p>
-        <EvidenceList items={answer.summary.risk_basis} sourceNumbers={sourceNumbers} />
+        {answer.summary.risk_basis.length > 0 && (
+          <EvidenceList items={answer.summary.risk_basis} sourceNumbers={sourceNumbers} />
+        )}
       </section>
       <section className="structured-section"><h4>1. 작업 전 필수 확인사항</h4><EvidenceList items={answer.pre_checks} sourceNumbers={sourceNumbers} /></section>
       <section className="structured-section"><h4>2. 주요 위험요인</h4><EvidenceList items={answer.hazards.map(({ name, ...item }) => ({ ...item, content: `${name}: ${item.content}` }))} sourceNumbers={sourceNumbers} /></section>

@@ -30,6 +30,10 @@ def test_component_usage_is_component_info() -> None:
     assert _intent("라이트커튼은 어디에 사용해?") == "component_info"
 
 
+def test_component_what_does_it_do_phrase_is_component_info() -> None:
+    assert _intent("비상정지 스위치는 뭐 하는 부품이야?") == "component_info"
+
+
 def test_installation_request_is_maintenance_guide() -> None:
     assert _intent("라이트커튼 설치 방법을 알려줘.") == "maintenance_guide"
 

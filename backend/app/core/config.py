@@ -96,20 +96,23 @@ class Settings:
     qwen_intent_classify_enabled: bool = _bool_env(
         "QWEN_INTENT_CLASSIFY_ENABLED", True
     )
+    qwen_accident_classify_enabled: bool = _bool_env(
+        "QWEN_ACCIDENT_CLASSIFY_ENABLED", True
+    )
     question_intent_confidence_threshold: float = float(
         getenv("QUESTION_INTENT_CONFIDENCE_THRESHOLD", "0.8")
     )
     qwen_source_excerpt_chars: int = int(
-        getenv("QWEN_SOURCE_EXCERPT_CHARS", "900")
+        getenv("QWEN_SOURCE_EXCERPT_CHARS", "180")
     )
     qwen_document_source_limit: int = int(
-        getenv("QWEN_DOCUMENT_SOURCE_LIMIT", "6")
+        getenv("QWEN_DOCUMENT_SOURCE_LIMIT", "2")
     )
     qwen_component_source_limit: int = int(
-        getenv("QWEN_COMPONENT_SOURCE_LIMIT", "5")
+        getenv("QWEN_COMPONENT_SOURCE_LIMIT", "2")
     )
     qwen_maintenance_source_limit: int = int(
-        getenv("QWEN_MAINTENANCE_SOURCE_LIMIT", "8")
+        getenv("QWEN_MAINTENANCE_SOURCE_LIMIT", "5")
     )
     qwen_classifier_enabled: bool = _bool_env(
         "QWEN_CLASSIFIER_ENABLED", False

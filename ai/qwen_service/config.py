@@ -21,14 +21,6 @@ def _csv_env(name: str, default: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw_value.split(",") if item.strip())
 
 
-def _choice_env(name: str, default: str, choices: set[str]) -> str:
-    value = getenv(name, default).strip().lower()
-    if value not in choices:
-        expected = ", ".join(sorted(choices))
-        raise ValueError(f"{name} must be one of: {expected}")
-    return value
-
-
 @dataclass(frozen=True, slots=True)
 class Settings:
     base_model: str = getenv("QWEN_BASE_MODEL", "Qwen/Qwen3.5-9B")
@@ -36,10 +28,8 @@ class Settings:
     api_key: str = getenv("QWEN_API_KEY", "")
     device: str = getenv("QWEN_DEVICE", "cuda")
     load_in_4bit: bool = _bool_env("QWEN_LOAD_IN_4BIT", True)
-    answer_mode: str = _choice_env(
-        "QWEN_ANSWER_MODE", "structured", {"text", "structured"}
-    )
-    repair_enabled: bool = _bool_env("QWEN_REPAIR_ENABLED", True)
+    answer_device: str = getenv("QWEN_ANSWER_DEVICE", getenv("QWEN_DEVICE", "cuda"))
+    answer_load_in_4bit: bool = _bool_env("QWEN_ANSWER_LOAD_IN_4BIT", False)
     max_new_tokens: int = int(getenv("QWEN_MAX_NEW_TOKENS", "768"))
     classify_max_new_tokens: int = int(
         getenv("QWEN_CLASSIFY_MAX_NEW_TOKENS", "64")

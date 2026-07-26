@@ -1424,6 +1424,18 @@ function WorkspaceScreen({
 
     try {
       const token = getAccessToken();
+      if (selectedDocumentIds.length > 0 && !token) {
+        setMessages((current) => [
+          ...current,
+          {
+            role: "ai",
+            text: "선택한 PDF 문서로 답변하려면 다시 로그인해 주세요.",
+            warning: "로그인 필요",
+          },
+        ]);
+        setIsChatLoading(false);
+        return;
+      }
       const response = await fetch(`${getApiBaseUrl()}/api/v1/chat`, {
         method: "POST",
         headers: {

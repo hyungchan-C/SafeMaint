@@ -29,7 +29,13 @@ PUBLIC_REFERENCE_DOCUMENT_TYPES = frozenset(
     {"public_law", "public_guide", "public_incident", "public_media"}
 )
 CHECKLIST_DOCUMENT_TYPES = frozenset(
-    {"equipment_manual", "component_manual", "public_law", "public_guide"}
+    {
+        "equipment_manual",
+        "component_manual",
+        "public_law",
+        "public_guide",
+        "company_policy",
+    }
 )
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -58,6 +58,7 @@ class ChatSource(BaseModel):
     keyword_score: float | None = None
     retrieval_score: float | None = None
     reranker_score: float | None = None
+    document_profile: dict[str, Any] | None = None
 
 
 class ClassifyRequest(BaseModel):
@@ -74,6 +75,19 @@ class ClassifyResponse(BaseModel):
         "component_info",
         "clarification_required",
     ] | None = None
+    intent_confidence: float | None = None
+    clarification_question: str | None = None
+    analysis: QueryAnalysis | None = None
+    model: str
+
+
+class IntentClassifyResponse(BaseModel):
+    question_intent: Literal[
+        "document_qa",
+        "maintenance_guide",
+        "component_info",
+        "clarification_required",
+    ]
     intent_confidence: float | None = None
     clarification_question: str | None = None
     analysis: QueryAnalysis | None = None
@@ -128,6 +142,7 @@ class MaintenanceAnswerDetails(BaseModel):
     pre_checks: list[EvidenceBackedItem] = Field(default_factory=list)
     hazards: list[MaintenanceHazard] = Field(default_factory=list, max_length=3)
     manual_steps: list[EvidenceBackedItem] = Field(default_factory=list)
+    precautions: list[EvidenceBackedItem] = Field(default_factory=list)
     stop_conditions: list[EvidenceBackedItem] = Field(default_factory=list)
     related_regulations_and_incidents: list[EvidenceBackedItem] = Field(
         default_factory=list
@@ -171,6 +186,7 @@ class AnswerRequest(BaseModel):
     analysis: QueryAnalysis | None = None
     answer_type: Literal["document_qa", "maintenance_guide", "component_info"]
     sources: list[ChatSource] = Field(default_factory=list)
+    candidate_structured_answer: dict[str, Any] | None = None
 
 
 class AnswerResponse(BaseModel):
@@ -179,4 +195,33 @@ class AnswerResponse(BaseModel):
     structured_answer: StructuredAnswer | None = None
     checklist_items: list[ChatChecklistItem] = Field(default_factory=list)
     used_source_ids: list[str] = Field(default_factory=list)
+    model: str
+
+
+class DocumentProfileRequest(BaseModel):
+    title: str
+    original_filename: str | None = None
+    manufacturer: str | None = None
+    product_type: str | None = None
+    model_name: str | None = None
+    document_type: str | None = None
+    sample_text: str = Field(max_length=20000)
+
+
+class DocumentProfile(BaseModel):
+    product_names: list[str] = Field(default_factory=list, max_length=12)
+    model_names: list[str] = Field(default_factory=list, max_length=12)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+    equipment: list[str] = Field(default_factory=list, max_length=20)
+    components: list[str] = Field(default_factory=list, max_length=30)
+    supported_tasks: list[str] = Field(default_factory=list, max_length=20)
+    safety_topics: list[str] = Field(default_factory=list, max_length=20)
+    summary_points: list[str] = Field(default_factory=list, max_length=8)
+    document_keywords: list[str] = Field(default_factory=list, max_length=30)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    extraction_notes: list[str] = Field(default_factory=list, max_length=8)
+
+
+class DocumentProfileResponse(BaseModel):
+    document_profile: DocumentProfile
     model: str
