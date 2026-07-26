@@ -1,7 +1,6 @@
 "use client";
 
 import type {
-  ChatChecklistItem,
   ChatSource,
   StructuredAnswer,
 } from "@/types/chat";
@@ -13,21 +12,13 @@ import StructuredChatAnswer from "@/components/StructuredChatAnswer";
 type Props = {
   answer: string;
   structuredAnswer?: StructuredAnswer | null;
-  checklistItems: ChatChecklistItem[];
   sources: ChatSource[];
-  savedAssessmentId: string | null;
-  isSavingChecklist: boolean;
-  onSaveChecklist: (checkedIndices: number[]) => void;
 };
 
 export default function ChatAnswerContent({
   answer,
   structuredAnswer,
-  checklistItems,
   sources,
-  savedAssessmentId,
-  isSavingChecklist,
-  onSaveChecklist,
 }: Props) {
   return (
     <div className="chat-answer-content">
@@ -46,11 +37,7 @@ export default function ChatAnswerContent({
           </div>
           <StructuredChatAnswer
             answer={structuredAnswer}
-            checklistItems={checklistItems}
             sources={sources}
-            savedAssessmentId={savedAssessmentId}
-            isSavingChecklist={isSavingChecklist}
-            onSaveChecklist={onSaveChecklist}
           />
         </section>
       )}

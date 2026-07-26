@@ -44,11 +44,7 @@ describe("ChatAnswerContent", () => {
           conflicts: [],
           additional_information_needed: [],
         }}
-        checklistItems={[]}
         sources={[source]}
-        savedAssessmentId={null}
-        isSavingChecklist={false}
-        onSaveChecklist={() => {}}
       />,
     );
 
@@ -63,11 +59,7 @@ describe("ChatAnswerContent", () => {
       <ChatAnswerContent
         answer="검증 가능한 근거를 찾지 못했습니다."
         structuredAnswer={null}
-        checklistItems={[]}
         sources={[]}
-        savedAssessmentId={null}
-        isSavingChecklist={false}
-        onSaveChecklist={() => {}}
       />,
     );
 

@@ -12,11 +12,7 @@ import type {
 
 type Props = {
   answer: StructuredAnswer;
-  checklistItems: ChatChecklistItem[];
   sources: ChatSource[];
-  savedAssessmentId: string | null;
-  isSavingChecklist: boolean;
-  onSaveChecklist: (checkedIndices: number[]) => void;
 };
 
 function EvidenceList({
@@ -87,7 +83,7 @@ function initialCheckedIndices(items: ChatChecklistItem[]): Set<number> {
   return indices;
 }
 
-function ChatChecklist({
+export function ChatChecklist({
   items,
   savedAssessmentId,
   isSaving,
@@ -157,11 +153,7 @@ function ChatChecklist({
 
 export default function StructuredChatAnswer({
   answer,
-  checklistItems,
   sources,
-  savedAssessmentId,
-  isSavingChecklist,
-  onSaveChecklist,
 }: Props) {
   const sourceNumbers = useMemo(
     () => new Map(sources.map((source, index) => [source.chunk_id, index + 1])),
@@ -246,12 +238,6 @@ export default function StructuredChatAnswer({
       <section className="structured-section stop-section"><h4>4. 즉시 작업을 중지해야 하는 조건</h4><EvidenceList items={answer.stop_conditions} sourceNumbers={sourceNumbers} /></section>
       <section className="structured-section"><h4>5. 관련 회사 기준·법령·가이드·사고사례</h4><EvidenceList items={answer.related_regulations_and_incidents} sourceNumbers={sourceNumbers} /></section>
       <ConflictSection items={answer.conflicts} sourceNumbers={sourceNumbers} />
-      <ChatChecklist
-        items={checklistItems}
-        savedAssessmentId={savedAssessmentId}
-        isSaving={isSavingChecklist}
-        onSave={onSaveChecklist}
-      />
       <section className="structured-section muted"><h4>6. 추가 확인이 필요한 내용</h4><TextList items={answer.additional_information_needed} /></section>
       <p className="structured-critical">이 안내는 작업 승인이 아닙니다. 안전관리자의 최종 확인 전에는 작업을 시작하지 마세요.</p>
     </div>

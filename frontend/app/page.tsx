@@ -8,6 +8,7 @@ import ChatAnswerContent from "@/components/ChatAnswerContent";
 import DocumentViewerModal, { type DocumentViewerTarget } from "@/components/DocumentViewerModal";
 import InterfaceIcon from "@/components/InterfaceIcon";
 import ManualManager from "@/components/ManualManager";
+import { ChatChecklist } from "@/components/StructuredChatAnswer";
 import TbmChecklist from "@/components/TbmChecklist";
 import WorkspaceHeader from "@/components/WorkspaceHeader";
 import type {
@@ -902,8 +903,10 @@ function WorkspaceScreen({
   }, []);
 
   const fontClass = useMemo(() => `font-${fontSize}`, [fontSize]);
-  const highestRisk = result?.hazards.some((hazard) => hazard.risk_level === "high") ? "high" : result?.hazards.some((hazard) => hazard.risk_level === "medium") ? "medium" : result ? "low" : "pending";
-  const accidentTypes = result ? Array.from(new Set(result.hazards.map((hazard) => hazard.accident_type))) : [];
+  const latestChecklistMessageIndex = messages.findLastIndex(
+    (candidate) => candidate.role === "ai" && Boolean(candidate.checklistItems?.length),
+  );
+  const latestChecklistMessage = latestChecklistMessageIndex >= 0 ? messages[latestChecklistMessageIndex] : null;
 
   function requireActiveSession(response: Response) {
     if (response.status !== 401) return;
@@ -2095,13 +2098,20 @@ function WorkspaceScreen({
       </details>
 
       <section className="field-overview-grid">
-        <article className={`risk-overview-card risk-${highestRisk}`}>
-          <span className="eyebrow">현재 작업 판단</span>
-          <div className="risk-symbol" aria-hidden="true"><span /></div>
-          <h1>{highestRisk === "high" ? "작업 중지 필요" : highestRisk === "medium" ? "관리자 확인 필요" : highestRisk === "low" ? "기본조치 확인" : "상담 대기"}</h1>
-          <p>{result ? `위험요인 ${result.hazards.length}건이 분석되었습니다.` : "매뉴얼을 선택하고 작업 내용을 질문하면 안전 근거를 확인할 수 있습니다."}</p>
-          <div className="accident-chip-list">{accidentTypes.length ? accidentTypes.map((type) => <span key={type}>⚠ {type}</span>) : <span>사고 유형 대기</span>}</div>
-          <small>AI는 작업을 승인하지 않으며 최종 판단은 안전관리자가 수행합니다.</small>
+        <article className="panel risk-overview-card">
+          {latestChecklistMessage ? (
+            <ChatChecklist
+              items={latestChecklistMessage.checklistItems ?? []}
+              savedAssessmentId={latestChecklistMessage.savedAssessmentId ?? null}
+              isSaving={savingChecklistIndex === latestChecklistMessageIndex}
+              onSave={(checkedIndices) => void saveChatChecklist(latestChecklistMessageIndex, latestChecklistMessage, checkedIndices)}
+            />
+          ) : (
+            <>
+              <span className="eyebrow">TBM 체크리스트</span>
+              <p className="muted-copy">매뉴얼 기반 작업 안내를 받으면 여기에 체크리스트가 표시됩니다.</p>
+            </>
+          )}
         </article>
         <article className="panel ppe-panel">
           <div className="panel-heading compact-heading"><h2>필수 보호구</h2><span className="panel-tag">현장 확인</span></div>
@@ -2176,11 +2186,7 @@ function WorkspaceScreen({
                 ? <ChatAnswerContent
                     answer={message.text}
                     structuredAnswer={message.structuredAnswer}
-                    checklistItems={message.checklistItems ?? []}
                     sources={message.sources ?? []}
-                    savedAssessmentId={message.savedAssessmentId ?? null}
-                    isSavingChecklist={savingChecklistIndex === index}
-                    onSaveChecklist={(checkedIndices) => void saveChatChecklist(index, message, checkedIndices)}
                   />
                 : <p className="chat-answer-text">{message.text}</p>}
               {message.catalogCandidates && message.catalogCandidates.length > 0 && (
