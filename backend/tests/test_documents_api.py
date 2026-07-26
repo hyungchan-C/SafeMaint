@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
@@ -9,7 +10,11 @@ from httpx import ASGITransport, AsyncClient
 from fastapi import HTTPException, UploadFile
 
 from app.api.deps import require_document_upload
-from app.api.routes.documents import delete_document, upload_document
+from app.api.routes.documents import (
+    delete_document,
+    get_document_processing_progress,
+    upload_document,
+)
 from app.core.config import settings
 from app.db.models import (
     AuditEvent,
@@ -262,6 +267,81 @@ def test_upload_rejects_exact_duplicate_content(tmp_path: Path) -> None:
     # 중복으로 걸렸으므로 새 버전/처리작업이 추가로 만들어지면 안 된다.
     assert not any(isinstance(item, DocumentVersion) for item in db.added)
     assert not any(isinstance(item, DocumentProcessingJob) for item in db.added)
+
+
+class _ProgressSession:
+    def __init__(
+        self,
+        document: Document,
+        version: DocumentVersion,
+        job: DocumentProcessingJob,
+    ) -> None:
+        self.document = document
+        self.scalar_values = iter((version, job))
+
+    def get(self, model, object_id):
+        if model is Document and object_id == self.document.id:
+            return self.document
+        return None
+
+    def scalar(self, _statement):
+        return next(self.scalar_values)
+
+
+def test_processing_progress_returns_real_worker_counters() -> None:
+    current_user = _current_user()
+    now = datetime.now(timezone.utc)
+    document = _existing_document()
+    document.created_by_user_id = current_user.id
+    document.lifecycle_status = "processing"
+    version = DocumentVersion(
+        id=uuid4(),
+        document_id=document.id,
+        version_number=2,
+        original_filename="large-manual.pdf",
+        stored_filename="large-manual-stored.pdf",
+        storage_path="large-manual-stored.pdf",
+        sha256="d" * 64,
+        file_size=4096,
+        mime_type="application/pdf",
+        status="processing",
+        updated_at=now,
+    )
+    job = DocumentProcessingJob(
+        id=uuid4(),
+        document_version_id=version.id,
+        status="processing",
+        processing_stage="embedding",
+        progress_percent=74,
+        progress_message="문서 청크 임베딩 생성 중 · 480/700",
+        progress_metadata={
+            "processed_pages": 520,
+            "total_pages": 520,
+            "processed_chunks": 700,
+            "total_chunks": 700,
+            "embedded_chunks": 480,
+        },
+        progress_updated_at=now,
+        attempts=1,
+        updated_at=now,
+    )
+    response = get_document_processing_progress(
+        document_id=document.id,
+        current_user=current_user,
+        access_scope=RetrievalAccessScope(
+            requester_user_id=current_user.id,
+            allow_company=True,
+            all_sites=True,
+        ),
+        db=_ProgressSession(document, version, job),  # type: ignore[arg-type]
+    )
+
+    assert response.stage == "embedding"
+    assert response.progress_percent == 74
+    assert response.embedded_chunks == 480
+    assert response.total_chunks == 700
+    assert response.is_terminal is False
+    assert response.rag_ready is False
 
 
 def test_commit_failure_removes_temp_and_final_file(tmp_path: Path) -> None:

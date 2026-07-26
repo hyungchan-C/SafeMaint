@@ -3,7 +3,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import DocumentReviewPanel from "@/components/DocumentReviewPanel";
-import ChatSources from "@/components/ChatSources";
 import ChatAnswerContent from "@/components/ChatAnswerContent";
 import DocumentViewerModal, { type DocumentViewerTarget } from "@/components/DocumentViewerModal";
 import InterfaceIcon from "@/components/InterfaceIcon";
@@ -26,7 +25,11 @@ import type {
   EvidenceBackedItem,
   StructuredAnswer,
 } from "@/types/chat";
-import type { UserDocumentSummary } from "@/types/documents";
+import type {
+  DocumentProcessingProgress,
+  FileProcessingProgress,
+  UserDocumentSummary,
+} from "@/types/documents";
 import type { GpsCheckResponse, NearbyEquipmentItem, VirtualEquipment } from "@/types/gps";
 import { getAccessToken, getApiBaseUrl } from "@/lib/api";
 
@@ -89,6 +92,8 @@ const GPS_MAP_SIZE_PX = 320;
 const GPS_MAP_SCALE_PX_PER_M = 2;
 const GPS_EQUIPMENT_RADIUS_M = 30;
 const GPS_MAP_MARKER_EDGE_PADDING_PX = 20;
+const DOCUMENT_PROGRESS_POLL_MS = 2000;
+const DOCUMENT_PROGRESS_MAX_RETRIES = 3;
 
 function metersOffsetFromCenter(center: { lat: number; lon: number }, lat: number, lon: number) {
   return {
@@ -629,6 +634,7 @@ function WorkspaceScreen({
   const autoSpeakRef = useRef(autoSpeak);
   const [manuals, setManuals] = useState<string[]>([]);
   const [userDocuments, setUserDocuments] = useState<UserDocumentSummary[]>([]);
+  const [processingProgress, setProcessingProgress] = useState<Record<string, FileProcessingProgress>>({});
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
   const [manualStatus, setManualStatus] = useState("");
   const [sitePhotoName, setSitePhotoName] = useState("");
@@ -690,6 +696,10 @@ function WorkspaceScreen({
   const [error, setError] = useState("");
   const [workspaceRestored, setWorkspaceRestored] = useState(false);
   const myDocumentsInitializedRef = useRef(false);
+  const uploadXhrsRef = useRef<Map<string, XMLHttpRequest>>(new Map());
+  const progressPollersRef = useRef<
+    Map<string, { controller: AbortController; timer: number | null }>
+  >(new Map());
 
   const refreshMyDocuments = useCallback(async () => {
     const token = getAccessToken();
@@ -703,6 +713,51 @@ function WorkspaceScreen({
     const isFirstLoad = !myDocumentsInitializedRef.current;
     myDocumentsInitializedRef.current = true;
     setUserDocuments(documents);
+    setProcessingProgress((current) => {
+      const next = { ...current };
+      for (const document of documents) {
+        const metadata = document.progress_metadata ?? {};
+        const terminal = ["review_required", "active", "failed", "ocr_required"].includes(document.status);
+        const ragReady = document.status === "active" && document.is_active;
+        const percent = document.status === "active" || document.status === "review_required"
+          ? 100
+          : Math.max(0, Math.min(100, document.progress_percent ?? 15));
+        next[document.document_id] = {
+          client_key: document.document_id,
+          document_id: document.document_id,
+          document_version_id: document.document_version_id,
+          filename: document.original_filename,
+          status: document.status,
+          stage: document.status === "active"
+            ? "completed"
+            : document.status === "review_required"
+              ? "review_required"
+              : document.processing_stage ?? "queued",
+          attempt: document.processing_attempt ?? 0,
+          progress_percent: percent,
+          message: ragReady
+            ? "승인이 완료되어 RAG 검색에 사용할 수 있습니다."
+            : document.status === "review_required"
+              ? "PDF 처리가 완료되었습니다. 관리자 승인이 필요합니다."
+              : document.progress_message ?? "PDF 처리 대기 중",
+          processed_pages: metadata.processed_pages ?? 0,
+          total_pages: metadata.total_pages ?? document.page_count ?? 0,
+          processed_chunks: metadata.processed_chunks ?? 0,
+          total_chunks: metadata.total_chunks ?? 0,
+          embedded_chunks: metadata.embedded_chunks ?? 0,
+          updated_at: document.created_at,
+          is_terminal: terminal,
+          rag_ready: ragReady,
+        };
+      }
+      const availableDocumentIds = new Set(documents.map((document) => document.document_id));
+      for (const [key, progress] of Object.entries(next)) {
+        if (progress.document_id && !availableDocumentIds.has(progress.document_id)) {
+          delete next[key];
+        }
+      }
+      return next;
+    });
     setManuals(documents.map((document) => document.original_filename));
     setSelectedDocumentIds((current) => {
       const availableSelection = current.filter((id) => availableIds.has(id));
@@ -723,6 +778,104 @@ function WorkspaceScreen({
       setManualStatus("등록 문서를 DB에서 불러왔습니다. 문서별 처리 상태를 확인해 주세요.");
     }
   }, []);
+
+  const stopProgressPolling = useCallback((documentId: string) => {
+    const poller = progressPollersRef.current.get(documentId);
+    if (!poller) return;
+    poller.controller.abort();
+    if (poller.timer !== null) window.clearTimeout(poller.timer);
+    progressPollersRef.current.delete(documentId);
+  }, []);
+
+  const startProgressPolling = useCallback((documentId: string, filename: string) => {
+    if (progressPollersRef.current.has(documentId)) return;
+    const poller = { controller: new AbortController(), timer: null as number | null };
+    progressPollersRef.current.set(documentId, poller);
+    let consecutiveFailures = 0;
+
+    const poll = async () => {
+      try {
+        const token = getAccessToken();
+        if (!token) {
+          stopProgressPolling(documentId);
+          onLogout();
+          return;
+        }
+        const response = await fetch(
+          `${getApiBaseUrl()}/api/v1/documents/${documentId}/processing-progress`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: poller.controller.signal,
+          },
+        );
+        if (response.status === 401) {
+          stopProgressPolling(documentId);
+          onLogout();
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(await apiErrorMessage(response, `${filename} 처리 상태를 확인하지 못했습니다.`));
+        }
+        const payload = await response.json() as DocumentProcessingProgress;
+        consecutiveFailures = 0;
+        setProcessingProgress((current) => {
+          const previous = current[documentId];
+          const sameAttempt = previous?.attempt === payload.attempt;
+          return {
+            ...current,
+            [documentId]: {
+              ...payload,
+              client_key: documentId,
+              progress_percent: sameAttempt
+                ? Math.max(previous.progress_percent, payload.progress_percent)
+                : payload.progress_percent,
+            },
+          };
+        });
+        if (payload.is_terminal) {
+          stopProgressPolling(documentId);
+          void refreshMyDocuments().catch(() => undefined);
+          return;
+        }
+      } catch (requestError) {
+        if (poller.controller.signal.aborted) return;
+        consecutiveFailures += 1;
+        const message = requestError instanceof Error
+          ? requestError.message
+          : `${filename} 처리 상태를 확인하지 못했습니다.`;
+        setProcessingProgress((current) => {
+          const previous = current[documentId];
+          if (!previous) return current;
+          return {
+            ...current,
+            [documentId]: {
+              ...previous,
+              message: consecutiveFailures < DOCUMENT_PROGRESS_MAX_RETRIES
+                ? `상태 조회 재시도 중 (${consecutiveFailures}/${DOCUMENT_PROGRESS_MAX_RETRIES})`
+                : `${message} · 문서 상태 새로고침을 눌러 다시 확인해 주세요.`,
+            },
+          };
+        });
+        if (consecutiveFailures >= DOCUMENT_PROGRESS_MAX_RETRIES) {
+          stopProgressPolling(documentId);
+          return;
+        }
+      }
+      poller.timer = window.setTimeout(() => void poll(), DOCUMENT_PROGRESS_POLL_MS);
+    };
+
+    void poll();
+  }, [onLogout, refreshMyDocuments, stopProgressPolling]);
+
+  useEffect(() => {
+    for (const document of userDocuments) {
+      if (["pending", "processing"].includes(document.status)) {
+        startProgressPolling(document.document_id, document.original_filename);
+      } else {
+        stopProgressPolling(document.document_id);
+      }
+    }
+  }, [startProgressPolling, stopProgressPolling, userDocuments]);
 
   useEffect(() => {
     const settings = readStorage<{ volume: number; fontSize: FontSize; autoSpeak?: boolean }>(STORAGE_KEYS.settings, { volume: 70, fontSize: "medium", autoSpeak: false });
@@ -900,6 +1053,16 @@ function WorkspaceScreen({
       recorder.stop();
       recorder.stream.getTracks().forEach((track) => track.stop());
     }
+  }, []);
+
+  useEffect(() => () => {
+    for (const xhr of uploadXhrsRef.current.values()) xhr.abort();
+    uploadXhrsRef.current.clear();
+    for (const poller of progressPollersRef.current.values()) {
+      poller.controller.abort();
+      if (poller.timer !== null) window.clearTimeout(poller.timer);
+    }
+    progressPollersRef.current.clear();
   }, []);
 
   const fontClass = useMemo(() => `font-${fontSize}`, [fontSize]);
@@ -1264,6 +1427,18 @@ function WorkspaceScreen({
 
     try {
       const token = getAccessToken();
+      if (selectedDocumentIds.length > 0 && !token) {
+        setMessages((current) => [
+          ...current,
+          {
+            role: "ai",
+            text: "선택한 PDF 문서로 답변하려면 다시 로그인해 주세요.",
+            warning: "로그인 필요",
+          },
+        ]);
+        setIsChatLoading(false);
+        return;
+      }
       const response = await fetch(`${getApiBaseUrl()}/api/v1/chat`, {
         method: "POST",
         headers: {
@@ -1344,6 +1519,29 @@ function WorkspaceScreen({
     const visionPending: string[] = [];
 
     for (const file of Array.from(files)) {
+      const clientKey = `upload-${crypto.randomUUID()}`;
+      setProcessingProgress((current) => ({
+        ...current,
+        [clientKey]: {
+          client_key: clientKey,
+          document_id: "",
+          document_version_id: "",
+          filename: file.name,
+          status: "uploading",
+          stage: "uploading",
+          attempt: 0,
+          progress_percent: 0,
+          message: "PDF 서버 전송을 준비하고 있습니다.",
+          processed_pages: 0,
+          total_pages: 0,
+          processed_chunks: 0,
+          total_chunks: 0,
+          embedded_chunks: 0,
+          updated_at: new Date().toISOString(),
+          is_terminal: false,
+          rag_ready: false,
+        },
+      }));
       try {
         const uploadBody = new FormData();
         uploadBody.append("file", file);
@@ -1351,18 +1549,105 @@ function WorkspaceScreen({
         uploadBody.append("model_name", form.model_number || form.equipment_name || "미지정 모델");
         uploadBody.append("manufacturer", form.manufacturer || "미지정 제조사");
         uploadBody.append("access_level", "restricted");
-        const uploadResponse = await fetch(`${getApiBaseUrl()}/api/v1/documents/upload`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: uploadBody,
+        const uploadPayload = await new Promise<{
+          document_id: string;
+          document_version_id: string;
+          detail?: string;
+        }>((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          uploadXhrsRef.current.set(clientKey, xhr);
+          xhr.open("POST", `${getApiBaseUrl()}/api/v1/documents/upload`);
+          xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+          xhr.upload.onprogress = (event) => {
+            if (!event.lengthComputable || event.total <= 0) return;
+            const percent = Math.min(10, Math.round((event.loaded / event.total) * 10));
+            setProcessingProgress((current) => {
+              const previous = current[clientKey];
+              if (!previous) return current;
+              return {
+                ...current,
+                [clientKey]: {
+                  ...previous,
+                  progress_percent: Math.max(previous.progress_percent, percent),
+                  message: event.loaded >= event.total
+                    ? "파일 전송 완료 · 서버에서 업로드를 검증하고 저장하고 있습니다."
+                    : `PDF 서버 전송 중 · ${Math.round((event.loaded / event.total) * 100)}%`,
+                  updated_at: new Date().toISOString(),
+                },
+              };
+            });
+          };
+          xhr.onload = () => {
+            uploadXhrsRef.current.delete(clientKey);
+            const payload = (() => {
+              try {
+                return JSON.parse(xhr.responseText) as {
+                  document_id?: string;
+                  document_version_id?: string;
+                  detail?: string;
+                };
+              } catch {
+                return null;
+              }
+            })();
+            if (xhr.status === 401) {
+              onLogout();
+              reject(new Error("로그인 세션이 만료되었습니다. 다시 로그인해 주세요."));
+              return;
+            }
+            if (
+              xhr.status < 200
+              || xhr.status >= 300
+              || !payload?.document_id
+              || !payload.document_version_id
+            ) {
+              reject(new Error(payload?.detail || `${file.name} 문서 등록 실패`));
+              return;
+            }
+            resolve({
+              document_id: payload.document_id,
+              document_version_id: payload.document_version_id,
+            });
+          };
+          xhr.onerror = () => {
+            uploadXhrsRef.current.delete(clientKey);
+            reject(new Error(`${file.name} 업로드 중 네트워크 오류가 발생했습니다.`));
+          };
+          xhr.onabort = () => {
+            uploadXhrsRef.current.delete(clientKey);
+            reject(new Error(`${file.name} 업로드가 취소되었습니다.`));
+          };
+          xhr.send(uploadBody);
         });
-        requireActiveSession(uploadResponse);
-        const uploadPayload = await uploadResponse.json().catch(() => null) as { document_id?: string; detail?: string } | null;
-        if (!uploadResponse.ok || !uploadPayload?.document_id) throw new Error(uploadPayload?.detail || `${file.name} 문서 등록 실패`);
 
         uploadedCount += 1;
         setManuals((current) => Array.from(new Set([...current, file.name])));
-        setSelectedDocumentIds((current) => Array.from(new Set([...current, uploadPayload.document_id!])));
+        setSelectedDocumentIds((current) => Array.from(new Set([...current, uploadPayload.document_id])));
+        setProcessingProgress((current) => {
+          const next = { ...current };
+          delete next[clientKey];
+          next[uploadPayload.document_id] = {
+            client_key: uploadPayload.document_id,
+            document_id: uploadPayload.document_id,
+            document_version_id: uploadPayload.document_version_id,
+            filename: file.name,
+            status: "pending",
+            stage: "queued",
+            attempt: 0,
+            progress_percent: 15,
+            message: "PDF 처리 대기 중",
+            processed_pages: 0,
+            total_pages: 0,
+            processed_chunks: 0,
+            total_chunks: 0,
+            embedded_chunks: 0,
+            updated_at: new Date().toISOString(),
+            is_terminal: false,
+            rag_ready: false,
+          };
+          return next;
+        });
+        startProgressPolling(uploadPayload.document_id, file.name);
 
         const indexBody = new FormData();
         indexBody.append("document_id", uploadPayload.document_id);
@@ -1380,7 +1665,25 @@ function WorkspaceScreen({
           visionPending.push(file.name);
         }
       } catch (requestError) {
-        uploadFailures.push(requestError instanceof Error ? requestError.message : `${file.name} 문서 등록 실패`);
+        const failureMessage = requestError instanceof Error
+          ? requestError.message
+          : `${file.name} 문서 등록 실패`;
+        uploadFailures.push(failureMessage);
+        setProcessingProgress((current) => {
+          const previous = current[clientKey];
+          if (!previous) return current;
+          return {
+            ...current,
+            [clientKey]: {
+              ...previous,
+              status: "failed",
+              stage: "failed",
+              message: failureMessage,
+              is_terminal: true,
+              updated_at: new Date().toISOString(),
+            },
+          };
+        });
       }
     }
 
@@ -2129,6 +2432,7 @@ function WorkspaceScreen({
         <ManualManager
           manuals={manuals}
           documents={userDocuments}
+          processingProgress={Object.values(processingProgress)}
           selectedDocumentIds={selectedDocumentIds}
           manualStatus={manualStatus}
           sitePhotoName={sitePhotoName}
@@ -2157,6 +2461,10 @@ function WorkspaceScreen({
             setSelectedDocumentIds((current) => current.filter((_, itemIndex) => itemIndex !== index));
             setCatalogCandidates([]);
             setVisionSummary("");
+          }}
+          onRefreshDocuments={() => {
+            void refreshMyDocuments()
+              .catch(() => setManualStatus("문서 상태를 새로고치지 못했습니다."));
           }}
         />
 
@@ -2187,6 +2495,8 @@ function WorkspaceScreen({
                     answer={message.text}
                     structuredAnswer={message.structuredAnswer}
                     sources={message.sources ?? []}
+                    warning={message.warning}
+                    onOpenDocument={openDocumentViewer}
                   />
                 : <p className="chat-answer-text">{message.text}</p>}
               {message.catalogCandidates && message.catalogCandidates.length > 0 && (
@@ -2209,8 +2519,6 @@ function WorkspaceScreen({
                   <p className="catalog-candidate-caution">벡터 유사도 후보이며 제품명·동일 모델·규격을 확정한 결과가 아닙니다. PDF 원문을 직접 확인해 주세요.</p>
                 </div>
               )}
-              {message.sources && <ChatSources sources={message.sources} onOpenDocument={openDocumentViewer} />}
-              {message.warning && <p className="chat-warning">⚠ {message.warning}</p>}
             </div>
           ))}
           {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>안전자료를 검색하고 AI 답변을 생성하고 있습니다…</div>}

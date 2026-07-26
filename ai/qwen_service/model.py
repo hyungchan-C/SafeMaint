@@ -19,6 +19,10 @@ from qwen_service.schemas import (
     ChatSource,
     ClassifyRequest,
     ClassifyResponse,
+    DocumentProfile,
+    DocumentProfileRequest,
+    DocumentProfileResponse,
+    IntentClassifyResponse,
     QueryAnalysis,
 )
 
@@ -29,6 +33,33 @@ MANUAL_SOURCE_TYPES = frozenset(
 PUBLIC_REFERENCE_SOURCE_TYPES = frozenset(
     {"public_law", "public_guide", "public_incident", "public_media"}
 )
+COMPANY_REFERENCE_SOURCE_TYPES = frozenset({"company_policy"})
+MAINTENANCE_REFERENCE_SOURCE_TYPES = (
+    PUBLIC_REFERENCE_SOURCE_TYPES | COMPANY_REFERENCE_SOURCE_TYPES
+)
+PRECAUTION_REFERENCE_SOURCE_TYPES = (
+    (PUBLIC_REFERENCE_SOURCE_TYPES - {"public_incident"}) | COMPANY_REFERENCE_SOURCE_TYPES
+)
+CHECKLIST_SOURCE_TYPES = MANUAL_SOURCE_TYPES | frozenset(
+    {"public_law", "public_guide", "company_policy"}
+)
+GENERIC_FALLBACK_ANSWERS = frozenset(
+    {
+        "검색된 근거를 기준으로 작업 전 확인할 핵심 사항을 요약했습니다.",
+        "검색된 문서 근거를 기준으로 유지보수 시 확인할 사항을 정리했습니다. 현장 안전관리자의 최종 확인 전에는 작업을 시작하지 마세요.",
+        "검색된 문서 근거를 기준으로 확인 가능한 내용을 요약했습니다.",
+        "검색된 문서 근거를 기준으로 질문과 관련된 내용을 요약했습니다.",
+        "검색된 문서 근거에서 확인되는 부품 정보를 정리했습니다.",
+        "검색된 문서 근거를 기준으로 부품 정보를 요약했습니다.",
+    }
+)
+BAD_CARD_PREFIXES = ("은 ", "는 ", "이 ", "가 ", "을 ", "를 ", "에 ", "에서 ", "후에")
+BAD_CARD_SUFFIXES = ("...", "예.", "후에", "직", "및", "또는")
+MAX_COMPACT_CARD_CHARS = 40
+
+
+class QwenAnswerGenerationError(RuntimeError):
+    """Raised when Qwen did not produce a usable compact answer."""
 
 
 class QwenEngine:
@@ -37,6 +68,8 @@ class QwenEngine:
         self._lock = asyncio.Lock()
         self._tokenizer: Any = None
         self._model: Any = None
+        self._answer_tokenizer: Any = None
+        self._answer_model: Any = None
         self._adapter_loaded = False
         self._prepared_adapter_path: Path | None = None
 
@@ -44,33 +77,35 @@ class QwenEngine:
         async with self._lock:
             return await asyncio.to_thread(self._classify_sync, request)
 
+    async def intent(self, request: ClassifyRequest) -> IntentClassifyResponse:
+        async with self._lock:
+            return await asyncio.to_thread(self._intent_sync, request)
+
     async def answer(self, request: AnswerRequest) -> AnswerResponse:
         async with self._lock:
             return await asyncio.to_thread(self._answer_sync, request)
 
+    async def document_profile(
+        self,
+        request: DocumentProfileRequest,
+    ) -> DocumentProfileResponse:
+        async with self._lock:
+            return await asyncio.to_thread(self._document_profile_sync, request)
+
     def _classify_sync(self, request: ClassifyRequest) -> ClassifyResponse:
         labels = ", ".join(self.settings.occurrence_labels)
         system_prompt = (
-            "SafeMaint 질문목적 및 사고유형 분류기입니다. 반드시 JSON만 출력하세요. "
-            "사고 과정, 분석 과정, 설명 문장은 출력하지 마세요."
+            "You are the SafeMaint accident-type classifier. Return JSON only. "
+            "Classify only accident/risk occurrence labels. Do not classify the "
+            "user's question intent."
         )
         user_prompt = (
-            "Choose one occurrence_type from this label list:\n"
+            "Choose one occurrence_type and up to three explicit_risk_factors "
+            "from this label list:\n"
             f"{labels}\n\n"
-            "Choose question_intent by the user's purpose, not by a component noun:\n"
-            "- document_qa: asks what a selected PDF/document contains or requests a summary\n"
-            "- maintenance_guide: asks how to install, inspect, clean, repair, or replace\n"
-            "- component_info: asks definition, role, purpose, or where a component is used\n"
-            "- clarification_required: purpose is ambiguous\n"
-            "Examples:\n"
-            "이 PDF를 요약해줘 -> document_qa\n"
-            "'X가 무슨 장비야' -> component_info\n"
-            "'X 설치 방법' -> maintenance_guide\n"
-            "'X 관련해서 알려줘' -> clarification_required\n\n"
             "Return JSON exactly like "
             '{"occurrence_type":"label","confidence":0.0,'
-            '"question_intent":"component_info","intent_confidence":0.0,'
-            '"clarification_question":null}.\n\n'
+            '"explicit_risk_factors":["label"]}.\n\n'
             f"Work context:\n{self._context_text(request.context)}\n\n"
             f"Question:\n{request.question}"
         )
@@ -80,22 +115,56 @@ class QwenEngine:
             max_new_tokens=self.settings.classify_max_new_tokens,
             disable_adapter=False,
         )
-        (
-            occurrence_type,
-            confidence,
-            question_intent,
-            intent_confidence,
-            clarification_question,
-        ) = self._parse_classification(text)
+        occurrence_type, confidence, risk_factors = (
+            self._parse_occurrence_classification(text)
+        )
         analysis = QueryAnalysis(
             occurrence_type=occurrence_type,
-            question_intent=question_intent,
-            intent_confidence=intent_confidence,
-            clarification_question=clarification_question,
+            explicit_risk_factors=risk_factors,
+            search_keywords=risk_factors,
         )
         return ClassifyResponse(
             occurrence_type=occurrence_type,
             confidence=confidence,
+            question_intent=None,
+            intent_confidence=None,
+            clarification_question=None,
+            analysis=analysis,
+            model=self.settings.base_model,
+        )
+
+    def _intent_sync(self, request: ClassifyRequest) -> IntentClassifyResponse:
+        system_prompt = (
+            "You are the SafeMaint question-intent classifier. Return JSON only. "
+            "Classify the user's purpose. Do not classify accident occurrence type."
+        )
+        user_prompt = (
+            "Choose question_intent by the user's purpose:\n"
+            "- document_qa: asks what a selected PDF/document contains, asks about file metadata, or requests a document summary\n"
+            "- maintenance_guide: asks how to install, inspect, clean, repair, replace, stop, isolate, or perform work safely\n"
+            "- component_info: asks what a component is, what it does, where it is used, or what to watch for as component information\n"
+            "- clarification_required: the purpose is ambiguous\n\n"
+            "Return JSON exactly like "
+            '{"question_intent":"component_info","intent_confidence":0.0,'
+            '"clarification_question":null}.\n\n'
+            f"Work context:\n{self._context_text(request.context)}\n\n"
+            f"Question:\n{request.question}"
+        )
+        text = self._generate(
+            system_prompt,
+            user_prompt,
+            max_new_tokens=self.settings.classify_max_new_tokens,
+            disable_adapter=True,
+        )
+        question_intent, intent_confidence, clarification_question = (
+            self._parse_intent_classification(text)
+        )
+        analysis = QueryAnalysis(
+            question_intent=question_intent,
+            intent_confidence=intent_confidence,
+            clarification_question=clarification_question,
+        )
+        return IntentClassifyResponse(
             question_intent=question_intent,
             intent_confidence=intent_confidence,
             clarification_question=clarification_question,
@@ -104,58 +173,44 @@ class QwenEngine:
         )
 
     def _answer_sync(self, request: AnswerRequest) -> AnswerResponse:
-        if self.settings.answer_mode == "text":
-            return self._answer_text_sync(request)
-
         evidence = self._evidence_text(request)
         system_prompt = (
-            "당신은 SafeMaint AI입니다. 반드시 유효한 JSON 객체 하나만 출력하세요. "
-            "사고 과정, Thinking Process, 분석 과정, 계획, 내부 추론은 절대 출력하지 마세요. "
-            "제공된 근거만 사용하고 파일명, 페이지, 법령, 사고사례, 절차를 만들지 마세요. "
-            "evidence_chunk_ids와 used_source_ids에는 제공된 chunk_id만 넣으세요. "
-            "작업 승인, 안전함, 그대로 작업해도 됨 같은 표현을 사용하지 마세요."
+            "You are SafeMaint AI. Return exactly one valid JSON object. "
+            "Do not output markdown, tables, hidden reasoning, or a full structured_answer object. "
+            "Use only the provided evidence and candidate cards. "
+            "The top-level answer must be short Korean polite prose that directly answers the user's question. "
+            "All card/list values must be short Korean checklist-style phrases, not long explanations. "
+            "For maintenance answers, checklist_items must come only from final pre_checks. "
+            "Do not invent filenames, pages, laws, incidents, steps, or source IDs. "
+            "Do not say the work is approved or safe to proceed."
         )
         user_prompt = (
             f"Answer type: {request.answer_type}\n"
-            f"{self._answer_format_for_type(request)}\n\n"
-            f"작업 정보:\n{self._context_text(request.context)}\n\n"
-            f"분석:\n{self._analysis_text(request.analysis)}\n\n"
-            f"근거:\n{evidence}\n\n"
-            f"질문:\n{request.question}"
-        )
-        max_answer_tokens = (
-            min(self.settings.max_new_tokens, 768)
-            if request.answer_type == "maintenance_guide"
-            else self.settings.max_new_tokens
+            f"{self._compact_answer_format_for_type(request)}\n\n"
+            f"Work context:\n{self._context_text(request.context)}\n\n"
+            f"Analysis:\n{self._analysis_text(request.analysis)}\n\n"
+            f"Candidate cards from backend:\n{self._candidate_text(request)}\n\n"
+            f"Evidence:\n{evidence}\n\n"
+            f"Question:\n{request.question}"
         )
         generated = self._generate(
             system_prompt,
             user_prompt,
-            max_new_tokens=max_answer_tokens,
+            max_new_tokens=self.settings.max_new_tokens,
             disable_adapter=True,
         )
-        response, validation_error = self._response_from_generation(
+        response, validation_error = self._response_from_compact_generation(
             request,
             generated,
         )
         if response is not None:
             return response
 
-        if validation_error and self.settings.repair_enabled:
-            repaired = self._generate(
-                system_prompt,
-                self._repair_prompt(request, generated, validation_error),
-                max_new_tokens=min(max_answer_tokens, 512),
-                disable_adapter=True,
-            )
-            response, _ = self._response_from_generation(request, repaired)
-            if response is not None:
-                return response
-        elif validation_error:
+        if validation_error:
             print(
                 json.dumps(
                     {
-                        "event": "qwen_repair_skipped",
+                        "event": "qwen_compact_answer_validation_failed",
                         "answer_type": request.answer_type,
                         "reason": validation_error[:300],
                     },
@@ -166,74 +221,355 @@ class QwenEngine:
 
         return self._fallback_answer(request, generated)
 
-    def _answer_text_sync(self, request: AnswerRequest) -> AnswerResponse:
-        evidence = self._evidence_text(request)
+    def _document_profile_sync(
+        self,
+        request: DocumentProfileRequest,
+    ) -> DocumentProfileResponse:
+        sample_text = self._profile_sample_text(request.sample_text)
         system_prompt = (
-            "You are SafeMaint AI. Write the final answer in Korean only. "
-            "Use only the provided evidence. Do not output JSON, markdown tables, "
-            "checklists, hidden reasoning, or source data structures. "
-            "Cite every evidence-backed claim with the matching numeric marker "
-            "such as [1]. Do not cite a source that does not support the claim."
+            "You extract structured metadata from industrial PDF manuals. "
+            "Return exactly one valid JSON object. Do not output markdown or reasoning. "
+            "Use only the provided filename, form metadata, and sample text."
         )
         user_prompt = (
-            f"Answer type: {request.answer_type}\n"
-            f"{self._answer_text_instructions(request)}\n\n"
-            f"Work context:\n{self._context_text(request.context)}\n\n"
-            f"Analysis:\n{self._analysis_text(request.analysis)}\n\n"
-            f"Evidence:\n{evidence}\n\n"
-            f"Question:\n{request.question}"
+            "Extract a document profile for RAG routing and answer cards.\n"
+            "Return this JSON schema only:\n"
+            "{"
+            '"product_names":["product or product family names"],'
+            '"model_names":["model or series names"],'
+            '"aliases":["short names users may ask"],'
+            '"equipment":["equipment or machines mentioned"],'
+            '"components":["parts, sensors, switches, modules, cables, covers, controllers"],'
+            '"supported_tasks":["installation/setting/wiring/inspection/maintenance tasks found"],'
+            '"safety_topics":["warnings, hazards, stop/safety topics found"],'
+            '"summary_points":["short Korean summary points"],'
+            '"document_keywords":["search keywords"],'
+            '"confidence":0.0,'
+            '"extraction_notes":["uncertain or missing fields"]'
+            "}\n"
+            "Rules:\n"
+            "- Keep every list item short and specific.\n"
+            "- Do not include generic words alone such as 제품, 문서, 매뉴얼, 장비, 기계.\n"
+            "- Do not invent a manufacturer, model, equipment, task, law, or warning.\n"
+            "- Korean output is preferred for task/safety/summary fields.\n\n"
+            f"Title: {request.title}\n"
+            f"Original filename: {request.original_filename or ''}\n"
+            f"Manufacturer: {request.manufacturer or ''}\n"
+            f"Form product_type: {request.product_type or ''}\n"
+            f"Form model_name: {request.model_name or ''}\n"
+            f"Document type: {request.document_type or ''}\n\n"
+            f"Sample text:\n{sample_text}"
         )
         generated = self._generate(
             system_prompt,
             user_prompt,
-            max_new_tokens=self.settings.max_new_tokens,
+            max_new_tokens=min(self.settings.max_new_tokens, 768),
             disable_adapter=True,
         )
-        return AnswerResponse(
-            answer=self._answer_text_from_generation(request, generated),
-            answer_type=request.answer_type,
-            structured_answer=None,
-            checklist_items=[],
-            used_source_ids=self._source_ids_from_answer_citations(
-                generated,
-                request.sources,
-            ),
+        parsed = self._extract_json(generated) or {}
+        payload = self._normalize_document_profile_payload(parsed, request)
+        if not self._document_profile_has_signal(payload):
+            payload = self._fallback_document_profile(request)
+        return DocumentProfileResponse(
+            document_profile=DocumentProfile.model_validate(payload),
             model=self.settings.base_model,
         )
 
-    def _answer_text_from_generation(
+    @staticmethod
+    def _profile_sample_text(value: str, *, limit: int = 18000) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(text) <= limit:
+            return text
+        head = text[: limit // 2].rstrip()
+        tail = text[-limit // 2 :].lstrip()
+        return f"{head}\n...\n{tail}"
+
+    def _normalize_document_profile_payload(
         self,
-        request: AnswerRequest,
-        generated: str,
-    ) -> str:
-        parsed = self._extract_answer_payload(generated)
-        parsed_answer = parsed and isinstance(parsed.get("answer"), str)
-        if parsed_answer:
-            answer_text = self._clean_answer_text(parsed["answer"])
-        else:
-            answer_text = self._clean_answer_text(generated)
-        if (
-            not parsed_answer
-            and self._extract_json(generated) is not None
-        ) or answer_text.startswith("{"):
-            answer_text = ""
-        return answer_text or self._fallback_answer_text(request)
+        payload: dict[str, Any],
+        request: DocumentProfileRequest,
+    ) -> dict[str, Any]:
+        fallback = self._fallback_document_profile(request)
+        normalized: dict[str, Any] = {}
+        for key, limit in (
+            ("product_names", 12),
+            ("model_names", 12),
+            ("aliases", 20),
+            ("equipment", 20),
+            ("components", 30),
+            ("supported_tasks", 20),
+            ("safety_topics", 20),
+            ("summary_points", 8),
+            ("document_keywords", 30),
+            ("extraction_notes", 8),
+        ):
+            values = self._profile_string_list(payload.get(key), limit=limit)
+            if key in {
+                "product_names",
+                "model_names",
+                "aliases",
+                "document_keywords",
+            }:
+                values = self._merge_profile_values(
+                    values,
+                    fallback.get(key, []),
+                    limit=limit,
+                )
+            normalized[key] = values
+        try:
+            confidence = float(payload.get("confidence"))
+        except (TypeError, ValueError):
+            confidence = None
+        if confidence is not None:
+            confidence = min(max(confidence, 0.0), 1.0)
+        normalized["confidence"] = confidence
+        return normalized
 
     @staticmethod
-    def _source_ids_from_answer_citations(
-        answer: str,
-        sources: list[ChatSource],
-    ) -> list[str]:
-        source_ids: list[str] = []
-        for match in re.findall(r"\[\s*(\d+)\s*\]", answer):
-            index = int(match)
-            if 1 <= index <= len(sources):
-                source_id = sources[index - 1].chunk_id
-                if source_id not in source_ids:
-                    source_ids.append(source_id)
-        return source_ids
+    def _profile_string_list(value: Any, *, limit: int) -> list[str]:
+        raw_values = value if isinstance(value, list) else [value]
+        normalized: list[str] = []
+        for raw in raw_values:
+            if raw is None or isinstance(raw, (dict, list, tuple, set)):
+                continue
+            text = " ".join(str(raw).split()).strip(" -•*[]()")
+            if (
+                not text
+                or len(text) > 80
+                or text in {"제품", "문서", "매뉴얼", "장비", "기계", "설비"}
+            ):
+                continue
+            if text not in normalized:
+                normalized.append(text)
+            if len(normalized) >= limit:
+                break
+        return normalized
 
-    def _response_from_generation(
+    @staticmethod
+    def _merge_profile_values(
+        primary: list[str],
+        fallback: Any,
+        *,
+        limit: int,
+    ) -> list[str]:
+        values = list(primary)
+        fallback_values = fallback if isinstance(fallback, list) else []
+        for item in fallback_values:
+            text = " ".join(str(item).split()).strip()
+            if text and text not in values:
+                values.append(text)
+            if len(values) >= limit:
+                break
+        return values
+
+    @staticmethod
+    def _document_profile_has_signal(payload: dict[str, Any]) -> bool:
+        return any(
+            payload.get(key)
+            for key in (
+                "product_names",
+                "model_names",
+                "aliases",
+                "components",
+                "equipment",
+                "supported_tasks",
+                "safety_topics",
+            )
+        )
+
+    def _fallback_document_profile(
+        self,
+        request: DocumentProfileRequest,
+    ) -> dict[str, Any]:
+        text = " ".join(
+            value
+            for value in (
+                request.title,
+                request.original_filename or "",
+                request.manufacturer or "",
+                request.product_type or "",
+                request.model_name or "",
+                request.sample_text[:8000],
+            )
+            if value
+        )
+        product_names = self._profile_string_list(
+            [request.product_type, *self._profile_entity_candidates(text)],
+            limit=12,
+        )
+        model_names = self._profile_string_list(
+            [request.model_name, *self._profile_model_candidates(text)],
+            limit=12,
+        )
+        aliases = self._profile_string_list(
+            [*model_names, *product_names, *self._profile_filename_aliases(request)],
+            limit=20,
+        )
+        components = [
+            value
+            for value in product_names
+            if not value.endswith(("설비", "장비", "기계", "라인", "로봇", "프레스"))
+        ][:30]
+        equipment = [
+            value
+            for value in product_names
+            if value.endswith(("설비", "장비", "기계", "라인", "로봇", "프레스"))
+        ][:20]
+        supported_tasks = self._profile_task_labels(text)
+        safety_topics = self._profile_safety_labels(text)
+        summary_points = self._profile_summary_points(text)
+        keywords = self._profile_string_list(
+            [*aliases, *components, *equipment, *supported_tasks, *safety_topics],
+            limit=30,
+        )
+        notes = [] if aliases or components or equipment else ["문서 식별명을 확정하지 못했습니다."]
+        return {
+            "product_names": product_names,
+            "model_names": model_names,
+            "aliases": aliases,
+            "equipment": equipment,
+            "components": components,
+            "supported_tasks": supported_tasks,
+            "safety_topics": safety_topics,
+            "summary_points": summary_points,
+            "document_keywords": keywords,
+            "confidence": 0.45 if aliases else 0.2,
+            "extraction_notes": notes,
+        }
+
+    @staticmethod
+    def _profile_entity_candidates(text: str) -> list[str]:
+        suffixes = (
+            "센서",
+            "스위치",
+            "장치",
+            "모듈",
+            "컨트롤러",
+            "케이블",
+            "커튼",
+            "베어링",
+            "모터",
+            "펌프",
+            "밸브",
+            "실린더",
+            "로봇",
+            "컨베이어",
+            "프레스",
+            "브라켓",
+            "커버",
+            "기구",
+            "부품",
+            "컴포넌트",
+            "릴레이",
+            "차단기",
+            "인버터",
+            "드라이버",
+            "설비",
+            "장비",
+            "기계",
+        )
+        suffix_pattern = "|".join(re.escape(suffix) for suffix in suffixes)
+        candidates: list[str] = []
+        for match in re.finditer(
+            rf"([0-9A-Za-z가-힣□·/()+_-]+(?:\s+[0-9A-Za-z가-힣□·/()+_-]+){{0,4}}\s*(?:{suffix_pattern}))",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            candidate = " ".join(match.group(1).split()).strip(" .,:;·-/[]()")
+            if 2 <= len(candidate) <= 48 and candidate not in candidates:
+                candidates.append(candidate)
+            if len(candidates) >= 30:
+                break
+        return candidates
+
+    @staticmethod
+    def _profile_model_candidates(text: str) -> list[str]:
+        candidates: list[str] = []
+        normalized = text.replace("_", " ").replace("-", " ")
+        for token in re.findall(r"(?<![A-Za-z0-9])([A-Za-z]{1,10}[A-Za-z0-9]{0,20})(?![A-Za-z0-9])", normalized):
+            lowered = token.casefold()
+            if lowered in {
+                "pdf",
+                "manual",
+                "user",
+                "guide",
+                "catalog",
+                "model",
+                "series",
+                "type",
+            }:
+                continue
+            if token.isupper() or any(char.isdigit() for char in token):
+                if token not in candidates:
+                    candidates.append(token)
+                if 2 <= len(token) <= 8:
+                    series = f"{token} Series"
+                    if series not in candidates:
+                        candidates.append(series)
+            if len(candidates) >= 20:
+                break
+        return candidates
+
+    @staticmethod
+    def _profile_filename_aliases(request: DocumentProfileRequest) -> list[str]:
+        values: list[str] = []
+        for raw in (request.original_filename, request.title):
+            if not raw:
+                continue
+            stem = re.sub(r"\.pdf$", "", raw, flags=re.IGNORECASE)
+            stem = stem.replace("_", " ").replace("-", " ")
+            for token in stem.split():
+                if 2 <= len(token) <= 24 and token.casefold() not in {"ko", "kr", "pdf", "manual"}:
+                    values.append(token)
+        return list(dict.fromkeys(values))[:12]
+
+    @staticmethod
+    def _profile_task_labels(text: str) -> list[str]:
+        lowered = text.casefold()
+        labels: list[str] = []
+        for terms, label in (
+            (("설치", "장착", "고정", "체결"), "설치·장착 조건 확인"),
+            (("배선", "결선", "전원", "전압", "전류"), "정격·전원·배선 확인"),
+            (("설정", "파라미터", "모드"), "설정값 확인"),
+            (("점검", "검사", "시험", "확인"), "점검·시험 방법 확인"),
+            (("청소", "오염", "이물"), "청소·오염 관리"),
+            (("교체", "분리", "조립"), "교체·분리 작업 확인"),
+        ):
+            if any(term in lowered for term in terms):
+                labels.append(label)
+        return labels[:20]
+
+    @staticmethod
+    def _profile_safety_labels(text: str) -> list[str]:
+        lowered = text.casefold()
+        labels: list[str] = []
+        for terms, label in (
+            (("주의", "경고", "금지"), "주의·경고사항"),
+            (("오동작", "고장", "손상", "파손"), "오동작·손상 방지"),
+            (("정지", "차단", "비상정지"), "정지·차단 조건"),
+            (("감전", "전원", "전압", "접지"), "전기 안전"),
+            (("끼임", "협착", "회전", "구동"), "구동부 끼임 위험"),
+            (("안전거리", "이격", "간섭"), "안전거리·간섭 방지"),
+        ):
+            if any(term in lowered for term in terms):
+                labels.append(label)
+        return labels[:20]
+
+    @staticmethod
+    def _profile_summary_points(text: str) -> list[str]:
+        lowered = text.casefold()
+        points: list[str] = []
+        if any(term in lowered for term in ("모델", "형식", "사양", "정격", "치수")):
+            points.append("모델 구성과 주요 사양을 확인할 수 있습니다.")
+        if any(term in lowered for term in ("설치", "장착", "고정", "배선", "결선")):
+            points.append("설치·장착·배선 조건을 확인할 수 있습니다.")
+        if any(term in lowered for term in ("기능", "설정", "파라미터", "동작")):
+            points.append("기능 설정과 동작 확인 방법을 확인할 수 있습니다.")
+        if any(term in lowered for term in ("주의", "경고", "오동작", "손상", "위험")):
+            points.append("주의사항과 오동작·손상 방지 조건을 확인할 수 있습니다.")
+        return points[:8]
+
+    def _response_from_compact_generation(
         self,
         request: AnswerRequest,
         generated: str,
@@ -241,7 +577,7 @@ class QwenEngine:
         parsed = self._extract_answer_payload(generated)
         if parsed is None:
             return None, "No JSON object was found in the model output."
-        normalized = self._normalize_answer_payload(parsed, request)
+        normalized = self._compact_payload_to_answer_payload(parsed, request)
         try:
             response = AnswerResponse.model_validate(normalized)
         except ValidationError as exc:
@@ -256,42 +592,516 @@ class QwenEngine:
                 None,
                 "structured_answer is required when evidence sources are supplied.",
             )
+        if request.sources and self._is_generic_fallback_answer(response.answer):
+            return None, "answer is a generic fallback sentence."
+        compact_error = self._compact_answer_quality_error(response)
+        if compact_error:
+            return None, compact_error
         return response, None
 
-    def _normalize_answer_payload(
+    def _compact_answer_quality_error(self, response: AnswerResponse) -> str | None:
+        structured = response.structured_answer
+        if structured is None:
+            return None
+        if response.answer_type == "maintenance_guide":
+            fields = (
+                structured.pre_checks,
+                structured.hazards,
+                structured.manual_steps,
+                structured.stop_conditions,
+                structured.related_regulations_and_incidents,
+            )
+            if not any(fields):
+                return "maintenance compact answer has no card items."
+        elif response.answer_type == "component_info":
+            if not (
+                structured.main_roles
+                or structured.usage_locations
+                or structured.precautions
+                or structured.one_line_description
+            ):
+                return "component compact answer has no usable content."
+        elif response.answer_type == "document_qa":
+            if not structured.main_contents:
+                return "document compact answer has no main contents."
+        return None
+
+    @staticmethod
+    def _is_generic_fallback_answer(value: str) -> bool:
+        return " ".join(str(value or "").split()) in GENERIC_FALLBACK_ANSWERS
+
+    def _compact_payload_to_answer_payload(
         self,
         payload: dict[str, Any],
         request: AnswerRequest,
     ) -> dict[str, Any]:
-        normalized = dict(payload)
-        normalized.setdefault("answer_type", request.answer_type)
-        normalized["model"] = self.settings.base_model
-        if not isinstance(normalized.get("answer"), str):
-            normalized["answer"] = self._fallback_answer_text(request)
-
-        structured = normalized.get("structured_answer")
-        if isinstance(structured, str):
-            structured = self._extract_json(structured)
-        if isinstance(structured, dict):
-            structured = self._normalize_structured_answer(structured, request)
-            normalized["structured_answer"] = structured
-
-        if request.answer_type == "maintenance_guide":
-            normalized["checklist_items"] = self._normalize_checklist_items(
-                normalized.get("checklist_items"),
-                request.sources,
-            )
-        else:
-            normalized["checklist_items"] = []
-        normalized["used_source_ids"] = self._normalize_source_id_list(
-            normalized.get("used_source_ids"),
+        structured_answer = self._structured_answer_from_compact_payload(
+            payload,
+            request,
+        )
+        checklist_items = (
+            self._checklist_items_from_pre_checks(structured_answer)
+            if request.answer_type == "maintenance_guide"
+            else []
+        )
+        used_source_ids = self._normalize_source_id_list(
+            payload.get("used_source_ids"),
             request.sources,
         )
-        if not normalized["used_source_ids"] and isinstance(structured, dict):
-            normalized["used_source_ids"] = sorted(
-                self._collect_evidence_ids(structured)
+        if not used_source_ids:
+            used_source_ids = sorted(self._collect_evidence_ids(structured_answer))
+        return {
+            "answer": self._compact_ai_answer(payload.get("answer"), request),
+            "answer_type": request.answer_type,
+            "structured_answer": structured_answer,
+            "checklist_items": checklist_items,
+            "used_source_ids": used_source_ids,
+            "model": self.settings.base_model,
+        }
+
+    def _structured_answer_from_compact_payload(
+        self,
+        payload: dict[str, Any],
+        request: AnswerRequest,
+    ) -> dict[str, Any] | None:
+        if not request.sources:
+            return None
+        candidate = self._normalized_candidate_structured_answer(request)
+        if request.answer_type == "document_qa":
+            return self._document_structured_from_compact(payload, request, candidate)
+        if request.answer_type == "component_info":
+            return self._component_structured_from_compact(payload, request, candidate)
+        return self._maintenance_structured_from_compact(payload, request, candidate)
+
+    def _document_structured_from_compact(
+        self,
+        payload: dict[str, Any],
+        request: AnswerRequest,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        overview = dict(candidate.get("overview") or {})
+        if not overview:
+            first = request.sources[0]
+            overview = {
+                "filename": first.original_filename or first.title,
+                "document_type": first.source_type,
+                "manufacturer": None,
+                "model_name": None,
+                "version": (
+                    str(first.document_version)
+                    if first.document_version is not None
+                    else None
+                ),
+                "authored_at": None,
+            }
+        main_contents = self._evidence_items_from_payload_or_candidate(
+            payload.get("main_contents"),
+            candidate.get("main_contents"),
+            request,
+            limit=4,
+        )
+        supported_tasks = self._string_values_from_payload_or_candidate(
+            payload.get("supported_tasks"),
+            candidate.get("supported_tasks"),
+            limit=5,
+        )
+        unverified = self._string_values_from_payload_or_candidate(
+            payload.get("unverified_information"),
+            candidate.get("unverified_information"),
+            limit=4,
+        )
+        if not supported_tasks and "문서 근거에서 확인 가능한 작업 없음" not in unverified:
+            unverified.append("문서 근거에서 확인 가능한 작업 없음")
+        result = {
+            "answer_type": "document_qa",
+            "overview": overview,
+            "main_contents": main_contents,
+            "related_equipment": self._string_values_from_payload_or_candidate(
+                payload.get("related_equipment"),
+                candidate.get("related_equipment"),
+                limit=5,
+            ),
+            "related_components": self._string_values_from_payload_or_candidate(
+                payload.get("related_components"),
+                candidate.get("related_components"),
+                limit=5,
+            ),
+            "supported_tasks": supported_tasks,
+            "evidence_chunk_ids": self._normalize_source_id_list(
+                payload.get("used_source_ids") or payload.get("evidence_chunk_ids"),
+                request.sources,
+            ),
+            "conflicts": self._conflicts_from_payload_or_candidate(
+                payload.get("conflicts"),
+                candidate.get("conflicts"),
+                request,
+            ),
+            "unverified_information": unverified,
+        }
+        if not result["evidence_chunk_ids"]:
+            result["evidence_chunk_ids"] = sorted(self._collect_evidence_ids(result))
+        return self._normalize_structured_answer(result, request)
+
+    def _component_structured_from_compact(
+        self,
+        payload: dict[str, Any],
+        request: AnswerRequest,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        one_line_description = self._short_text(
+            payload.get("one_line_description")
+            or candidate.get("one_line_description")
+            or "근거에서 확인된 부품 정보를 정리했습니다.",
+            limit=90,
+        )
+        result = {
+            "answer_type": "component_info",
+            "one_line_description": one_line_description,
+            "main_roles": self._evidence_items_from_payload_or_candidate(
+                payload.get("main_roles"),
+                candidate.get("main_roles"),
+                request,
+                limit=4,
+            ),
+            "usage_locations": self._evidence_items_from_payload_or_candidate(
+                payload.get("usage_locations"),
+                candidate.get("usage_locations"),
+                request,
+                limit=4,
+            ),
+            "precautions": self._evidence_items_from_payload_or_candidate(
+                payload.get("precautions"),
+                candidate.get("precautions"),
+                request,
+                limit=4,
+            ),
+            "evidence_chunk_ids": self._normalize_source_id_list(
+                payload.get("used_source_ids") or payload.get("evidence_chunk_ids"),
+                request.sources,
+            ),
+            "conflicts": self._conflicts_from_payload_or_candidate(
+                payload.get("conflicts"),
+                candidate.get("conflicts"),
+                request,
+            ),
+            "additional_information_needed": self._string_values_from_payload_or_candidate(
+                payload.get("additional_information_needed"),
+                candidate.get("additional_information_needed"),
+                limit=4,
+            ),
+        }
+        if not result["evidence_chunk_ids"]:
+            result["evidence_chunk_ids"] = sorted(self._collect_evidence_ids(result))
+        return self._normalize_structured_answer(result, request)
+
+    def _maintenance_structured_from_compact(
+        self,
+        payload: dict[str, Any],
+        request: AnswerRequest,
+        candidate: dict[str, Any],
+    ) -> dict[str, Any]:
+        candidate_summary = candidate.get("summary") if isinstance(candidate.get("summary"), dict) else {}
+        result = {
+            "answer_type": "maintenance_guide",
+            "summary": {
+                "status": self._short_text(
+                    payload.get("status")
+                    or candidate_summary.get("status")
+                    or "안전관리자 확인 필요",
+                    limit=40,
+                ),
+                "risk_level": "판단 불가",
+                "risk_basis": self._evidence_items_from_payload_or_candidate(
+                    payload.get("risk_basis"),
+                    candidate_summary.get("risk_basis"),
+                    request,
+                    limit=3,
+                    allowed_types=MAINTENANCE_REFERENCE_SOURCE_TYPES
+                    | MANUAL_SOURCE_TYPES,
+                ),
+                "core_warning": self._short_text(
+                    payload.get("core_warning")
+                    or "작업 전 안전조건을 먼저 확인해야 합니다.",
+                    limit=90,
+                ),
+            },
+            "pre_checks": self._evidence_items_from_payload_or_candidate(
+                payload.get("pre_checks"),
+                candidate.get("pre_checks"),
+                request,
+                limit=5,
+            ),
+            "hazards": self._hazards_from_payload_or_candidate(
+                payload.get("hazards"),
+                candidate.get("hazards"),
+                request,
+            ),
+            "manual_steps": self._evidence_items_from_payload_or_candidate(
+                payload.get("manual_steps"),
+                candidate.get("manual_steps"),
+                request,
+                limit=6,
+                allowed_types=MANUAL_SOURCE_TYPES,
+                require_action=True,
+            ),
+            "precautions": self._evidence_items_from_payload_or_candidate(
+                payload.get("precautions"),
+                candidate.get("precautions"),
+                request,
+                limit=4,
+                allowed_types=MANUAL_SOURCE_TYPES | PRECAUTION_REFERENCE_SOURCE_TYPES,
+            ),
+            "stop_conditions": self._evidence_items_from_payload_or_candidate(
+                payload.get("stop_conditions"),
+                candidate.get("stop_conditions"),
+                request,
+                limit=5,
+            ),
+            "related_regulations_and_incidents": self._evidence_items_from_payload_or_candidate(
+                payload.get("related_regulations_and_incidents"),
+                candidate.get("related_regulations_and_incidents"),
+                request,
+                limit=5,
+                allowed_types=MAINTENANCE_REFERENCE_SOURCE_TYPES,
+            ),
+            "evidence_chunk_ids": self._normalize_source_id_list(
+                payload.get("used_source_ids") or payload.get("evidence_chunk_ids"),
+                request.sources,
+            ),
+            "conflicts": self._conflicts_from_payload_or_candidate(
+                payload.get("conflicts"),
+                candidate.get("conflicts"),
+                request,
+            ),
+            "additional_information_needed": self._string_values_from_payload_or_candidate(
+                payload.get("additional_information_needed"),
+                candidate.get("additional_information_needed"),
+                limit=4,
+            ),
+        }
+        if not result["evidence_chunk_ids"]:
+            result["evidence_chunk_ids"] = sorted(self._collect_evidence_ids(result))
+        return self._normalize_structured_answer(result, request)
+
+    def _normalized_candidate_structured_answer(
+        self,
+        request: AnswerRequest,
+    ) -> dict[str, Any]:
+        candidate = (
+            dict(request.candidate_structured_answer)
+            if isinstance(request.candidate_structured_answer, dict)
+            else None
+        )
+        if candidate is None:
+            candidate = self._fallback_structured_answer(request)
+        if not isinstance(candidate, dict):
+            return {}
+        try:
+            return self._normalize_structured_answer(candidate, request)
+        except Exception:
+            return {}
+
+    def _evidence_items_from_payload_or_candidate(
+        self,
+        primary: Any,
+        fallback: Any,
+        request: AnswerRequest,
+        *,
+        limit: int,
+        allowed_types: frozenset[str] | None = None,
+        require_action: bool = False,
+    ) -> list[dict[str, Any]]:
+        items = self._evidence_items_from_payload(
+            primary,
+            request,
+            limit=limit,
+            allowed_types=allowed_types,
+            require_action=require_action,
+        )
+        if items:
+            return items
+        return self._evidence_items_from_payload(
+            fallback,
+            request,
+            limit=limit,
+            allowed_types=allowed_types,
+            require_action=require_action,
+        )
+
+    def _evidence_items_from_payload(
+        self,
+        value: Any,
+        request: AnswerRequest,
+        *,
+        limit: int,
+        allowed_types: frozenset[str] | None = None,
+        require_action: bool = False,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        source_by_id = {source.chunk_id: source for source in request.sources}
+        items: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            content = self._compact_card_text(
+                item.get("content") or item.get("text") or item.get("name")
             )
+            if not content:
+                continue
+            evidence_ids = self._normalize_source_id_list(
+                item.get("evidence_chunk_ids") or item.get("source_ids"),
+                request.sources,
+            )
+            if not evidence_ids:
+                continue
+            if allowed_types is not None and any(
+                source_by_id[source_id].source_type.casefold() not in allowed_types
+                for source_id in evidence_ids
+            ):
+                continue
+            if require_action and not self._looks_like_actionable_manual_step(content):
+                continue
+            normalized = {
+                "content": content,
+                "evidence_chunk_ids": evidence_ids,
+            }
+            if normalized not in items:
+                items.append(normalized)
+            if len(items) >= limit:
+                break
+        return items
+
+    def _hazards_from_payload_or_candidate(
+        self,
+        primary: Any,
+        fallback: Any,
+        request: AnswerRequest,
+    ) -> list[dict[str, Any]]:
+        hazards = self._hazards_from_payload(primary, request)
+        if hazards:
+            return hazards
+        return self._hazards_from_payload(fallback, request)
+
+    def _hazards_from_payload(
+        self,
+        value: Any,
+        request: AnswerRequest,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        hazards: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            content = self._compact_card_text(
+                item.get("content") or item.get("description") or item.get("text")
+            )
+            if not content:
+                continue
+            evidence_ids = self._normalize_source_id_list(
+                item.get("evidence_chunk_ids") or item.get("source_ids"),
+                request.sources,
+            )
+            if not evidence_ids:
+                continue
+            name = self._short_text(item.get("name") or content, limit=24)
+            hazards.append(
+                {
+                    "name": name,
+                    "content": content,
+                    "evidence_chunk_ids": evidence_ids,
+                }
+            )
+            if len(hazards) >= 3:
+                break
+        return hazards
+
+    def _conflicts_from_payload_or_candidate(
+        self,
+        primary: Any,
+        fallback: Any,
+        request: AnswerRequest,
+    ) -> list[dict[str, Any]]:
+        conflicts = self._normalize_conflicts(primary, request.sources)
+        if conflicts:
+            return conflicts
+        return self._normalize_conflicts(fallback, request.sources)
+
+    def _string_values_from_payload_or_candidate(
+        self,
+        primary: Any,
+        fallback: Any,
+        *,
+        limit: int,
+    ) -> list[str]:
+        values = self._short_string_values(primary, limit=limit)
+        if values:
+            return values
+        return self._short_string_values(fallback, limit=limit)
+
+    def _short_string_values(self, value: Any, *, limit: int) -> list[str]:
+        values = value if isinstance(value, list) else []
+        normalized: list[str] = []
+        for item in values:
+            text = self._compact_card_text(
+                item.get("content") if isinstance(item, dict) else item
+            )
+            if text and text not in normalized:
+                normalized.append(text)
+            if len(normalized) >= limit:
+                break
         return normalized
+
+    def _compact_ai_answer(self, value: Any, request: AnswerRequest) -> str:
+        answer = self._short_text(value, limit=240)
+        if not answer:
+            return self._fallback_polite_answer(request)
+        if answer.endswith(("요", "니다", "습니다", "합니다", ".", "?", "!")):
+            return answer
+        return f"{answer}입니다."
+
+    @staticmethod
+    def _short_text(value: Any, *, limit: int) -> str:
+        text = " ".join(str(value or "").split())
+        text = text.strip(" -•*[]")
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
+
+    def _compact_card_text(self, value: Any) -> str:
+        text = " ".join(str(value or "").split())
+        text = text.strip(" -•*[]()")
+        if not text or self._looks_like_bad_card_text(text):
+            return ""
+        if len(text) <= MAX_COMPACT_CARD_CHARS:
+            return text.rstrip(". ")
+        return ""
+
+    @staticmethod
+    def _looks_like_bad_card_text(text: str) -> bool:
+        normalized = " ".join(str(text or "").split())
+        if not normalized:
+            return True
+        if normalized in GENERIC_FALLBACK_ANSWERS:
+            return True
+        if normalized.startswith(BAD_CARD_PREFIXES):
+            return True
+        if normalized.endswith(BAD_CARD_SUFFIXES):
+            return True
+        if "..." in normalized:
+            return True
+        return False
+
+    @staticmethod
+    def _fallback_polite_answer(request: AnswerRequest) -> str:
+        if not request.sources:
+            return "확인 가능한 근거가 부족합니다."
+        if request.answer_type == "document_qa":
+            return "검색된 문서 근거를 기준으로 질문과 관련된 내용을 요약했습니다."
+        if request.answer_type == "component_info":
+            return "검색된 문서 근거를 기준으로 부품 정보를 요약했습니다."
+        return "검색된 근거를 기준으로 작업 전 확인할 핵심 사항을 요약했습니다."
 
     def _normalize_structured_answer(
         self,
@@ -309,6 +1119,7 @@ class QwenEngine:
             normalized["pre_checks"] = self._filter_evidence_items(
                 normalized.get("pre_checks"),
                 request.sources,
+                allowed_types=MANUAL_SOURCE_TYPES | PRECAUTION_REFERENCE_SOURCE_TYPES,
             )
             normalized["hazards"] = self._normalize_maintenance_hazards(
                 normalized.get("hazards"),
@@ -328,7 +1139,7 @@ class QwenEngine:
                 if self._all_evidence_from_source_types(
                     normalized_item,
                     request.sources,
-                    PUBLIC_REFERENCE_SOURCE_TYPES,
+                    MAINTENANCE_REFERENCE_SOURCE_TYPES,
                 )
             ]
             normalized["manual_steps"] = [
@@ -349,9 +1160,25 @@ class QwenEngine:
                     str(normalized_item.get("content") or "")
                 )
             ]
+            normalized["precautions"] = [
+                normalized_item
+                for item in self._as_dict_list(normalized.get("precautions"))
+                if (
+                    normalized_item := self._normalize_evidence_item(
+                        item,
+                        request.sources,
+                    )
+                )
+                if self._all_evidence_from_source_types(
+                    normalized_item,
+                    request.sources,
+                    MANUAL_SOURCE_TYPES | PRECAUTION_REFERENCE_SOURCE_TYPES,
+                )
+            ]
             normalized["stop_conditions"] = self._filter_evidence_items(
                 normalized.get("stop_conditions"),
                 request.sources,
+                allowed_types=MANUAL_SOURCE_TYPES | PUBLIC_REFERENCE_SOURCE_TYPES,
             )
             normalized["additional_information_needed"] = self._normalize_string_list(
                 normalized.get("additional_information_needed")
@@ -387,44 +1214,6 @@ class QwenEngine:
             )
         return normalized
 
-    def _repair_prompt(
-        self,
-        request: AnswerRequest,
-        generated: str,
-        validation_error: str,
-    ) -> str:
-        allowed_ids = [source.chunk_id for source in request.sources]
-        parsed = self._extract_answer_payload(generated)
-        previous = (
-            json.dumps(parsed, ensure_ascii=False)
-            if parsed is not None
-            else " ".join(generated.split())
-        )
-        previous = previous[:1200]
-        error_text = " ".join(validation_error.split())[:600]
-        evidence = self._evidence_text(request)[:1200]
-        return (
-            "The previous output did not match the API schema. "
-            "Return one corrected JSON object only. Do not wrap JSON in a string. "
-            "Do not use markdown fences.\n\n"
-            f"Expected answer_type: {request.answer_type}\n"
-            f"Allowed chunk_id values: {json.dumps(allowed_ids, ensure_ascii=False)}\n"
-            "Rules:\n"
-            "- evidence_chunk_ids and used_source_ids must contain only allowed chunk_id values.\n"
-            "- If you meant source number 1, use the first allowed chunk_id exactly.\n"
-            "- Every evidence-backed list item must be an object with content and evidence_chunk_ids.\n"
-            "- maintenance_guide.summary must include status, risk_level, risk_basis, and core_warning.\n"
-            "- maintenance_guide.hazards items must include name, content, and evidence_chunk_ids.\n"
-            "- Checklist fields sequence/is_required belong only in checklist_items, never in hazards.\n"
-            "- Only maintenance_guide may return checklist_items. Every checklist item must cite allowed evidence.\n"
-            "- additional_information_needed must be a list of plain strings.\n"
-            "- If a field cannot be verified from allowed evidence, return an empty list for that field.\n\n"
-            f"Validation error summary:\n{error_text}\n\n"
-            f"Previous output preview:\n{previous}\n\n"
-            f"Question:\n{request.question}\n\n"
-            f"Evidence preview:\n{evidence}"
-        )
-
     def _fallback_answer(
         self,
         request: AnswerRequest,
@@ -435,17 +1224,27 @@ class QwenEngine:
             answer_text = ""
         if not answer_text:
             answer_text = self._fallback_answer_text(request)
-        structured_answer = self._fallback_structured_answer(request)
+        structured_answer = (
+            self._normalized_candidate_structured_answer(request)
+            or self._fallback_structured_answer(request)
+        )
+        used_source_ids = (
+            sorted(self._collect_evidence_ids(structured_answer))
+            if structured_answer
+            else []
+        )
+        if not used_source_ids and request.sources:
+            used_source_ids = [source.chunk_id for source in request.sources[:5]]
         payload: dict[str, Any] = {
             "answer": answer_text,
             "answer_type": request.answer_type,
             "structured_answer": structured_answer,
-            "checklist_items": [],
-            "used_source_ids": (
-                sorted(self._collect_evidence_ids(structured_answer))
-                if structured_answer
+            "checklist_items": (
+                self._checklist_items_from_pre_checks(structured_answer)
+                if request.answer_type == "maintenance_guide"
                 else []
             ),
+            "used_source_ids": used_source_ids,
             "model": self.settings.base_model,
         }
         return AnswerResponse.model_validate(payload)
@@ -521,7 +1320,7 @@ class QwenEngine:
         public_items = [
             item
             for item, source in zip(source_items, request.sources[:5], strict=False)
-            if source.source_type.casefold() in PUBLIC_REFERENCE_SOURCE_TYPES
+            if source.source_type.casefold() in MAINTENANCE_REFERENCE_SOURCE_TYPES
         ]
         return {
             "answer_type": "maintenance_guide",
@@ -663,6 +1462,18 @@ class QwenEngine:
                 isinstance(nested_payload.get("structured_answer"), dict)
                 or "checklist_items" in nested_payload
                 or "used_source_ids" in nested_payload
+                or any(
+                    key in nested_payload
+                    for key in (
+                        "main_contents",
+                        "one_line_description",
+                        "main_roles",
+                        "pre_checks",
+                        "hazards",
+                        "manual_steps",
+                        "core_warning",
+                    )
+                )
             ):
                 merged = dict(nested_payload)
                 if parsed.get("model") and not merged.get("model"):
@@ -728,6 +1539,52 @@ class QwenEngine:
             return source_ids[index - 1]
         return None
 
+    def _checklist_items_from_pre_checks(
+        self,
+        structured_answer: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(structured_answer, dict):
+            return []
+        pre_checks = structured_answer.get("pre_checks")
+        if not isinstance(pre_checks, list):
+            return []
+        items: list[dict[str, Any]] = []
+        for pre_check in pre_checks:
+            if not isinstance(pre_check, dict):
+                continue
+            content = self._checklist_text(pre_check.get("content"))
+            evidence_ids = [
+                str(source_id)
+                for source_id in pre_check.get("evidence_chunk_ids", [])
+                if source_id
+            ]
+            if not content or not evidence_ids:
+                continue
+            items.append(
+                {
+                    "id": None,
+                    "content": content,
+                    "sequence": len(items) + 1,
+                    "is_required": True,
+                    "is_completed": False,
+                    "completed_by_user_id": None,
+                    "completed_at": None,
+                    "evidence_chunk_ids": evidence_ids,
+                }
+            )
+            if len(items) >= 6:
+                break
+        return items
+
+    def _checklist_text(self, value: Any) -> str:
+        text = self._compact_card_text(value)
+        text = re.sub(
+            r"(하십시오|합니다|하세요|한다|할 것|해야 함|하여야 함)\.?$",
+            "",
+            text,
+        ).strip()
+        return text.rstrip(" .")
+
     def _normalize_checklist_items(
         self,
         value: Any,
@@ -736,14 +1593,13 @@ class QwenEngine:
         if not isinstance(value, list):
             return []
         sources_by_id = {source.chunk_id: source for source in sources}
-        allowed_types = MANUAL_SOURCE_TYPES | frozenset(
-            {"public_law", "public_guide"}
-        )
+        allowed_types = CHECKLIST_SOURCE_TYPES
         items: list[dict[str, Any]] = []
         for index, item in enumerate(value, start=1):
             if not isinstance(item, dict):
                 continue
             content = str(item.get("content") or "").strip()
+            content = self._compact_card_text(content)
             if not content:
                 continue
             evidence_ids = self._normalize_source_id_list(
@@ -811,6 +1667,7 @@ class QwenEngine:
         risk_basis = self._filter_evidence_items(
             summary.get("risk_basis"),
             request.sources,
+            allowed_types=MANUAL_SOURCE_TYPES | PUBLIC_REFERENCE_SOURCE_TYPES,
         )
         status = str(summary.get("status") or "").strip()
         if status not in {"안전관리자 확인 필요", "작업 중지 권고", "근거 부족"}:
@@ -843,6 +1700,12 @@ class QwenEngine:
             normalized = self._normalize_evidence_item(item, sources)
             if normalized is None:
                 continue
+            if not self._all_evidence_from_source_types(
+                normalized,
+                sources,
+                MANUAL_SOURCE_TYPES | PUBLIC_REFERENCE_SOURCE_TYPES,
+            ):
+                continue
             content = str(normalized.get("content") or "").strip()
             name = str(item.get("name") or "").strip()
             if not name:
@@ -863,7 +1726,7 @@ class QwenEngine:
         item: dict[str, Any],
         sources: list[ChatSource],
     ) -> dict[str, Any] | None:
-        content = str(item.get("content") or "").strip()
+        content = self._compact_card_text(item.get("content"))
         if not content:
             return None
         evidence_ids = self._normalize_source_id_list(
@@ -873,7 +1736,7 @@ class QwenEngine:
         if not evidence_ids:
             return None
         return {
-            "content": self._compact_item_content(content),
+            "content": content,
             "evidence_chunk_ids": evidence_ids,
         }
 
@@ -890,9 +1753,12 @@ class QwenEngine:
                 sources,
             )
             if content and len(evidence_ids) >= 2:
+                compact_content = self._compact_item_content(content)
+                if not compact_content:
+                    continue
                 conflicts.append(
                     {
-                        "content": self._compact_item_content(content),
+                        "content": compact_content,
                         "evidence_chunk_ids": evidence_ids,
                     }
                 )
@@ -949,6 +1815,8 @@ class QwenEngine:
     @staticmethod
     def _compact_item_content(content: str, limit: int = 220) -> str:
         text = " ".join(content.split())
+        if QwenEngine._looks_like_bad_card_text(text):
+            return ""
         if len(text) <= limit:
             return text
         return text[: limit - 3].rstrip() + "..."
@@ -976,12 +1844,19 @@ class QwenEngine:
         self,
         value: Any,
         sources: list[ChatSource],
+        *,
+        allowed_types: frozenset[str] | None = None,
     ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for item in self._as_dict_list(value):
             normalized = self._normalize_evidence_item(item, sources)
-            if normalized is not None:
-                items.append(normalized)
+            if normalized is None:
+                continue
+            if allowed_types is not None and not self._all_evidence_from_source_types(
+                normalized, sources, allowed_types
+            ):
+                continue
+            items.append(normalized)
         return items
 
     def _has_valid_evidence(
@@ -1061,10 +1936,36 @@ class QwenEngine:
             return False
         return bool(re.search(r"[A-Za-z가-힣]", text))
 
-    def _ensure_loaded(self) -> tuple[Any, Any]:
+    def _ensure_loaded(self, *, for_answer: bool = False) -> tuple[Any, Any]:
+        if for_answer:
+            if self._answer_tokenizer is not None and self._answer_model is not None:
+                return self._answer_tokenizer, self._answer_model
+            tokenizer, model = self._load_model(
+                device=self.settings.answer_device,
+                load_in_4bit=self.settings.answer_load_in_4bit,
+                with_adapter=False,
+            )
+            self._answer_tokenizer = tokenizer
+            self._answer_model = model
+            return tokenizer, model
         if self._tokenizer is not None and self._model is not None:
             return self._tokenizer, self._model
+        tokenizer, model = self._load_model(
+            device=self.settings.device,
+            load_in_4bit=self.settings.load_in_4bit,
+            with_adapter=True,
+        )
+        self._tokenizer = tokenizer
+        self._model = model
+        return tokenizer, model
 
+    def _load_model(
+        self,
+        *,
+        device: str,
+        load_in_4bit: bool,
+        with_adapter: bool,
+    ) -> tuple[Any, Any]:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -1073,12 +1974,12 @@ class QwenEngine:
             trust_remote_code=True,
         )
         load_kwargs: dict[str, Any] = {"trust_remote_code": True}
-        if self.settings.device == "cuda":
+        if device == "cuda":
             load_kwargs["device_map"] = "auto"
             load_kwargs["torch_dtype"] = "auto"
         else:
             load_kwargs["torch_dtype"] = torch.float32
-        if self.settings.load_in_4bit:
+        if load_in_4bit:
             from transformers import BitsAndBytesConfig
 
             load_kwargs["quantization_config"] = BitsAndBytesConfig(
@@ -1093,7 +1994,7 @@ class QwenEngine:
             **load_kwargs,
         )
         adapter_path = self.settings.lora_adapter.strip()
-        if adapter_path:
+        if with_adapter and adapter_path:
             from peft import PeftModel
 
             if not Path(adapter_path).exists():
@@ -1102,8 +2003,6 @@ class QwenEngine:
             model = PeftModel.from_pretrained(model, str(prepared_adapter_path))
             self._adapter_loaded = True
         model.eval()
-        self._tokenizer = tokenizer
-        self._model = model
         return tokenizer, model
 
     def _prepare_adapter_path(self, adapter_path: Path) -> Path:
@@ -1196,7 +2095,7 @@ class QwenEngine:
     ) -> str:
         import torch
 
-        tokenizer, model = self._ensure_loaded()
+        tokenizer, model = self._ensure_loaded(for_answer=disable_adapter)
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -1222,7 +2121,12 @@ class QwenEngine:
         inputs = inputs.to(input_device)
         adapter_context = (
             model.disable_adapter()
-            if disable_adapter and self._adapter_loaded and hasattr(model, "disable_adapter")
+            if (
+                disable_adapter
+                and model is self._model
+                and self._adapter_loaded
+                and hasattr(model, "disable_adapter")
+            )
             else nullcontext()
         )
         started_at = time.perf_counter()
@@ -1234,6 +2138,8 @@ class QwenEngine:
                     **inputs,
                     max_new_tokens=max_new_tokens,
                     do_sample=False,
+                    repetition_penalty=1.15,
+                    no_repeat_ngram_size=3,
                     pad_token_id=tokenizer.eos_token_id,
                 )
                 if self._is_cuda_device(input_device):
@@ -1377,92 +2283,154 @@ class QwenEngine:
                 return label, None, None, None, None
         return "기타", None, None, None, None
 
-    @staticmethod
-    def _answer_text_instructions(request: AnswerRequest) -> str:
-        if request.answer_type == "document_qa":
-            return (
-                "Return 2-4 concise sentences. Summarize only what the retrieved "
-                "document evidence verifies. If the document/version/model is not "
-                "clear from evidence, say that it must be checked."
-            )
-        if request.answer_type == "component_info":
-            return (
-                "Return 2-4 concise sentences. Explain what the component is, its "
-                "main role, and one verified caution if evidence supports it. "
-                "Do not give installation or repair steps."
-            )
-        return (
-            "Return 3-5 concise sentences. Mention verified pre-checks and major "
-            "hazards only from evidence. Do not approve the work. If evidence is "
-            "insufficient, say that the manufacturer manual and site safety manager "
-            "must be checked before work starts."
-        )
+    def _parse_occurrence_classification(
+        self,
+        text: str,
+    ) -> tuple[str, float | None, list[str]]:
+        occurrence_type, confidence, _, _, _ = self._parse_classification(text)
+        risk_factors = self._parse_occurrence_risk_factors(text, occurrence_type)
+        return occurrence_type, confidence, risk_factors
 
-    @staticmethod
-    def _answer_format_for_type(request: AnswerRequest) -> str:
-        allowed_source_ids = [source.chunk_id for source in request.sources]
+    def _parse_occurrence_risk_factors(
+        self,
+        text: str,
+        occurrence_type: str,
+    ) -> list[str]:
+        labels: list[str] = []
+
+        def add(value: Any) -> None:
+            normalized = str(value or "").strip()
+            if normalized in self.settings.occurrence_labels and normalized not in labels:
+                labels.append(normalized)
+
+        add(occurrence_type)
+        parsed = self._extract_json(text)
+        if isinstance(parsed, dict):
+            raw_values = (
+                parsed.get("explicit_risk_factors")
+                or parsed.get("risk_factors")
+                or parsed.get("hazards")
+                or []
+            )
+            if isinstance(raw_values, str):
+                raw_values = [raw_values]
+            if isinstance(raw_values, list):
+                for raw_value in raw_values:
+                    add(raw_value)
+                    if len(labels) >= 3:
+                        break
+        if len(labels) < 3:
+            for label in self.settings.occurrence_labels:
+                if label in text:
+                    add(label)
+                    if len(labels) >= 3:
+                        break
+        return labels[:3]
+
+    def _parse_intent_classification(
+        self,
+        text: str,
+    ) -> tuple[str, float | None, str | None]:
+        parsed = self._extract_json(text)
+        if parsed:
+            question_intent = str(parsed.get("question_intent") or "").strip()
+            if question_intent not in {
+                "document_qa",
+                "maintenance_guide",
+                "component_info",
+                "clarification_required",
+            }:
+                question_intent = "clarification_required"
+            try:
+                confidence = (
+                    float(parsed.get("intent_confidence"))
+                    if parsed.get("intent_confidence") is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                confidence = None
+            if confidence is not None:
+                confidence = min(max(confidence, 0.0), 1.0)
+            clarification_question = str(
+                parsed.get("clarification_question") or ""
+            ).strip() or None
+            return question_intent, confidence, clarification_question
+        return "clarification_required", None, None
+
+    def _compact_answer_format_for_type(self, request: AnswerRequest) -> str:
+        source_count = len(request.sources)
         common = (
-            "Top-level keys: answer, answer_type, structured_answer, "
-            "checklist_items, used_source_ids. answer is a Korean readable text version. "
-            "Every evidence-backed item has content and evidence_chunk_ids. "
-            "Use exact chunk_id values for evidence_chunk_ids and used_source_ids; "
-            f"allowed chunk_id values are {allowed_source_ids}. Never use numeric source indexes."
+            "Return JSON only. Do not include structured_answer. "
+            "Cite sources by their number only, matching the [n] markers in Evidence "
+            f"(valid numbers are 1 to {source_count}); do not use chunk_id strings. "
+            "Every evidence-backed card item must be an object with content and evidence_chunk_ids, "
+            'where evidence_chunk_ids is a list of source numbers, e.g. ["2"]. '
+            "Keep answer under 2 Korean sentences. Keep each card item under 40 Korean characters."
         )
         if request.answer_type == "document_qa":
             return (
-                f"{common}\nstructured_answer keys: answer_type=document_qa, overview "
-                "(filename, document_type, manufacturer, model_name, version, authored_at), "
-                "main_contents, related_equipment, related_components, supported_tasks, "
-                "evidence_chunk_ids, conflicts, unverified_information. "
-                "checklist_items must be []. Do not add risk, stop conditions, or TBM."
+                f"{common}\n"
+                "Schema: {answer, main_contents, related_equipment, related_components, "
+                "supported_tasks, unverified_information, conflicts, used_source_ids}. "
+                "supported_tasks means activities actually found in the selected PDF evidence. "
+                "If no activity is found, supported_tasks must be []."
             )
         if request.answer_type == "component_info":
             return (
-                f"{common}\nstructured_answer keys: answer_type=component_info, "
-                "one_line_description, main_roles, usage_locations, precautions, "
-                "evidence_chunk_ids, conflicts, additional_information_needed. "
-                "checklist_items must be []. Do not add installation or maintenance steps."
+                f"{common}\n"
+                "Schema: {answer, one_line_description, main_roles, usage_locations, "
+                "precautions, additional_information_needed, conflicts, used_source_ids}. "
+                "Do not produce installation or maintenance procedure steps."
             )
-        manual_ids = [
-            source.chunk_id
-            for source in request.sources
+        manual_numbers = [
+            index
+            for index, source in enumerate(request.sources, start=1)
             if source.source_type.casefold() in MANUAL_SOURCE_TYPES
         ]
-        checklist_ids = [
-            source.chunk_id
-            for source in request.sources
+        reference_numbers = [
+            index
+            for index, source in enumerate(request.sources, start=1)
+            if source.source_type.casefold() in MAINTENANCE_REFERENCE_SOURCE_TYPES
+        ]
+        precaution_numbers = [
+            index
+            for index, source in enumerate(request.sources, start=1)
             if source.source_type.casefold()
-            in {
-                "equipment_manual",
-                "component_manual",
-                "public_law",
-                "public_guide",
-            }
+            in (MANUAL_SOURCE_TYPES | PRECAUTION_REFERENCE_SOURCE_TYPES)
         ]
         return (
-            f"{common}\nstructured_answer keys: answer_type=maintenance_guide, summary "
-            "(status, risk_level, risk_basis, core_warning), pre_checks, hazards(maximum 3), "
-            "manual_steps, stop_conditions, related_regulations_and_incidents, "
-            "evidence_chunk_ids, conflicts, additional_information_needed. "
-            "Keep each content under 120 Korean characters. Do not copy long manual paragraphs. "
-            "Allowed status: 안전관리자 확인 필요, 작업 중지 권고, 근거 부족. "
-            "Allowed risk_level: 낮음, 보통, 높음, 매우 높음, 판단 불가. "
-            "risk_basis is a list of evidence-backed items and every item must cite retrieved "
-            "chunk IDs. If no verified risk basis exists, risk_level must be 판단 불가 and "
-            "risk_basis must be []. "
-            "Each hazard item must be exactly {name, content, evidence_chunk_ids}; "
-            "do not put id, sequence, is_required, is_completed, completed_by_user_id, "
-            "or completed_at inside structured_answer. "
-            "additional_information_needed must be a list of plain strings, not objects. "
-            "Only add a conflict when two or more retrieved chunks directly disagree, and "
-            "cite every conflicting chunk ID. Otherwise conflicts must be []. "
-            "Top-level checklist_items may contain only question-relevant TBM preview items "
-            "with content and evidence_chunk_ids. Do not create a checklist item without evidence. "
-            f"Only these chunk IDs may support checklist_items: {checklist_ids}. "
-            "Never put checklist text inside answer as [ ]. "
-            f"Only these manual chunk IDs may support manual_steps: {manual_ids}. "
-            "If that list is empty, manual_steps must be [] and risk may be 판단 불가."
+            f"{common}\n"
+            "Schema: {answer, status, core_warning, risk_basis, pre_checks, hazards, "
+            "manual_steps, precautions, stop_conditions, related_regulations_and_incidents, "
+            "additional_information_needed, conflicts, used_source_ids}. "
+            "hazards items must be {name, content, evidence_chunk_ids} and maximum 3 items. "
+            f"manual_steps may cite only these source numbers: {manual_numbers}. "
+            f"precautions (work precautions, not stop conditions) may cite only these source numbers: {precaution_numbers}. "
+            f"related_regulations_and_incidents and risk_basis may cite only these source numbers: {reference_numbers}. "
+            "Do not generate checklist_items; backend will derive them from pre_checks. "
+            "Do not output a risk score or risk level."
         )
+
+    def _candidate_text(self, request: AnswerRequest) -> str:
+        candidate = self._normalized_candidate_structured_answer(request)
+        if not candidate:
+            return "No backend candidate cards were supplied."
+        compact = self._compact_candidate_value(candidate)
+        return json.dumps(compact, ensure_ascii=False)
+
+    def _compact_candidate_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            compact: dict[str, Any] = {}
+            for key, nested in value.items():
+                if key in {"id", "sequence", "is_completed", "completed_at"}:
+                    continue
+                compact[key] = self._compact_candidate_value(nested)
+            return compact
+        if isinstance(value, list):
+            return [self._compact_candidate_value(item) for item in value[:6]]
+        if isinstance(value, str):
+            return self._short_text(value, limit=120)
+        return value
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any] | None:
@@ -1521,13 +2489,44 @@ class QwenEngine:
             elif source.page:
                 location_parts.append(f"page {source.page}")
             location = ", ".join(location_parts) if location_parts else "unknown location"
+            profile = source.document_profile if isinstance(source.document_profile, dict) else {}
+            profile_text = QwenEngine._compact_document_profile_text(profile)
             lines.extend(
                 [
                     f"[{index}] title: {source.title}",
-                    f"[{index}] chunk_id: {source.chunk_id}",
                     f"[{index}] scope/type: {source.document_scope or 'unknown'} / {source.source_type}",
                     f"[{index}] location: {location}",
+                    *([f"[{index}] document_profile: {profile_text}"] if profile_text else []),
                     f"[{index}] evidence: {source.excerpt}",
                 ]
             )
         return "\n".join(lines)
+
+    @staticmethod
+    def _compact_document_profile_text(profile: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for field in (
+            "product_names",
+            "model_names",
+            "aliases",
+            "components",
+            "equipment",
+            "supported_tasks",
+            "safety_topics",
+            "summary_points",
+        ):
+            values = profile.get(field)
+            if isinstance(values, list):
+                compact_values = [
+                    " ".join(str(value).split())
+                    for value in values[:5]
+                    if str(value).strip()
+                ]
+            elif isinstance(values, str):
+                compact_values = [" ".join(values.split())]
+            else:
+                compact_values = []
+            if compact_values:
+                parts.append(f"{field}={compact_values}")
+        text = "; ".join(parts)
+        return text[:1200]

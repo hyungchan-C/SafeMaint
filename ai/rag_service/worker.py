@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Event, Thread
-from typing import Any
+from threading import Event, Lock, Thread
+from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import psycopg
+import numpy as np
 from pgvector.psycopg import register_vector
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
@@ -29,6 +33,8 @@ from rag_service.retrieval import BgeM3Embedder, psycopg_database_url
 
 
 logger = logging.getLogger(__name__)
+_progress_lock = Lock()
+_last_progress_write: dict[UUID, tuple[float, int, str]] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +47,12 @@ class ClaimedJob:
     title: str
     original_filename: str
     document_type: str
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentProfileExtraction:
+    profile: dict[str, Any] | None
     metadata: dict[str, Any]
 
 
@@ -76,6 +88,103 @@ def _audit(
             Jsonb(payload),
         ),
     )
+
+
+def update_job_progress(
+    job: ClaimedJob,
+    *,
+    stage: str,
+    percent: int,
+    message: str,
+    counters: Mapping[str, int] | None = None,
+    force: bool = False,
+) -> None:
+    """Persist monotonic progress without coupling it to the document transaction."""
+
+    bounded_percent = max(0, min(100, int(percent)))
+    safe_message = str(message).strip()[:500] or "PDF 처리 중"
+    now_monotonic = time.monotonic()
+    with _progress_lock:
+        previous = _last_progress_write.get(job.job_id)
+        if (
+            not force
+            and previous is not None
+            and previous[2] == stage
+            and bounded_percent <= previous[1]
+            and now_monotonic - previous[0] < 1.0
+        ):
+            return
+        _last_progress_write[job.job_id] = (
+            now_monotonic,
+            max(previous[1], bounded_percent) if previous else bounded_percent,
+            stage,
+        )
+
+    safe_counters = {
+        key: max(0, int(value))
+        for key, value in (counters or {}).items()
+        if key
+        in {
+            "processed_pages",
+            "total_pages",
+            "processed_chunks",
+            "total_chunks",
+            "embedded_chunks",
+        }
+    }
+    now = datetime.now(timezone.utc)
+    with _connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE document_processing_jobs
+                SET processing_stage = %s,
+                    progress_percent = GREATEST(progress_percent, %s),
+                    progress_message = %s,
+                    progress_metadata =
+                        COALESCE(progress_metadata, '{}'::jsonb) || %s,
+                    progress_updated_at = %s,
+                    updated_at = %s
+                WHERE id = %s AND status = 'processing'
+                """,
+                (
+                    stage,
+                    bounded_percent,
+                    safe_message,
+                    Jsonb(safe_counters),
+                    now,
+                    now,
+                    job.job_id,
+                ),
+            )
+        connection.commit()
+
+
+def _report_progress(
+    job: ClaimedJob,
+    stage: str,
+    percent: int,
+    message: str,
+    counters: Mapping[str, int] | None = None,
+    *,
+    force: bool = False,
+) -> None:
+    try:
+        update_job_progress(
+            job,
+            stage=stage,
+            percent=percent,
+            message=message,
+            counters=counters,
+            force=force,
+        )
+    except Exception:
+        logger.exception(
+            "Progress update failed document_id=%s document_version_id=%s stage=%s",
+            job.document_id,
+            job.version_id,
+            stage,
+        )
 
 
 def recover_stale_jobs() -> int:
@@ -117,10 +226,14 @@ def recover_stale_jobs() -> int:
                         SET status = 'queued', error_message = %s,
                             started_at = NULL, heartbeat_at = NULL,
                             next_attempt_at = %s, completed_at = NULL,
+                            processing_stage = 'queued', progress_percent = 15,
+                            progress_message = '중단된 작업을 다시 처리할 예정입니다.',
+                            progress_metadata = '{}'::jsonb,
+                            progress_updated_at = %s,
                             updated_at = %s
                         WHERE id = %s
                         """,
-                        (reason, now, now, job.job_id),
+                        (reason, now, now, now, job.job_id),
                     )
                     cursor.execute(
                         """
@@ -202,10 +315,14 @@ def claim_job(document_version_id: UUID | None = None) -> ClaimedJob | None:
                 UPDATE document_processing_jobs
                 SET status = 'processing', attempts = %s, started_at = %s,
                     heartbeat_at = %s, next_attempt_at = NULL,
-                    completed_at = NULL, error_message = NULL, updated_at = %s
+                    completed_at = NULL, error_message = NULL,
+                    processing_stage = 'inspecting', progress_percent = 15,
+                    progress_message = 'PDF 파일을 검사하고 있습니다.',
+                    progress_metadata = '{}'::jsonb,
+                    progress_updated_at = %s, updated_at = %s
                 WHERE id = %s
                 """,
-                (attempts, now, now, now, row["job_id"]),
+                (attempts, now, now, now, now, row["job_id"]),
             )
             cursor.execute(
                 """
@@ -267,6 +384,159 @@ def _process(job: ClaimedJob):
             "document_version_id": job.version_id,
             "original_filename": job.original_filename,
         },
+        progress_callback=lambda stage, percent, message, counters: _report_progress(
+            job,
+            stage,
+            percent,
+            message,
+            counters,
+        ),
+    )
+
+
+def _document_profile_sample(chunks: tuple[ProcessedChunk, ...]) -> str:
+    selected: list[str] = []
+    seen_hashes: set[str] = set()
+    signal_terms = (
+        "모델",
+        "형식",
+        "사양",
+        "정격",
+        "설치",
+        "장착",
+        "배선",
+        "결선",
+        "주의",
+        "경고",
+        "기능",
+        "설정",
+        "부품",
+        "구성",
+    )
+    for chunk in chunks[:12]:
+        if chunk.content_hash not in seen_hashes:
+            selected.append(chunk.content)
+            seen_hashes.add(chunk.content_hash)
+    for chunk in chunks[12:80]:
+        text = chunk.content
+        if chunk.content_hash in seen_hashes:
+            continue
+        if any(term in text for term in signal_terms):
+            selected.append(text)
+            seen_hashes.add(chunk.content_hash)
+        if len(selected) >= 20:
+            break
+    sample = "\n\n".join(selected)
+    return sample[:18000]
+
+
+def _extract_document_profile(
+    job: ClaimedJob,
+    processed_chunks: tuple[ProcessedChunk, ...],
+) -> DocumentProfileExtraction:
+    if not settings.document_profile_extraction_enabled:
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={"enabled": False, "status": "skipped"},
+        )
+    if not settings.qwen_service_url:
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={
+                "enabled": True,
+                "status": "skipped",
+                "reason": "QWEN_SERVICE_URL is not configured.",
+            },
+        )
+    sample_text = _document_profile_sample(processed_chunks)
+    if not sample_text.strip():
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={
+                "enabled": True,
+                "status": "skipped",
+                "reason": "No text sample was available.",
+            },
+        )
+    payload = {
+        "title": job.title,
+        "original_filename": job.original_filename,
+        "manufacturer": _metadata_value(job.metadata, "manufacturer", "제조사"),
+        "product_type": _metadata_value(job.metadata, "product_type", "제품군"),
+        "model_name": _metadata_value(
+            job.metadata,
+            "model_name",
+            "model_number",
+            "모델명",
+        ),
+        "document_type": job.document_type,
+        "sample_text": sample_text,
+    }
+    url = f"{settings.qwen_service_url}/v1/document-profile"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "true",
+    }
+    if settings.qwen_api_key:
+        headers["Authorization"] = f"Bearer {settings.qwen_api_key}"
+    request = Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=settings.qwen_timeout_seconds) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        logger.warning(
+            "Qwen document profile request failed document_id=%s status=%s detail=%s",
+            job.document_id,
+            exc.code,
+            detail,
+        )
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={
+                "enabled": True,
+                "status": "failed",
+                "reason": f"HTTP {exc.code}: {detail}",
+            },
+        )
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Qwen document profile request failed document_id=%s error=%s",
+            job.document_id,
+            exc,
+        )
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={
+                "enabled": True,
+                "status": "failed",
+                "reason": str(exc)[:300],
+            },
+        )
+    profile = body.get("document_profile") if isinstance(body, dict) else None
+    if not isinstance(profile, dict):
+        return DocumentProfileExtraction(
+            profile=None,
+            metadata={
+                "enabled": True,
+                "status": "failed",
+                "reason": "Response did not contain document_profile.",
+            },
+        )
+    return DocumentProfileExtraction(
+        profile=profile,
+        metadata={
+            "enabled": True,
+            "status": "ready",
+            "model": body.get("model"),
+            "schema_version": 1,
+        },
     )
 
 
@@ -310,12 +580,72 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
         )
         return
 
-    vectors = embedder.encode_many([chunk.content for chunk in processed.chunks])
+    total_chunks = len(processed.chunks)
+    base_counters = {
+        "processed_pages": processed.page_count,
+        "total_pages": processed.page_count,
+        "processed_chunks": total_chunks,
+        "total_chunks": total_chunks,
+        "embedded_chunks": 0,
+    }
+    _report_progress(
+        job,
+        "chunking",
+        60,
+        "문서 구조화 메타데이터를 확인하고 있습니다.",
+        base_counters,
+        force=True,
+    )
+    profile_extraction = _extract_document_profile(job, processed.chunks)
+    processing_metadata = {
+        **processed.processing_metadata,
+        "document_profile_extraction": profile_extraction.metadata,
+    }
+    _report_progress(
+        job,
+        "embedding",
+        65,
+        f"문서 청크 {total_chunks}개의 임베딩을 생성하고 있습니다.",
+        base_counters,
+        force=True,
+    )
+    batch_size = max(1, settings.worker_embedding_batch_size)
+    vector_batches: list[np.ndarray] = []
+    for start in range(0, total_chunks, batch_size):
+        end = min(start + batch_size, total_chunks)
+        vector_batches.append(
+            embedder.encode_many(
+                [chunk.content for chunk in processed.chunks[start:end]]
+            )
+        )
+        percent = 65 + int((end / total_chunks) * 25)
+        _report_progress(
+            job,
+            "embedding",
+            percent,
+            f"문서 청크 임베딩 생성 중 · {end}/{total_chunks}",
+            {
+                **base_counters,
+                "embedded_chunks": end,
+            },
+        )
+    vectors = np.concatenate(vector_batches, axis=0)
     if len(vectors.shape) != 2 or vectors.shape[0] != len(processed.chunks):
         raise RuntimeError("Embedding model returned an invalid result count.")
     if vectors.shape[1] <= 0:
         raise RuntimeError("Embedding model returned an invalid dimension.")
 
+    _report_progress(
+        job,
+        "persisting",
+        90,
+        "청크와 임베딩을 DB에 저장하고 있습니다.",
+        {
+            **base_counters,
+            "embedded_chunks": total_chunks,
+        },
+        force=True,
+    )
     now = datetime.now(timezone.utc)
     with _connect() as connection:
         with connection.cursor() as cursor:
@@ -354,6 +684,47 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
                         int(vectors.shape[1]),
                     ),
                 )
+                persisted = index + 1
+                _report_progress(
+                    job,
+                    "persisting",
+                    90 + int((persisted / total_chunks) * 8),
+                    f"청크와 임베딩 DB 저장 중 · {persisted}/{total_chunks}",
+                    {
+                        **base_counters,
+                        "embedded_chunks": total_chunks,
+                    },
+                )
+            _report_progress(
+                job,
+                "validating",
+                98,
+                "저장된 청크와 임베딩을 검증하고 있습니다.",
+                {
+                    **base_counters,
+                    "embedded_chunks": total_chunks,
+                },
+                force=True,
+            )
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS stored_count,
+                       COUNT(*) FILTER (
+                           WHERE embedding_status = 'ready'
+                             AND embedding IS NOT NULL
+                       ) AS ready_count
+                FROM document_chunks
+                WHERE document_version_id = %s
+                """,
+                (job.version_id,),
+            )
+            verification = cursor.fetchone()
+            stored_count = int(verification["stored_count"])
+            ready_count = int(verification["ready_count"])
+            if stored_count != total_chunks or ready_count != total_chunks:
+                raise RuntimeError(
+                    "Stored chunk and embedding verification failed."
+                )
             cursor.execute(
                 """
                 UPDATE document_versions
@@ -364,7 +735,7 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
                 """,
                 (
                     processed.page_count,
-                    Jsonb(processed.processing_metadata),
+                    Jsonb(processing_metadata),
                     now,
                     job.version_id,
                 ),
@@ -374,20 +745,65 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
                 UPDATE document_processing_jobs
                 SET status = 'completed', completed_at = %s,
                     heartbeat_at = %s, next_attempt_at = NULL,
-                    error_message = NULL, updated_at = %s
+                    error_message = NULL,
+                    processing_stage = 'review_required',
+                    progress_percent = 100,
+                    progress_message =
+                        'PDF 처리가 완료되었습니다. 관리자 승인이 필요합니다.',
+                    progress_metadata = %s,
+                    progress_updated_at = %s,
+                    updated_at = %s
                 WHERE id = %s
                 """,
-                (now, now, now, job.job_id),
+                (
+                    now,
+                    now,
+                    Jsonb(
+                        {
+                            **base_counters,
+                            "embedded_chunks": total_chunks,
+                        }
+                    ),
+                    now,
+                    now,
+                    job.job_id,
+                ),
             )
             cursor.execute(
-                """
-                UPDATE documents
-                SET lifecycle_status = 'review_required', updated_at = %s
-                WHERE id = %s
-                  AND current_version_id IS NULL
-                  AND lifecycle_status <> 'deleted'
-                """,
-                (now, job.document_id),
+                (
+                    """
+                    UPDATE documents
+                    SET lifecycle_status = 'review_required',
+                        metadata = COALESCE(metadata, '{}'::jsonb) || %s,
+                        updated_at = %s
+                    WHERE id = %s
+                      AND current_version_id IS NULL
+                      AND lifecycle_status <> 'deleted'
+                    """
+                    if profile_extraction.profile is not None
+                    else """
+                    UPDATE documents
+                    SET lifecycle_status = 'review_required', updated_at = %s
+                    WHERE id = %s
+                      AND current_version_id IS NULL
+                      AND lifecycle_status <> 'deleted'
+                    """
+                ),
+                (
+                    (
+                        Jsonb(
+                            {
+                                "document_profile": profile_extraction.profile,
+                                "document_profile_schema_version": 1,
+                                "document_profile_source": "qwen",
+                            }
+                        ),
+                        now,
+                        job.document_id,
+                    )
+                    if profile_extraction.profile is not None
+                    else (now, job.document_id)
+                ),
             )
             _audit(
                 cursor,
@@ -398,21 +814,23 @@ def complete_job(job: ClaimedJob, embedder: BgeM3Embedder) -> None:
                     "attempt": job.attempts,
                     "chunk_count": len(processed.chunks),
                     "page_count": processed.page_count,
-                    **_processing_audit_payload(processed.processing_metadata),
+                    **_processing_audit_payload(processing_metadata),
                 },
             )
         connection.commit()
-    log_method = logger.warning if processed.processing_metadata.get("fallback_used") else logger.info
+    with _progress_lock:
+        _last_progress_write.pop(job.job_id, None)
+    log_method = logger.warning if processing_metadata.get("fallback_used") else logger.info
     log_method(
         "PDF processing completed document_id=%s document_version_id=%s "
         "filename=%s extractor=%s extractor_version=%s fallback_used=%s ocr_used=%s",
         job.document_id,
         job.version_id,
         job.original_filename,
-        processed.processing_metadata.get("extractor"),
-        processed.processing_metadata.get("extractor_version"),
-        bool(processed.processing_metadata.get("fallback_used")),
-        bool(processed.processing_metadata.get("ocr_used")),
+        processing_metadata.get("extractor"),
+        processing_metadata.get("extractor_version"),
+        bool(processing_metadata.get("fallback_used")),
+        bool(processing_metadata.get("ocr_used")),
     )
 
 
@@ -436,6 +854,14 @@ def _mark_final_failure(
     now: datetime,
     processing_metadata: dict[str, Any] | None = None,
 ) -> None:
+    failure_stage = (
+        "ocr_required" if version_status == "ocr_required" else "failed"
+    )
+    progress_message = (
+        "텍스트를 확인할 수 없어 OCR 처리가 필요합니다."
+        if version_status == "ocr_required"
+        else "PDF 처리에 실패했습니다. 문서 상태와 Worker 로그를 확인해 주세요."
+    )
     cursor.execute(
         """
         UPDATE document_versions
@@ -456,10 +882,21 @@ def _mark_final_failure(
         """
         UPDATE document_processing_jobs
         SET status = 'failed', error_message = %s, completed_at = %s,
-            heartbeat_at = %s, next_attempt_at = NULL, updated_at = %s
+            heartbeat_at = %s, next_attempt_at = NULL,
+            processing_stage = %s, progress_message = %s,
+            progress_updated_at = %s, updated_at = %s
         WHERE id = %s
         """,
-        (reason, now, now, now, job.job_id),
+        (
+            reason,
+            now,
+            now,
+            failure_stage,
+            progress_message,
+            now,
+            now,
+            job.job_id,
+        ),
     )
     cursor.execute(
         """
@@ -515,10 +952,14 @@ def mark_failed(
                     SET status = 'queued', error_message = %s,
                         started_at = NULL, heartbeat_at = NULL,
                         next_attempt_at = %s, completed_at = NULL,
+                        processing_stage = 'queued', progress_percent = 15,
+                        progress_message = '처리 오류로 재시도를 기다리고 있습니다.',
+                        progress_metadata = '{}'::jsonb,
+                        progress_updated_at = %s,
                         updated_at = %s
                     WHERE id = %s
                     """,
-                    (safe_reason, next_attempt_at, now, job.job_id),
+                    (safe_reason, next_attempt_at, now, now, job.job_id),
                 )
                 cursor.execute(
                     """
@@ -559,6 +1000,8 @@ def mark_failed(
                     },
                 )
         connection.commit()
+    with _progress_lock:
+        _last_progress_write.pop(job.job_id, None)
 
 
 def _failure_processing_metadata(error: BaseException) -> dict[str, Any] | None:
@@ -660,8 +1103,16 @@ def run_forever() -> None:
             docling_version,
             docling_runtime.artifacts_path or "default",
             docling_runtime.offline,
-            docling_runtime.max_file_bytes,
-            docling_runtime.max_pages,
+            (
+                docling_runtime.max_file_bytes
+                if docling_runtime.max_file_bytes is not None
+                else "unlimited"
+            ),
+            (
+                docling_runtime.max_pages
+                if docling_runtime.max_pages is not None
+                else "unlimited"
+            ),
             docling_runtime.num_threads,
         )
     embedder = BgeM3Embedder(settings)

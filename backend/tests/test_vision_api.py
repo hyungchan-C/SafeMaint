@@ -6,9 +6,11 @@ from fastapi import HTTPException, UploadFile
 
 from app.api.routes.vision import (
     _current_catalog_id,
+    _forward_file,
     _parse_document_ids,
     _read_upload,
 )
+from app.api.routes import vision as vision_routes
 from app.db.models import Document, User
 from app.schemas.chat import RetrievalAccessScope
 from app.services.document_access import can_access_document
@@ -89,6 +91,53 @@ def test_vision_upload_rejects_oversize_and_spoofed_images() -> None:
     with pytest.raises(HTTPException) as error:
         _read_upload(spoofed, limit=100, expected="image")
     assert error.value.status_code == 422
+
+
+def test_stored_pdf_is_forwarded_as_file_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "catalog.pdf"
+    path.write_bytes(b"%PDF-streamed")
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        is_error = False
+
+        @staticmethod
+        def json() -> dict[str, str]:
+            return {"catalog_id": "streamed"}
+
+    class FakeClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            pass
+
+        @staticmethod
+        def post(_url, *, files, **_kwargs):
+            captured["file"] = files["file"][1]
+            captured["content"] = files["file"][1].read()
+            return FakeResponse()
+
+    monkeypatch.setattr(vision_routes, "Client", FakeClient)
+
+    result = _forward_file(
+        "/v1/catalog/index",
+        filename="catalog.pdf",
+        file_path=path,
+        content_type="application/pdf",
+        fallback="failed",
+    )
+
+    assert result == {"catalog_id": "streamed"}
+    assert captured["content"] == b"%PDF-streamed"
+    assert not isinstance(captured["file"], bytes)
+    assert captured["file"].closed is True  # type: ignore[union-attr]
 
 
 def test_current_vision_catalog_can_be_matched() -> None:

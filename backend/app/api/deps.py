@@ -83,10 +83,10 @@ def get_retrieval_access_scope(
 ) -> RetrievalAccessScope:
     """Derive trusted RAG access from DB roles and active site assignments."""
 
-    if current_user is None or not user_has_permission(
-        db, current_user.id, "document.read"
-    ):
+    if current_user is None:
         return RetrievalAccessScope()
+    if not user_has_permission(db, current_user.id, "document.read"):
+        return RetrievalAccessScope(requester_user_id=current_user.id)
 
     role_codes = set(
         db.scalars(

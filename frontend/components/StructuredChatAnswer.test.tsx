@@ -92,6 +92,7 @@ describe("StructuredChatAnswer", () => {
       pre_checks: [],
       hazards: [{ name: "오검출", content: "검출 성능 저하", evidence_chunk_ids: ["chunk-1"] }],
       manual_steps: [{ content: "설치 위치 확인", evidence_chunk_ids: ["chunk-1"] }],
+      precautions: [],
       stop_conditions: [{ content: "모델 확인 불가", evidence_chunk_ids: ["chunk-1"] }],
       related_regulations_and_incidents: [],
       evidence_chunk_ids: ["chunk-1"],
@@ -99,8 +100,8 @@ describe("StructuredChatAnswer", () => {
       additional_information_needed: [],
     });
 
-    expect(screen.getByText("위험성평가")).toBeInTheDocument();
-    expect(screen.getByText("별도 위험성평가 필요")).toBeInTheDocument();
+    expect(screen.queryByText("위험성평가")).not.toBeInTheDocument();
+    expect(screen.queryByText("별도 위험성평가 필요")).not.toBeInTheDocument();
     expect(screen.getByText("4. 즉시 작업을 중지해야 하는 조건")).toBeInTheDocument();
     // TBM 체크리스트는 이제 이 컴포넌트가 아니라 상단의 전용 카드에서 렌더링된다.
     expect(screen.queryByText("TBM 체크리스트")).not.toBeInTheDocument();

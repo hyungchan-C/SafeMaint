@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class UploadDocumentResponse(BaseModel):
@@ -28,6 +28,11 @@ class UserDocumentSummary(BaseModel):
     processing_warning: str | None = None
     failure_reason: str | None = None
     page_count: int | None = None
+    processing_stage: str | None = None
+    progress_percent: int | None = None
+    progress_message: str | None = None
+    progress_metadata: dict[str, int] = Field(default_factory=dict)
+    processing_attempt: int = 0
     created_at: datetime
 
 
@@ -59,3 +64,22 @@ class ApproveDocumentResponse(BaseModel):
     version_number: int
     status: str
     is_active: bool
+
+
+class DocumentProcessingProgressResponse(BaseModel):
+    document_id: UUID
+    document_version_id: UUID
+    filename: str
+    status: str
+    stage: str
+    attempt: int = 0
+    progress_percent: int
+    message: str
+    processed_pages: int = 0
+    total_pages: int = 0
+    processed_chunks: int = 0
+    total_chunks: int = 0
+    embedded_chunks: int = 0
+    updated_at: datetime
+    is_terminal: bool
+    rag_ready: bool

@@ -73,15 +73,26 @@ GENERIC_QUERY_TERMS = frozenset(
         "설치하려고",
         "설치하기",
         "주의사항",
+        "주의",
         "절차",
         "알려줘",
         "알려주세요",
+        "알려",
+        "설명",
         "어디에",
         "쓰는",
+        "사용",
+        "용도",
         "거야",
         "할거야",
         "예정",
         "예정이야",
+        "뭐야",
+        "무엇",
+        "무엇이야",
+        "뭔지",
+        "뭐하는",
+        "정의",
         "해주세요",
         "하려고",
         "합니다",
@@ -91,8 +102,35 @@ GENERIC_QUERY_TERMS = frozenset(
         "어떻게",
         "replacement",
         "installation",
+        "어디",
+        "확인사항",
     }
 )
+MAINTENANCE_OCCURRENCE_EXPANSIONS = {
+    "끼임": ("끼임", "협착", "방호", "인터락", "위험구역"),
+    "감전": ("감전", "전원", "차단", "절연", "접지"),
+    "화재": ("화재", "점화", "과열", "소화", "가연"),
+    "폭발": ("폭발", "압력", "가스", "인화", "점화"),
+    "떨어짐": ("떨어짐", "추락", "고소", "난간", "발판"),
+    "넘어짐": ("넘어짐", "전도", "미끄러짐", "통로", "바닥"),
+    "맞음": ("맞음", "낙하", "비래", "충돌", "보호구"),
+    "부딪힘": ("부딪힘", "충돌", "이동", "접근", "시야"),
+    "깔림": ("깔림", "전도", "하중", "지지", "고정"),
+    "질식": ("질식", "밀폐", "환기", "산소", "가스"),
+    "중독": ("중독", "유해", "가스", "환기", "노출"),
+    "베임": ("베임", "절단", "날", "칼날", "보호구"),
+    "찔림": ("찔림", "날카로운", "파편", "보호구", "정리"),
+}
+MAINTENANCE_ACTION_QUERY_EXPANSIONS = {
+    "청소": ("청소", "정지", "전원", "차단", "잠금", "재가동", "끼임", "협착", "사고", "예방"),
+    "세척": ("세척", "정지", "전원", "차단", "잠금", "재가동", "끼임", "협착", "사고", "예방"),
+    "점검": ("점검", "정지", "차단", "방호", "인터락", "위험", "사고", "예방"),
+    "검사": ("검사", "정지", "차단", "방호", "인터락", "위험", "사고", "예방"),
+    "교체": ("교체", "정지", "전원", "차단", "잠금", "격리", "끼임", "협착", "사고", "예방"),
+    "정비": ("정비", "정지", "전원", "차단", "잠금", "격리", "끼임", "협착", "사고", "예방"),
+    "보수": ("보수", "정지", "전원", "차단", "잠금", "격리", "끼임", "협착", "사고", "예방"),
+    "설치": ("설치", "고정", "위치", "정격", "배선", "오동작", "주의", "기준"),
+}
 MAINTENANCE_ACTION_TERMS = frozenset(
     {
         "교체",
@@ -126,6 +164,44 @@ MAINTENANCE_ACTION_TERMS = frozenset(
         "lock",
     }
 )
+SAFETY_CONTROL_ACTION_TERMS = frozenset(
+    {
+        "차단",
+        "격리",
+        "잠금",
+        "isolate",
+        "lock",
+    }
+)
+KOREAN_TOKEN_SUFFIXES = (
+    "으로는",
+    "에서는",
+    "에게는",
+    "이라는",
+    "이란",
+    "인가요",
+    "입니다",
+    "이에요",
+    "이야",
+    "에서",
+    "에게",
+    "으로",
+    "부터",
+    "까지",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "의",
+    "에",
+    "로",
+    "과",
+    "와",
+    "도",
+    "만",
+)
 SAFETY_SIGNAL_TERMS = (
     "위험",
     "안전",
@@ -153,6 +229,108 @@ DOCUMENT_CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("procedure", ("설치", "점검", "검사", "정비", "보수", "배선", "설정", "교체", "절차", "install", "inspect", "maintenance", "wiring")),
     ("specification", ("사양", "규격", "모델", "구성", "정격", "치수", "spec", "model", "configuration")),
     ("troubleshooting", ("오류", "에러", "경고", "고장", "trouble", "error", "alarm")),
+)
+
+
+DOCUMENT_ALIAS_STOPWORDS = GENERIC_QUERY_TERMS | frozenset(
+    {
+        "manual",
+        "series",
+        "model",
+        "version",
+        "pdf",
+        "ko",
+        "kr",
+        "user",
+        "guide",
+        "catalog",
+        "제품",
+        "매뉴얼",
+        "사용설명서",
+        "취급설명서",
+        "설명서",
+        "카탈로그",
+        "시리즈",
+        "버전",
+        "문서",
+    }
+)
+DOCUMENT_ALIAS_SUFFIXES = (
+    "센서",
+    "스위치",
+    "장치",
+    "모듈",
+    "컨트롤러",
+    "케이블",
+    "커튼",
+    "베어링",
+    "모터",
+    "펌프",
+    "밸브",
+    "실린더",
+    "로봇",
+    "컨베이어",
+    "프레스",
+    "브라켓",
+    "커버",
+    "기구",
+    "부품",
+    "컴포넌트",
+    "차단기",
+    "릴레이",
+    "드라이버",
+    "인버터",
+    "설비",
+    "장비",
+    "기계",
+)
+DOCUMENT_SPEC_TERMS = (
+    "정격",
+    "전원",
+    "전압",
+    "전류",
+    "배선",
+    "결선",
+    "검출",
+    "감지",
+    "거리",
+    "간격",
+    "이격",
+    "치수",
+    "토크",
+    "하중",
+    "회전",
+    "윤활",
+    "온도",
+    "습도",
+    "설치",
+    "장착",
+    "고정",
+    "체결",
+    "정렬",
+    "간섭",
+    "노이즈",
+    "오동작",
+    "고장",
+    "손상",
+    "보호",
+    "방호",
+    "차단",
+    "정지",
+    "시험",
+    "점검",
+    "설정",
+)
+DOCUMENT_INFO_QUERY_TERMS = (
+    "정의",
+    "역할",
+    "기능",
+    "용도",
+    "구성",
+    "사양",
+    "모델",
+    "부품",
+    "사용",
 )
 
 
@@ -210,17 +388,38 @@ def scope_sql(
 
 
 def tokenize(value: str) -> tuple[str, ...]:
-    return tuple(
-        dict.fromkeys(
-            token.casefold()
-            for token in re.findall(r"[0-9A-Za-z가-힣_-]+", value)
-            if len(token) >= 2
-        )
-    )
+    tokens: list[str] = []
+    for token in re.findall(r"[0-9A-Za-z가-힣_-]+", value):
+        normalized = token.casefold().strip("_-")
+        if len(normalized) < 2:
+            continue
+        stripped = _strip_korean_suffix(normalized)
+        if stripped != normalized and len(stripped) >= 2:
+            tokens.append(stripped)
+        else:
+            tokens.append(normalized)
+    return tuple(dict.fromkeys(tokens))
+
+
+def _strip_korean_suffix(token: str) -> str:
+    if not re.search(r"[가-힣]", token):
+        return token
+    for suffix in KOREAN_TOKEN_SUFFIXES:
+        if token.endswith(suffix) and len(token) - len(suffix) >= 2:
+            return token[: -len(suffix)]
+    return token
 
 
 def _term_matches(term: str, text: str) -> bool:
+    if re.fullmatch(r"[a-z]{1,3}", term):
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text):
+            return True
+        return f"{term}□" in text or f"{term}_" in text or f"{term}-" in text
     if term in text:
+        return True
+    compact_term = _compact_for_phrase(term)
+    compact_text = _compact_for_phrase(text)
+    if len(compact_term) >= 4 and compact_term in compact_text:
         return True
     return len(term) >= 4 and any(
         len(candidate) >= 4 and (candidate in term or term in candidate)
@@ -246,6 +445,68 @@ def action_terms(value: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(terms))
 
 
+def _generic_query_expansion_terms(value: str) -> tuple[str, ...]:
+    lowered = value.casefold()
+    terms: list[str] = list(topic_terms(value))
+    if any(action in lowered for action in ("설치", "장착", "고정", "체결", "install")):
+        terms.extend(
+            (
+                "설치",
+                "장착",
+                "고정",
+                "체결",
+                "위치",
+                "간격",
+                "거리",
+                "정격",
+                "전원",
+                "배선",
+                "결선",
+                "환경",
+                "오동작",
+                "주의",
+                "기준",
+                "치수",
+                "토크",
+                "시험",
+                "확인",
+            )
+        )
+    if any(action in lowered for action in ("점검", "검사", "정비", "보수", "교체", "청소", "세척")):
+        terms.extend(
+            (
+                "점검",
+                "검사",
+                "정비",
+                "보수",
+                "교체",
+                "청소",
+                "정지",
+                "차단",
+                "잠금",
+                "격리",
+                "재가동",
+                "방호",
+                "보호",
+                "위험",
+                "사고",
+                "예방",
+            )
+        )
+    if any(term in lowered for term in ("뭐야", "무엇", "정의", "설명", "알려", "용도", "사용")):
+        terms.extend(DOCUMENT_INFO_QUERY_TERMS)
+    terms.extend(term for term in DOCUMENT_SPEC_TERMS if term in lowered)
+    return tuple(dict.fromkeys(terms))
+
+
+def maintenance_query_expansions(value: str) -> tuple[str, ...]:
+    terms: list[str] = []
+    for action in action_terms(value):
+        terms.extend(MAINTENANCE_ACTION_QUERY_EXPANSIONS.get(action, ()))
+    terms.extend(_generic_query_expansion_terms(value))
+    return tuple(dict.fromkeys(terms))
+
+
 def safety_signal_score(text: str) -> float:
     if not text:
         return 0.0
@@ -261,6 +522,22 @@ def _compact_for_phrase(value: str) -> str:
     return re.sub(r"[\s_-]+", "", value.casefold())
 
 
+def domain_phrase_group_indexes(value: str) -> tuple[int, ...]:
+    return ()
+
+
+def domain_phrase_query_terms(value: str) -> tuple[str, ...]:
+    return _generic_query_expansion_terms(value)
+
+
+def _domain_phrase_matches(indexes: Sequence[int], text: str) -> bool:
+    return False
+
+
+def _domain_phrase_negative_matches(indexes: Sequence[int], text: str) -> bool:
+    return False
+
+
 def _topic_phrase_terms(value: str) -> tuple[str, ...]:
     return topic_terms(value)[:2]
 
@@ -272,6 +549,25 @@ def _topic_phrase_matches(terms: Sequence[str], text: str) -> bool:
     return bool(compact_phrase) and compact_phrase in _compact_for_phrase(text)
 
 
+def _topic_match_threshold(term_count: int) -> int:
+    # A single short/generic term (e.g. "커튼") matching anywhere is not
+    # enough evidence of relevance on its own -- it also matches unrelated
+    # compound words like "커튼월"/"커튼박스". Require every term when there
+    # are only one or two, and a clear majority (>=60%) for longer phrases,
+    # so an isolated coincidental hit can no longer admit an unrelated
+    # document.
+    if term_count <= 2:
+        return term_count
+    return max(2, -(-term_count * 3 // 5))
+
+
+def _maintenance_expansion_match(query_terms: Sequence[str], text: str) -> bool:
+    if not query_terms:
+        return False
+    matched = sum(1 for term in query_terms if _term_matches(term, text))
+    return matched >= min(2, len(query_terms))
+
+
 def _combined_row_text(row: dict[str, Any]) -> str:
     return " ".join(
         str(value)
@@ -280,6 +576,7 @@ def _combined_row_text(row: dict[str, Any]) -> str:
             row["section"],
             row["original_filename"],
             row["source_type"],
+            row.get("document_metadata"),
             row["content"],
         )
         if value
@@ -326,6 +623,296 @@ def topics_overlap(left: Sequence[str], right: Sequence[str]) -> bool:
     return any(_term_matches(term, right_text) for term in left) or any(
         _term_matches(term, left_text) for term in right
     )
+
+
+def expanded_occurrence_terms(
+    occurrence_type: str | None,
+    intent: str | None,
+) -> tuple[str, ...]:
+    # "기타" is the classifier's catch-all "unclassified" label, not an actual
+    # hazard type. Using it as a keyword would let the very common word "기타"
+    # (matching any document with an "기타 ..." section heading) bypass the
+    # topic-relevance filter for completely unrelated documents.
+    if not occurrence_type or occurrence_type == "기타":
+        return ()
+    if intent == "maintenance_guide":
+        return MAINTENANCE_OCCURRENCE_EXPANSIONS.get(
+            occurrence_type,
+            (occurrence_type,),
+        )
+    return (occurrence_type,)
+
+
+def _document_profile_text(profile: dict[str, Any]) -> str:
+    return " ".join(
+        str(profile.get(key) or "")
+        for key in ("title", "original_filename", "metadata", "source_type", "sample_text")
+    )
+
+
+DOCUMENT_PROFILE_FIELDS = (
+    "product_names",
+    "model_names",
+    "aliases",
+    "equipment",
+    "components",
+    "supported_tasks",
+    "safety_topics",
+    "summary_points",
+    "document_keywords",
+)
+
+
+def _metadata_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _document_profile_data(profile: dict[str, Any]) -> dict[str, Any]:
+    metadata = _metadata_dict(profile.get("metadata"))
+    value = profile.get("document_profile")
+    if isinstance(value, dict):
+        return value
+    value = metadata.get("document_profile")
+    return value if isinstance(value, dict) else {}
+
+
+def _profile_values(profile: dict[str, Any], *fields: str) -> tuple[str, ...]:
+    data = _document_profile_data(profile)
+    values: list[str] = []
+    for field in fields:
+        raw_values = data.get(field)
+        if isinstance(raw_values, str):
+            raw_values = [raw_values]
+        if not isinstance(raw_values, list):
+            continue
+        for raw_value in raw_values:
+            value = _normalized_document_alias(str(raw_value or ""))
+            if _is_useful_document_alias(value) and value not in values:
+                values.append(value)
+    return tuple(values)
+
+
+def _profile_text(profile: dict[str, Any]) -> str:
+    data = _document_profile_data(profile)
+    pieces: list[str] = []
+    for field in DOCUMENT_PROFILE_FIELDS:
+        values = data.get(field)
+        if isinstance(values, list):
+            pieces.extend(str(value) for value in values if value)
+        elif isinstance(values, str):
+            pieces.append(values)
+    return " ".join(pieces)
+
+
+def _row_document_profile(row: dict[str, Any]) -> dict[str, Any] | None:
+    value = row.get("document_profile")
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    metadata = _metadata_dict(row.get("document_metadata"))
+    profile = metadata.get("document_profile")
+    return profile if isinstance(profile, dict) else None
+
+
+def _normalized_document_alias(value: str) -> str:
+    normalized = " ".join(value.split()).strip(" .,:;·-/[]()")
+    normalized = re.sub(r"^(?:제품|문서|매뉴얼|시리즈)\s+", "", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
+
+
+def _alias_tokens(value: str) -> tuple[str, ...]:
+    return tuple(
+        token.casefold()
+        for token in re.findall(r"[0-9A-Za-z가-힣□_-]+", value)
+        if len(token) >= 2
+    )
+
+
+def _is_useful_document_alias(value: str) -> bool:
+    normalized = _normalized_document_alias(value)
+    if len(normalized) < 2 or len(normalized) > 48:
+        return False
+    tokens = _alias_tokens(normalized)
+    if not tokens:
+        return False
+    if all(token in DOCUMENT_ALIAS_STOPWORDS for token in tokens):
+        return False
+    if normalized.casefold() in DOCUMENT_ALIAS_STOPWORDS:
+        return False
+    if normalized in {"제품", "장비", "설비", "기계", "문서", "매뉴얼", "사용 설명서"}:
+        return False
+    return True
+
+
+def _document_alias_candidates(text: str) -> tuple[str, ...]:
+    suffix_pattern = "|".join(re.escape(suffix) for suffix in DOCUMENT_ALIAS_SUFFIXES)
+    candidates: list[str] = []
+    for match in re.finditer(
+        rf"([0-9A-Za-z가-힣□·/()+_-]+(?:\s+[0-9A-Za-z가-힣□·/()+_-]+){{0,4}}\s*(?:{suffix_pattern}))",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        candidates.append(match.group(1))
+    for match in re.finditer(
+        r"\b((?:AC|DC)?\s*\d+\s*선식|[0-9]+\s*[-~]\s*[0-9]+\s*V|[0-9]+\s*wire)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        candidates.append(match.group(1))
+    return tuple(candidates)
+
+
+def _document_model_aliases(text: str) -> tuple[str, ...]:
+    aliases: list[str] = []
+
+    def add(value: str) -> None:
+        normalized = _normalized_document_alias(value)
+        if _is_useful_document_alias(normalized) and normalized not in aliases:
+            aliases.append(normalized)
+
+    metadata = text.replace("_", " ").replace("-", " ")
+    for token in re.findall(r"(?<![A-Za-z0-9])([A-Za-z]{1,8}[A-Za-z0-9]{0,16})(?![A-Za-z0-9])", metadata):
+        lowered = token.casefold()
+        if lowered in DOCUMENT_ALIAS_STOPWORDS:
+            continue
+        if token.isupper() or any(char.isdigit() for char in token):
+            add(token)
+            if 2 <= len(token) <= 8:
+                add(f"{token} Series")
+    for token in re.findall(r"(?<![A-Za-z0-9])([A-Za-z]{1,8}[A-Za-z0-9_-]{1,24})(?![A-Za-z0-9])", text):
+        lowered = token.casefold().strip("_-")
+        if lowered in DOCUMENT_ALIAS_STOPWORDS:
+            continue
+        if any(char.isdigit() for char in token) or token.upper() == token:
+            add(token)
+    return tuple(aliases)
+
+
+def _document_profile_aliases(profile: dict[str, Any]) -> tuple[str, ...]:
+    text = _document_profile_text(profile)
+    aliases: list[str] = []
+
+    def add(*values: str) -> None:
+        for value in values:
+            normalized = _normalized_document_alias(value)
+            if _is_useful_document_alias(normalized) and normalized not in aliases:
+                aliases.append(normalized)
+
+    title = str(profile.get("title") or "")
+    filename = str(profile.get("original_filename") or "")
+    metadata_text = f"{title} {filename}"
+    add(
+        *_profile_values(
+            profile,
+            "product_names",
+            "model_names",
+            "aliases",
+            "components",
+            "equipment",
+        )
+    )
+    for alias in _document_model_aliases(metadata_text):
+        add(alias)
+    for alias in _document_alias_candidates(metadata_text):
+        add(alias)
+    for alias in _document_alias_candidates(text[:8000]):
+        add(alias)
+    for term in DOCUMENT_SPEC_TERMS:
+        if term in text:
+            add(term)
+    return tuple(dict.fromkeys(aliases))
+
+
+def _document_profile_score(
+    question: str,
+    profile: dict[str, Any],
+    aliases: Sequence[str],
+) -> float:
+    question_text = question.casefold()
+    question_compact = _compact_for_phrase(question_text)
+    profile_text = _document_profile_text(profile).casefold()
+    structured_profile_text = _profile_text(profile).casefold()
+    metadata_text = " ".join(
+        str(profile.get(key) or "")
+        for key in ("title", "original_filename", "metadata", "source_type")
+    ).casefold()
+    structured_aliases = _profile_values(
+        profile,
+        "product_names",
+        "model_names",
+        "aliases",
+    )
+    score = 0.0
+    for alias in structured_aliases:
+        alias_compact = _compact_for_phrase(alias)
+        if alias_compact and alias_compact in question_compact:
+            score += 4.0 + min(len(alias_compact), 24) * 0.05
+    for alias in aliases:
+        alias_compact = _compact_for_phrase(alias)
+        if not alias_compact:
+            continue
+        if alias_compact in question_compact:
+            score += 2.4 + min(len(alias_compact), 20) * 0.04
+        elif alias_compact in _compact_for_phrase(profile_text):
+            alias_terms = topic_terms(alias)
+            question_terms = topic_terms(question)
+            if alias_terms and topics_overlap(alias_terms, question_terms):
+                score += 0.45
+
+    for term in topic_terms(question):
+        if _term_matches(term, metadata_text):
+            score += 1.2
+        elif _term_matches(term, structured_profile_text):
+            score += 1.0
+        elif _term_matches(term, profile_text):
+            score += 0.55
+    if "series" in question_text and any(
+        _compact_for_phrase(alias) in question_compact for alias in aliases
+    ):
+        score += 0.7
+    return score
+
+
+def _document_route_query_terms(
+    profile: dict[str, Any],
+    aliases: Sequence[str],
+) -> tuple[str, ...]:
+    terms: list[str] = []
+    terms.extend(
+        _profile_values(
+            profile,
+            "product_names",
+            "model_names",
+            "aliases",
+            "components",
+            "equipment",
+            "supported_tasks",
+            "safety_topics",
+            "document_keywords",
+        )
+    )
+    for alias in aliases:
+        if 2 <= len(alias) <= 36:
+            terms.append(alias)
+    profile_text = _document_profile_text(profile)
+    terms.extend(term for term in DOCUMENT_SPEC_TERMS if term in profile_text)
+    terms.extend(topic_terms(str(profile.get("title") or ""))[:8])
+    terms.extend(topic_terms(str(profile.get("original_filename") or ""))[:8])
+    return tuple(dict.fromkeys(terms))[:24]
 
 
 class BgeM3Embedder:
@@ -410,15 +997,22 @@ class PgvectorRetriever:
                 or topics_overlap(question_topics, topic_terms(keyword))
             )
         ]
+        intent = request.analysis.question_intent if request.analysis else None
         occurrence_type = request.analysis.occurrence_type if request.analysis else None
-        include_occurrence_type = bool(
-            occurrence_type
-            and (
-                not question_topics
+        occurrence_terms = expanded_occurrence_terms(occurrence_type, intent)
+        if intent != "maintenance_guide" and occurrence_type:
+            occurrence_terms = (
+                occurrence_terms
+                if not question_topics
                 or topics_overlap(question_topics, topic_terms(occurrence_type))
+                else ()
             )
-        )
         values: list[str | None] = [request.question]
+        domain_alias_terms = domain_phrase_query_terms(
+            " ".join(value for value in (request.question, context_text) if value)
+        )
+        if domain_alias_terms:
+            values.append(" ".join(domain_alias_terms))
         if include_context:
             values.append(context_text)
         if request.analysis:
@@ -446,8 +1040,13 @@ class PgvectorRetriever:
             values.extend(
                 (
                     " ".join(relevant_targets),
-                    occurrence_type if include_occurrence_type else None,
+                    " ".join(occurrence_terms),
                     request.analysis.work_type,
+                    (
+                        " ".join(maintenance_query_expansions(request.question))
+                        if intent == "maintenance_guide"
+                        else None
+                    ),
                     " ".join(explicit_risks),
                     " ".join(request.analysis.energy_sources),
                     " ".join(relevant_analysis_keywords),
@@ -519,6 +1118,159 @@ class PgvectorRetriever:
                 cursor.execute(query, (*scope_parameters, self.settings.model_name))
                 return int(cursor.fetchone()[0])
 
+    def _route_selected_documents(
+        self,
+        request: InternalChatRequest,
+        source_types: tuple[str, ...] | None,
+        explicit_document_ids: tuple[UUID, ...] | None,
+    ) -> tuple[tuple[UUID, ...] | None, tuple[str, ...]]:
+        selected_documents = request.context.effective_document_ids()
+        if (
+            explicit_document_ids is not None
+            or len(selected_documents) <= 1
+            or request.context.selected_document_version_ids
+        ):
+            return None, ()
+        profiles = self._load_selected_document_profiles(
+            request,
+            selected_documents,
+            source_types,
+        )
+        if len(profiles) <= 1:
+            return None, ()
+
+        scored: list[tuple[float, dict[str, Any], tuple[str, ...]]] = []
+        for profile in profiles:
+            aliases = _document_profile_aliases(profile)
+            score = _document_profile_score(request.question, profile, aliases)
+            scored.append((score, profile, aliases))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        best_score, best_profile, best_aliases = scored[0]
+        second_score = scored[1][0] if len(scored) > 1 else 0.0
+        if best_score < 2.0 or best_score - second_score < 0.85:
+            return None, ()
+        try:
+            document_id = UUID(str(best_profile["document_id"]))
+        except ValueError:
+            return None, ()
+        return (document_id,), _document_route_query_terms(best_profile, best_aliases)
+
+    def _load_selected_document_profiles(
+        self,
+        request: InternalChatRequest,
+        selected_documents: Sequence[UUID],
+        source_types: tuple[str, ...] | None,
+    ) -> list[dict[str, Any]]:
+        allowed_source_types = tuple(source_types or MANUAL_DOCUMENT_TYPES)
+        query = """
+            SELECT
+                d.id::text AS document_id,
+                d.title,
+                d.metadata::text AS metadata,
+                d.metadata->'document_profile' AS document_profile,
+                d.document_type_code AS source_type,
+                dv.id::text AS document_version_id,
+                dv.original_filename,
+                COALESCE(sample.sample_text, '') AS sample_text
+            FROM documents d
+            JOIN document_types dt ON dt.code = d.document_type_code
+            LEFT JOIN document_versions dv
+              ON dv.document_id = d.id
+             AND (
+                  (
+                      d.lifecycle_status = 'active'
+                      AND (
+                          d.current_version_id = dv.id
+                          OR (d.current_version_id IS NULL AND dv.is_active = true)
+                      )
+                  )
+                  OR (
+                      d.lifecycle_status = 'review_required'
+                      AND dv.status = 'review_required'
+                      AND dv.uploaded_by_user_id = %s::uuid
+                      AND dv.version_number = (
+                          SELECT MAX(owner_version.version_number)
+                          FROM document_versions owner_version
+                          WHERE owner_version.document_id = d.id
+                            AND owner_version.status = 'review_required'
+                            AND owner_version.uploaded_by_user_id = %s::uuid
+                      )
+                  )
+             )
+            LEFT JOIN LATERAL (
+                SELECT string_agg(chunk.content, ' ' ORDER BY chunk.sort_bucket, chunk.chunk_index) AS sample_text
+                FROM (
+                    SELECT
+                        dc.content,
+                        dc.chunk_index,
+                        CASE
+                            WHEN COALESCE(dc.page_number, dc.page_start, 9999) <= 4 THEN 0
+                            ELSE 1
+                        END AS sort_bucket
+                    FROM document_chunks dc
+                    WHERE dc.document_id = d.id
+                      AND (dv.id IS NULL OR dc.document_version_id = dv.id)
+                      AND dc.embedding_status = 'ready'
+                      AND dc.embedding IS NOT NULL
+                      AND dc.embedding_model = %s
+                    ORDER BY
+                        CASE
+                            WHEN COALESCE(dc.page_number, dc.page_start, 9999) <= 4 THEN 0
+                            ELSE 1
+                        END,
+                        dc.chunk_index
+                    LIMIT 40
+                ) chunk
+            ) sample ON true
+            WHERE d.deleted_at IS NULL
+              AND d.id = ANY(%s::uuid[])
+              AND d.document_type_code = ANY(%s)
+              AND dt.is_active = true
+              AND (
+                  (
+                      d.lifecycle_status = 'active'
+                      AND (
+                          (
+                              dt.scope = 'public'
+                              AND d.access_level = 'public'
+                          )
+                          OR (
+                              %s
+                              AND dt.scope = 'company'
+                              AND (%s OR d.access_level <> 'private')
+                              AND (%s OR d.site_id::text = ANY(%s))
+                          )
+                      )
+                  )
+                  OR (
+                      d.lifecycle_status = 'review_required'
+                      AND dt.scope = 'company'
+                      AND dv.id IS NOT NULL
+                  )
+              )
+        """
+        with psycopg.connect(
+            psycopg_database_url(self.settings.database_url),
+            connect_timeout=5,
+            row_factory=dict_row,
+        ) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    query,
+                    (
+                        request.access_scope.requester_user_id,
+                        request.access_scope.requester_user_id,
+                        self.settings.model_name,
+                        list(selected_documents),
+                        list(allowed_source_types),
+                        request.access_scope.allow_company,
+                        request.access_scope.allow_private,
+                        request.access_scope.all_sites,
+                        request.access_scope.site_ids,
+                    ),
+                )
+                return list(cursor.fetchall())
+
     def _candidate_query(
         self,
         scope_clause: str,
@@ -532,6 +1284,8 @@ class PgvectorRetriever:
                     d.title,
                     d.document_type_code AS source_type,
                     dt.scope AS document_scope,
+                    d.metadata::text AS document_metadata,
+                    d.metadata->'document_profile' AS document_profile,
                     dv.id::text AS document_version_id,
                     dv.original_filename,
                     dv.version_number AS document_version,
@@ -638,6 +1392,8 @@ class PgvectorRetriever:
                 d.title,
                 d.document_type_code AS source_type,
                 dt.scope AS document_scope,
+                d.metadata::text AS document_metadata,
+                d.metadata->'document_profile' AS document_profile,
                 dv.id::text AS document_version_id,
                 dv.original_filename,
                 dv.version_number AS document_version,
@@ -760,11 +1516,30 @@ class PgvectorRetriever:
                 ),
             )
             return []
+        routed_document_ids, route_query_terms = self._route_selected_documents(
+            request,
+            resolved_source_types,
+            resolved_document_ids,
+        )
+        if routed_document_ids is not None:
+            resolved_document_ids = routed_document_ids
+            request = request.model_copy(
+                update={
+                    "context": request.context.model_copy(
+                        update={
+                            "selected_document_ids": list(routed_document_ids),
+                            "selected_document_version_ids": [],
+                        }
+                    )
+                }
+            )
         scope_clause, scope_parameters = scope_sql(
             resolved_source_types,
             resolved_document_ids,
         )
         search_query = self.build_search_query(request)
+        if route_query_terms:
+            search_query = f"{search_query} {' '.join(route_query_terms)}"
         vector = self.embedder.encode(search_query)
         selected_documents = request.context.effective_document_ids()
         selected_versions = tuple(request.context.selected_document_version_ids)
@@ -795,13 +1570,8 @@ class PgvectorRetriever:
             self.settings.model_name,
             int(vector.shape[0]),
             self.settings.min_similarity,
-            max(
-                self.settings.candidate_k,
-                self._result_limit(
-                    request.analysis.question_intent
-                    if request.analysis
-                    else None
-                ),
+            self._candidate_limit(
+                request.analysis.question_intent if request.analysis else None
             ),
         )
         with psycopg.connect(
@@ -813,6 +1583,49 @@ class PgvectorRetriever:
             with connection.cursor() as cursor:
                 cursor.execute(self._candidate_query(scope_clause), parameters)
                 rows = list(cursor.fetchall())
+                if intent == "maintenance_guide":
+                    existing_chunk_ids = {str(row["chunk_id"]) for row in rows}
+                    for supplemental_source_types in (
+                        ("company_policy",),
+                        ("public_law", "public_guide", "public_media"),
+                        ("public_incident",),
+                    ):
+                        supplemental_clause, supplemental_scope_parameters = scope_sql(
+                            normalize_source_types(supplemental_source_types),
+                            None,
+                        )
+                        supplemental_parameters = (
+                            vector,
+                            search_query,
+                            request.access_scope.allow_company,
+                            request.access_scope.allow_private,
+                            request.access_scope.all_sites,
+                            request.access_scope.site_ids,
+                            True,
+                            [],
+                            request.access_scope.requester_user_id,
+                            request.access_scope.requester_user_id,
+                            True,
+                            [],
+                            True,
+                            True,
+                            [],
+                            True,
+                            *supplemental_scope_parameters,
+                            self.settings.model_name,
+                            int(vector.shape[0]),
+                            self.settings.min_similarity,
+                            max(20, self.settings.candidate_k),
+                        )
+                        cursor.execute(
+                            self._candidate_query(supplemental_clause),
+                            supplemental_parameters,
+                        )
+                        for row in cursor.fetchall():
+                            chunk_id = str(row["chunk_id"])
+                            if chunk_id not in existing_chunk_ids:
+                                rows.append(row)
+                                existing_chunk_ids.add(chunk_id)
                 if intent == "document_qa":
                     adjacent_rows = self._load_adjacent_rows(cursor, rows)
                     existing_chunk_ids = {
@@ -903,6 +1716,25 @@ class PgvectorRetriever:
                 term for term in query_terms if term not in GENERIC_QUERY_TERMS
             )
         intent = request.analysis.question_intent if request.analysis else None
+        domain_phrase_indexes = domain_phrase_group_indexes(
+            " ".join(
+                value
+                for value in (
+                    request.question,
+                    *context_topic_values,
+                )
+                if value
+            )
+        )
+        maintenance_expansion_terms = (
+            maintenance_query_expansions(request.question)
+            if intent == "maintenance_guide"
+            else ()
+        )
+        occurrence_terms = expanded_occurrence_terms(
+            request.analysis.occurrence_type if request.analysis else None,
+            intent,
+        )
         selected_document_ids = {
             str(document_id) for document_id in request.context.effective_document_ids()
         }
@@ -928,6 +1760,7 @@ class PgvectorRetriever:
                     row["section"],
                     row["original_filename"],
                     row["source_type"],
+                    row.get("document_metadata"),
                 )
                 if value
             )
@@ -935,19 +1768,88 @@ class PgvectorRetriever:
             row_document_id = str(row["document_id"])
             document_scope = str(row["document_scope"] or "").casefold()
             source_type = canonical_document_type(str(row["source_type"] or ""))
+            is_selected_document = row_document_id in selected_document_ids
+            domain_phrase_match = _domain_phrase_matches(
+                domain_phrase_indexes,
+                combined,
+            )
+            topic_phrase_match = _topic_phrase_matches(
+                selected_topic_phrase_terms,
+                combined,
+            )
+            topic_phrase_partial_collision = bool(
+                selected_documents_match_topic_phrase
+                and selected_topic_phrase_terms
+                and not topic_phrase_match
+                and any(_term_matches(term, combined) for term in selected_topic_phrase_terms)
+            )
+            if (
+                domain_phrase_indexes
+                and _domain_phrase_negative_matches(domain_phrase_indexes, combined)
+                and not domain_phrase_match
+            ):
+                continue
+            occurrence_match = bool(
+                intent == "maintenance_guide"
+                and occurrence_terms
+                and source_type
+                in {
+                    "company_policy",
+                    "public_law",
+                    "public_guide",
+                    "public_media",
+                    "public_incident",
+                }
+                and any(_term_matches(term, combined) for term in occurrence_terms)
+            )
+            maintenance_safety_match = bool(
+                intent == "maintenance_guide"
+                and source_type in MAINTENANCE_DOCUMENT_TYPES
+                and _maintenance_expansion_match(maintenance_expansion_terms, combined)
+            )
+            if (
+                domain_phrase_indexes
+                and document_scope == "public"
+                and not is_selected_document
+                and not domain_phrase_match
+                and not occurrence_match
+            ):
+                continue
             if (
                 intent == "maintenance_guide"
                 and selected_documents_match_topic_phrase
-                and row_document_id not in selected_document_ids
+                and not is_selected_document
                 and document_scope == "public"
-                and not _topic_phrase_matches(selected_topic_phrase_terms, combined)
+                and not topic_phrase_match
+                and not occurrence_match
+                and not (maintenance_safety_match and not topic_phrase_partial_collision)
             ):
                 continue
+            topic_match_count = sum(
+                1 for term in active_topic_terms if _term_matches(term, combined)
+            )
             has_topic_match = (
                 not active_topic_terms
-                or any(_term_matches(term, combined) for term in active_topic_terms)
+                or topic_match_count >= _topic_match_threshold(len(active_topic_terms))
             )
-            if active_topic_terms and not has_topic_match:
+            if (
+                not has_topic_match
+                and is_selected_document
+                and len(selected_document_ids) == 1
+                and source_type in MANUAL_DOCUMENT_TYPES
+            ):
+                relaxed_threshold = max(
+                    1,
+                    _topic_match_threshold(len(active_topic_terms)) - 1,
+                )
+                has_topic_match = topic_match_count >= relaxed_threshold
+            if (
+                active_topic_terms
+                and not has_topic_match
+                and not occurrence_match
+                and not maintenance_safety_match
+                and not domain_phrase_match
+            ):
                 continue
             keyword = lexical_score(query_terms, combined)
             similarity = float(row["similarity"])
@@ -967,6 +1869,10 @@ class PgvectorRetriever:
             safety_score = safety_signal_score(combined)
             retrieval_score = max(0.0, similarity) * 0.7 + keyword * 0.3
             reranker_score = retrieval_score * 0.9 + metadata_score * 0.1
+            if domain_phrase_match:
+                reranker_score += 0.18
+                if source_type in MANUAL_DOCUMENT_TYPES:
+                    reranker_score += 0.12
             if intent == "maintenance_guide":
                 if source_type in MANUAL_DOCUMENT_TYPES:
                     reranker_score += 0.08
@@ -974,6 +1880,7 @@ class PgvectorRetriever:
                     "company_policy",
                     "public_law",
                     "public_guide",
+                    "public_media",
                 }:
                     reranker_score += 0.03
                 elif source_type == "public_incident":
@@ -986,6 +1893,10 @@ class PgvectorRetriever:
                     query_action_terms
                     and row_action_terms
                     and not set(query_action_terms).intersection(row_action_terms)
+                    and not (
+                        maintenance_safety_match
+                        and set(row_action_terms).issubset(SAFETY_CONTROL_ACTION_TERMS)
+                    )
                 ):
                     continue
             elif intent == "component_info":
@@ -1014,7 +1925,8 @@ class PgvectorRetriever:
             )
         result_limit = self._result_limit(intent)
         bucket_quotas = self._bucket_quotas(intent)
-        for reranker_score, row, keyword, retrieval_score in ranked:
+        ordered_ranked = self._maintenance_group_first_ranked(ranked) if intent == "maintenance_guide" else ranked
+        for reranker_score, row, keyword, retrieval_score in ordered_ranked:
             document_id = row["document_id"]
             if per_document.get(document_id, 0) >= max_chunks_per_document:
                 continue
@@ -1045,11 +1957,49 @@ class PgvectorRetriever:
                     keyword_score=keyword,
                     retrieval_score=max(0.0, retrieval_score),
                     reranker_score=max(0.0, reranker_score),
+                    document_profile=_row_document_profile(row),
                 )
             )
             if len(sources) >= result_limit:
                 break
         return sources
+
+    def _candidate_limit(self, intent: str | None) -> int:
+        base = max(self.settings.candidate_k, self._result_limit(intent))
+        if intent == "maintenance_guide":
+            return max(base, self.settings.maintenance_top_k * 8, 80)
+        return base
+
+    @staticmethod
+    def _maintenance_group_first_ranked(
+        ranked: list[tuple[float, dict[str, Any], float, float]],
+    ) -> list[tuple[float, dict[str, Any], float, float]]:
+        buckets = (
+            "manual",
+            "company_policy",
+            "public_law",
+            "public_guide",
+            "public_media",
+            "public_incident",
+        )
+        selected: list[tuple[float, dict[str, Any], float, float]] = []
+        used_chunks: set[str] = set()
+        for bucket in buckets:
+            for item in ranked:
+                row = item[1]
+                chunk_id = str(row["chunk_id"])
+                if chunk_id in used_chunks:
+                    continue
+                if PgvectorRetriever._source_bucket(str(row["source_type"])) == bucket:
+                    selected.append(item)
+                    used_chunks.add(chunk_id)
+                    break
+        for item in ranked:
+            chunk_id = str(item[1]["chunk_id"])
+            if chunk_id not in used_chunks:
+                selected.append(item)
+                used_chunks.add(chunk_id)
+        return selected
 
     def _result_limit(self, intent: str | None) -> int:
         if intent == "document_qa":
@@ -1073,7 +2023,7 @@ class PgvectorRetriever:
             "public_incident": max(
                 0, self.settings.maintenance_incident_quota
             ),
-            "public_media": 0,
+            "public_media": max(0, self.settings.maintenance_guide_quota),
         }
 
     @staticmethod

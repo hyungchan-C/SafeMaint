@@ -5,7 +5,8 @@ import type {
   StructuredAnswer,
 } from "@/types/chat";
 
-import SafetyAnswerView from "@/components/SafetyAnswerView";
+import AnswerTabs from "@/components/AnswerTabs";
+import ChatSources from "@/components/ChatSources";
 import StructuredChatAnswer from "@/components/StructuredChatAnswer";
 
 
@@ -13,34 +14,57 @@ type Props = {
   answer: string;
   structuredAnswer?: StructuredAnswer | null;
   sources: ChatSource[];
+  warning?: string | null;
+  onOpenDocument: (source: ChatSource) => void;
 };
 
 export default function ChatAnswerContent({
   answer,
   structuredAnswer,
   sources,
+  warning,
+  onOpenDocument,
 }: Props) {
+  if (!structuredAnswer) {
+    return (
+      <section className="chat-single-answer-card" aria-label="AI 답변">
+        <div className="chat-answer-section-heading">
+          <strong>AI 답변</strong>
+          <span>구조화된 상세 정보 없이 원문 답변을 표시합니다.</span>
+        </div>
+        <p className="chat-answer-full-text">{answer}</p>
+        <ChatSources sources={sources} onOpenDocument={onOpenDocument} />
+        {warning && <p className="answer-tab-warning">⚠ {warning}</p>}
+      </section>
+    );
+  }
+
+  if (
+    structuredAnswer.answer_type === "clarification_required"
+    || structuredAnswer.answer_type === "no_evidence"
+  ) {
+    return (
+      <section className="chat-single-answer-card" aria-label="AI 안내">
+        <p className="chat-answer-full-text">{answer}</p>
+        <StructuredChatAnswer
+          answer={structuredAnswer}
+          sources={sources}
+        />
+        <ChatSources sources={sources} onOpenDocument={onOpenDocument} />
+        {warning && <p className="answer-tab-warning">⚠ {warning}</p>}
+      </section>
+    );
+  }
+
   return (
     <div className="chat-answer-content">
-      <section className="chat-natural-answer" aria-label="AI 핵심 답변">
-        <div className="chat-answer-section-heading">
-          <strong>AI 핵심 답변</strong>
-          <span>검증된 검색 근거를 바탕으로 생성된 요약</span>
-        </div>
-        <SafetyAnswerView answer={answer} />
-      </section>
-      {structuredAnswer && (
-        <section className="chat-structured-details" aria-label="근거 기반 상세 내용">
-          <div className="chat-answer-section-heading">
-            <strong>근거 기반 상세 내용</strong>
-            <span>항목별 근거 번호를 아래 출처 카드에서 확인하세요.</span>
-          </div>
-          <StructuredChatAnswer
-            answer={structuredAnswer}
-            sources={sources}
-          />
-        </section>
-      )}
+      <AnswerTabs
+        answerText={answer}
+        structuredAnswer={structuredAnswer}
+        sources={sources}
+        warning={warning}
+        onOpenDocument={onOpenDocument}
+      />
     </div>
   );
 }

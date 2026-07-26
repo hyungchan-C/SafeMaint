@@ -5,7 +5,7 @@ import json
 import logging
 import re
 from time import perf_counter
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from openai import OpenAIError
@@ -35,14 +35,17 @@ from app.services.document_types import (
 from app.services.qwen import QwenAnswerFailure, QwenClient
 from app.services.question_intent import classify_question_intent
 from app.services.structured_answers import (
+    checklist_items_from_pre_checks,
     clarification_answer,
     clarification_details,
     enriched_structured_answer,
+    finalize_component_answer,
+    finalize_document_answer,
+    finalize_maintenance_answer,
     no_evidence_answer,
     no_evidence_details,
     source_based_checklist_items,
     source_based_fallback,
-    validated_checklist_items,
     validated_structured_answer,
 )
 
@@ -78,6 +81,16 @@ QWEN_SOURCE_LIMIT_BY_TYPE: dict[AnswerType, int] = {
 QWEN_CONTEXT_SIGNAL_TERMS = (
     "위험",
     "안전",
+    "광축",
+    "투광부",
+    "수광부",
+    "투광기",
+    "수광기",
+    "방호장치",
+    "검출",
+    "안전거리",
+    "방호구역",
+    "OSSD",
     "주의",
     "경고",
     "금지",
@@ -179,6 +192,17 @@ QWEN_MAINTENANCE_ACTION_SIGNAL_TERMS = (
     "replace",
     "repair",
 )
+QWEN_DOMAIN_PHRASE_GROUPS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = ()
+GENERIC_QWEN_FALLBACK_ANSWERS = frozenset(
+    {
+        "검색된 근거를 기준으로 작업 전 확인할 핵심 사항을 요약했습니다.",
+        "검색된 문서 근거를 기준으로 유지보수 시 확인할 사항을 정리했습니다. 현장 안전관리자의 최종 확인 전에는 작업을 시작하지 마세요.",
+        "검색된 문서 근거를 기준으로 확인 가능한 내용을 요약했습니다.",
+        "검색된 문서 근거를 기준으로 질문과 관련된 내용을 요약했습니다.",
+        "검색된 문서 근거에서 확인되는 부품 정보를 정리했습니다.",
+        "검색된 문서 근거를 기준으로 부품 정보를 요약했습니다.",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +219,7 @@ class ChatService:
         qwen_enabled: bool | None = None,
         qwen_allow_company_context: bool | None = None,
         qwen_intent_classify_enabled: bool | None = None,
+        qwen_accident_classify_enabled: bool | None = None,
         classifier_client: AccidentClassifierClient | None = None,
         classifier_enabled: bool | None = None,
     ) -> None:
@@ -228,6 +253,11 @@ class ChatService:
             if qwen_intent_classify_enabled is None
             else qwen_intent_classify_enabled
         )
+        self.qwen_accident_classify_enabled = (
+            settings.qwen_accident_classify_enabled
+            if qwen_accident_classify_enabled is None
+            else qwen_accident_classify_enabled
+        )
         self.classifier_client = classifier_client or AccidentClassifierClient(
             settings.qwen_classifier_url
         )
@@ -250,7 +280,8 @@ class ChatService:
             request.analysis and request.analysis.question_intent
         )
         use_qwen = self.qwen_enabled and self.qwen_client is not None
-        classification, classifier_fell_back = await self._classify(request)
+        classification: AccidentClassification | None = None
+        classifier_fell_back = False
         analyzed_request, analyzer_fell_back = await self._analyze(
             request,
             allow_external=(
@@ -261,12 +292,15 @@ class ChatService:
                 )
             ),
         )
-        if classification is not None:
-            analyzed_request = self._apply_classification(
-                analyzed_request, classification
+        if (
+            use_qwen
+            and self.qwen_intent_classify_enabled
+            and self._needs_qwen_intent_resolution(
+                analyzed_request,
+                explicit_question_intent=explicit_question_intent,
             )
-        elif use_qwen and self.qwen_intent_classify_enabled:
-            qwen_analysis = await self.qwen_client.classify(analyzed_request)
+        ):
+            qwen_analysis = await self.qwen_client.classify_intent(analyzed_request)
             if qwen_analysis is not None:
                 analyzed_request = analyzed_request.model_copy(
                     update={
@@ -315,10 +349,49 @@ class ChatService:
                 fallback_reason="low_intent_confidence",
             )
             return response
+        if answer_type == "maintenance_guide":
+            classification, classifier_fell_back = await self._classify(request)
+            if classification is not None:
+                analyzed_request = self._apply_classification(
+                    analyzed_request, classification
+                )
+            elif use_qwen and self.qwen_accident_classify_enabled:
+                qwen_analysis = await self.qwen_client.classify(analyzed_request)
+                if qwen_analysis is not None:
+                    analyzed_request = analyzed_request.model_copy(
+                        update={
+                            "analysis": self._merge_qwen_analysis(
+                                analyzed_request.analysis,
+                                qwen_analysis,
+                                preserve_intent=True,
+                            )
+                }
+            )
         retrieval_response = await self._retrieve(
             analyzed_request,
             access_scope,
             request_id=resolved_request_id,
+        )
+        if self._should_reretrieve_with_primary_pdf(
+            analyzed_request,
+            retrieval_response,
+        ):
+            primary_pdf_request = self._request_scoped_to_primary_pdf(
+                analyzed_request,
+                retrieval_response,
+            )
+            if primary_pdf_request is not analyzed_request:
+                primary_pdf_response = await self._retrieve(
+                    primary_pdf_request,
+                    access_scope,
+                    request_id=resolved_request_id,
+                )
+                if primary_pdf_response.sources:
+                    retrieval_response = primary_pdf_response
+                    analyzed_request = primary_pdf_request
+        retrieval_response = self._scope_pdf_sources_to_primary_document(
+            retrieval_response,
+            answer_type=answer_type,
         )
         if not retrieval_response.sources:
             retrieval_response = self._no_evidence_response(
@@ -326,18 +399,35 @@ class ChatService:
                 work_related=answer_type == "maintenance_guide",
             )
         else:
+            structured_answer = source_based_fallback(
+                answer_type,
+                retrieval_response.sources,
+                question=analyzed_request.question,
+            )
+            structured_answer = finalize_document_answer(
+                structured_answer,
+                sources=retrieval_response.sources,
+                question=analyzed_request.question,
+            )
+            structured_answer = finalize_component_answer(
+                structured_answer,
+                sources=retrieval_response.sources,
+                question=analyzed_request.question,
+            )
+            structured_answer = finalize_maintenance_answer(
+                structured_answer,
+                sources=retrieval_response.sources,
+                question=analyzed_request.question,
+                analysis=analyzed_request.analysis,
+            )
             retrieval_response = retrieval_response.model_copy(
                 update={
                     "answer_type": answer_type,
-                    "structured_answer": source_based_fallback(
-                        answer_type,
-                        retrieval_response.sources,
-                        question=analyzed_request.question,
-                    ),
-                    "checklist_items": source_based_checklist_items(
-                        answer_type,
-                        retrieval_response.sources,
-                        question=analyzed_request.question,
+                    "structured_answer": structured_answer,
+                    "checklist_items": (
+                        checklist_items_from_pre_checks(structured_answer)
+                        if answer_type == "maintenance_guide"
+                        else []
                     ),
                 }
             )
@@ -368,6 +458,10 @@ class ChatService:
                 retrieval_response,
                 request_id=resolved_request_id,
             )
+            response = self._with_display_source_excerpts(
+                response,
+                analyzed_request.question,
+            )
             self._log_response(
                 resolved_request_id,
                 analyzed_request,
@@ -381,27 +475,51 @@ class ChatService:
             return response
 
         if not retrieval_response.sources or not self.openai_enabled:
+            response = retrieval_response
+            if retrieval_response.sources:
+                response = retrieval_response.model_copy(
+                    update={
+                        "answer": self._short_grounded_answer(
+                            analyzed_request,
+                            retrieval_response,
+                        ),
+                        "generation_mode": "template",
+                        "model": None,
+                    }
+                )
+            response = self._with_display_source_excerpts(
+                response,
+                analyzed_request.question,
+            )
             self._log_response(
                 resolved_request_id,
                 analyzed_request,
-                retrieval_response,
+                response,
                 started_at=started_at,
                 qwen_used=False,
                 fallback_reason=(
                     "no_evidence" if not retrieval_response.sources else "llm_disabled"
                 ),
             )
-            return retrieval_response
+            return response
 
         # visual_summary is produced locally but is still supplied by the client.
         # Never forward OCR, labels, or image-derived text to an external provider.
         if analyzed_request.context.visual_summary and not settings.llm_is_local:
             response = retrieval_response.model_copy(
                 update={
+                    "answer": self._short_grounded_answer(
+                        analyzed_request,
+                        retrieval_response,
+                    ),
                     "warning": self._append_warning(
                         retrieval_response.warning, LOCAL_VISION_LLM_WARNING
                     )
                 }
+            )
+            response = self._with_display_source_excerpts(
+                response,
+                analyzed_request.question,
             )
             self._log_response(
                 resolved_request_id,
@@ -421,10 +539,18 @@ class ChatService:
         ):
             response = retrieval_response.model_copy(
                 update={
+                    "answer": self._short_grounded_answer(
+                        analyzed_request,
+                        retrieval_response,
+                    ),
                     "warning": self._append_warning(
                         retrieval_response.warning, COMPANY_LLM_WARNING
                     )
                 }
+            )
+            response = self._with_display_source_excerpts(
+                response,
+                analyzed_request.question,
             )
             self._log_response(
                 resolved_request_id,
@@ -445,10 +571,18 @@ class ChatService:
         except (AIConfigurationError, OpenAIError, RuntimeError, ValueError):
             response = retrieval_response.model_copy(
                 update={
+                    "answer": self._short_grounded_answer(
+                        analyzed_request,
+                        retrieval_response,
+                    ),
                     "warning": self._append_warning(
                         retrieval_response.warning, LLM_FALLBACK_WARNING
                     )
                 }
+            )
+            response = self._with_display_source_excerpts(
+                response,
+                analyzed_request.question,
             )
             self._log_response(
                 resolved_request_id,
@@ -466,6 +600,10 @@ class ChatService:
                 "generation_mode": "openai",
                 "model": settings.llm_answer_model,
             }
+        )
+        response = self._with_display_source_excerpts(
+            response,
+            analyzed_request.question,
         )
         self._log_response(
             resolved_request_id,
@@ -510,12 +648,10 @@ class ChatService:
                 qwen_started_at,
                 fallback_reason="unavailable",
             )
-            return retrieval_response.model_copy(
-                update={
-                    "warning": self._append_warning(
-                        retrieval_response.warning, QWEN_UNAVAILABLE_WARNING
-                    )
-                }
+            return self._with_qwen_fallback(
+                request,
+                retrieval_response,
+                QWEN_UNAVAILABLE_WARNING,
             )
         if isinstance(qwen_answer, QwenAnswerFailure):
             self._log_qwen_stage(
@@ -524,13 +660,22 @@ class ChatService:
                 qwen_started_at,
                 fallback_reason=qwen_answer.reason,
             )
-            return retrieval_response.model_copy(
-                update={
-                    "warning": self._append_warning(
-                        retrieval_response.warning,
-                        self._qwen_failure_warning(qwen_answer),
-                    )
-                }
+            return self._with_qwen_fallback(
+                request,
+                retrieval_response,
+                self._qwen_failure_warning(qwen_answer),
+            )
+        if self._is_generic_qwen_answer(qwen_answer.answer):
+            self._log_qwen_stage(
+                request_id,
+                qwen_response,
+                qwen_started_at,
+                fallback_reason="generic_fallback_answer",
+            )
+            return self._with_qwen_fallback(
+                request,
+                retrieval_response,
+                "Qwen이 일반 fallback 문장을 반환해 검색 근거 기반 짧은 안내로 대체했습니다.",
             )
         allowed_source_ids = {source.chunk_id for source in retrieval_response.sources}
         if qwen_answer.used_source_ids and not set(
@@ -542,13 +687,10 @@ class ChatService:
                 qwen_started_at,
                 fallback_reason="invalid_source_reference",
             )
-            return retrieval_response.model_copy(
-                update={
-                    "warning": self._append_warning(
-                        retrieval_response.warning,
-                        "Qwen이 검색되지 않은 출처를 참조해 구조화 결과를 사용하지 않았습니다.",
-                    )
-                }
+            return self._with_qwen_fallback(
+                request,
+                retrieval_response,
+                "Qwen이 검색되지 않은 출처를 참조해 구조화 결과를 사용하지 않았습니다.",
             )
         if not qwen_answer.used_source_ids:
             self._log_qwen_stage(
@@ -557,13 +699,10 @@ class ChatService:
                 qwen_started_at,
                 fallback_reason="missing_source_citation",
             )
-            return retrieval_response.model_copy(
-                update={
-                    "warning": self._append_warning(
-                        retrieval_response.warning,
-                        "Qwen 답변에 검증 가능한 출처 인용이 없어 자연어 답변을 사용하지 않았습니다.",
-                    )
-                }
+            return self._with_qwen_fallback(
+                request,
+                retrieval_response,
+                "Qwen 답변에 검증 가능한 출처 인용이 없어 자연어 답변을 사용하지 않았습니다.",
             )
         structured_answer = validated_structured_answer(
             qwen_answer.structured_answer,
@@ -576,11 +715,24 @@ class ChatService:
             retrieval_response.structured_answer,
             expected_type=retrieval_response.answer_type or "no_evidence",
         )
+        structured_answer = finalize_document_answer(
+            structured_answer,
+            sources=retrieval_response.sources,
+            question=request.question,
+        )
+        structured_answer = finalize_component_answer(
+            structured_answer,
+            sources=retrieval_response.sources,
+            question=request.question,
+        )
+        structured_answer = finalize_maintenance_answer(
+            structured_answer,
+            sources=retrieval_response.sources,
+            question=request.question,
+            analysis=request.analysis,
+        )
         checklist_items = (
-            validated_checklist_items(
-                qwen_answer.checklist_items,
-                sources=retrieval_response.sources,
-            )
+            checklist_items_from_pre_checks(structured_answer)
             if retrieval_response.answer_type == "maintenance_guide"
             else []
         )
@@ -595,6 +747,20 @@ class ChatService:
             qwen_response.sources,
             retrieval_response.sources,
         )
+        if retrieval_response.answer_type in {
+            "maintenance_guide",
+            "component_info",
+            "document_qa",
+        }:
+            answer = self._short_grounded_answer(
+                request,
+                retrieval_response.model_copy(
+                    update={
+                        "structured_answer": structured_answer,
+                        "checklist_items": checklist_items,
+                    }
+                ),
+            )
         self._log_qwen_stage(
             request_id,
             qwen_response,
@@ -670,6 +836,374 @@ class ChatService:
         return message
 
     @staticmethod
+    def _is_generic_qwen_answer(answer: str) -> bool:
+        return " ".join(str(answer or "").split()) in GENERIC_QWEN_FALLBACK_ANSWERS
+
+    def _with_qwen_fallback(
+        self,
+        request: ChatRequest,
+        response: ChatResponse,
+        warning: str,
+    ) -> ChatResponse:
+        return response.model_copy(
+            update={
+                "answer": self._short_grounded_answer(request, response),
+                "generation_mode": "template",
+                "model": None,
+                "warning": self._append_warning(response.warning, warning),
+            }
+        )
+
+    @staticmethod
+    def _short_grounded_answer(
+        request: ChatRequest,
+        response: ChatResponse,
+    ) -> str:
+        answer_type = response.answer_type
+        if answer_type == "document_qa":
+            document_answer = ChatService._structured_document_answer(
+                response.structured_answer
+            )
+            if document_answer:
+                return document_answer
+            return "선택한 문서에서 질문과 관련된 내용을 근거 기준으로 요약했습니다."
+        if answer_type == "component_info":
+            component_answer = ChatService._structured_component_answer(
+                response.structured_answer
+            )
+            if component_answer:
+                return component_answer
+            return "검색된 근거를 기준으로 부품의 역할과 주의사항을 요약했습니다."
+        if answer_type == "maintenance_guide":
+            task_label = ChatService._question_task_label(request.question)
+            pre_check_labels = ChatService._structured_pre_check_labels(
+                response.structured_answer
+            )
+            stop_condition_labels = ChatService._structured_stop_condition_labels(
+                response.structured_answer
+            )
+            core_warning = ChatService._structured_core_warning(
+                response.structured_answer
+            )
+            target = task_label or "작업"
+            if pre_check_labels:
+                joined = ", ".join(pre_check_labels[:3])
+                answer = (
+                    f"{target} 전에는 {joined} 항목을 먼저 확인해야 합니다. "
+                    "현장 안전관리자 확인 후 진행하세요."
+                )
+                if core_warning:
+                    answer = f"{answer} {core_warning}"
+                if stop_condition_labels:
+                    answer = (
+                        f"{answer} 특히 "
+                        f"{ChatService._natural_stop_condition_sentence(stop_condition_labels[0])}"
+                    )
+                return answer
+            if core_warning:
+                return f"{target} 전에는 검색된 근거 문서를 확인해야 합니다. {core_warning}"
+            if task_label:
+                return f"{task_label} 전에는 근거 문서의 확인사항을 먼저 점검해야 합니다."
+            return "작업 전에는 검색된 근거의 확인사항을 먼저 점검해야 합니다."
+        return response.answer
+
+    @staticmethod
+    def _structured_document_answer(value: StructuredAnswer | None) -> str:
+        if getattr(value, "answer_type", None) != "document_qa":
+            return ""
+        topics: list[str] = []
+        for item in getattr(value, "main_contents", []) or []:
+            content = " ".join(str(getattr(item, "content", "")).split())
+            if not content:
+                continue
+            label = ChatService._document_summary_label(content)
+            if label and label not in topics:
+                topics.append(label)
+            if len(topics) >= 4:
+                break
+        filename = getattr(getattr(value, "overview", None), "filename", "") or ""
+        filename = " ".join(str(filename).split())
+        title = re.sub(r"\.pdf$", "", filename, flags=re.IGNORECASE)
+        title = title or "선택한 문서"
+        if topics:
+            return f"{title}는 {', '.join(topics)}을 중심으로 확인할 수 있는 문서입니다."
+        if filename:
+            return f"{filename}에서 질문과 관련된 내용을 근거 기준으로 요약했습니다."
+        return ""
+
+    @staticmethod
+    def _document_summary_label(content: str) -> str:
+        text = content.casefold()
+        if any(term in text for term in ("모델 구성", "주요 사양", "정격", "치수", "사양")):
+            return "모델 구성과 주요 사양"
+        if any(term in text for term in ("설치", "장착", "배선", "결선", "고정")):
+            return "설치·장착·배선 조건"
+        if any(term in text for term in ("오동작", "손상", "안전 주의사항", "주의사항", "위험")):
+            return "오동작·손상 예방 주의사항"
+        if any(term in text for term in ("기능", "설정", "동작", "모니터링")):
+            return "기능 설정과 동작 확인 방법"
+        if any(term in text for term in ("구성 요소", "관련 부품", "부품 정보")):
+            return "구성 요소와 관련 부품"
+        return ""
+
+    @staticmethod
+    def _structured_component_answer(value: StructuredAnswer | None) -> str:
+        if getattr(value, "answer_type", None) != "component_info":
+            return ""
+        description = " ".join(
+            str(getattr(value, "one_line_description", "")).split()
+        )
+        if description:
+            return description
+        labels: list[str] = []
+        for item in getattr(value, "main_roles", []) or []:
+            content = " ".join(str(getattr(item, "content", "")).split())
+            if content and content not in labels:
+                labels.append(content)
+            if len(labels) >= 2:
+                break
+        if labels:
+            return f"검색 근거상 {', '.join(labels)} 항목과 관련된 부품입니다."
+        return ""
+
+    @staticmethod
+    def _natural_stop_condition_sentence(content: str) -> str:
+        text = " ".join(str(content or "").split()).rstrip(".")
+        if not text:
+            return ""
+        if text.endswith(("해야 합니다", "하세요", "됩니다", "입니다")):
+            return f"{text}."
+        if text.endswith("작업 중지"):
+            text = text[: -len("작업 중지")].rstrip()
+            return f"{text} 작업을 중지해야 합니다."
+        if text.endswith("중지"):
+            text = text[: -len("중지")].rstrip()
+            if text.endswith("작업"):
+                return f"{text}을 중지해야 합니다."
+            return f"{text} 중지해야 합니다."
+        if "중지" in text:
+            return f"{text}해야 합니다."
+        return f"{text}해야 합니다."
+
+    @staticmethod
+    def _structured_pre_check_labels(value: StructuredAnswer | None) -> list[str]:
+        if getattr(value, "answer_type", None) != "maintenance_guide":
+            return []
+        labels: list[str] = []
+        for item in getattr(value, "pre_checks", []) or []:
+            content = " ".join(str(getattr(item, "content", "")).split())
+            if content and content not in labels:
+                labels.append(content)
+            if len(labels) >= 3:
+                break
+        return labels
+
+    @staticmethod
+    def _structured_stop_condition_labels(value: StructuredAnswer | None) -> list[str]:
+        if getattr(value, "answer_type", None) != "maintenance_guide":
+            return []
+        labels: list[str] = []
+        for item in getattr(value, "stop_conditions", []) or []:
+            content = " ".join(str(getattr(item, "content", "")).split()).rstrip(".")
+            if content and content not in labels:
+                labels.append(content)
+            if len(labels) >= 2:
+                break
+        return labels
+
+    @staticmethod
+    def _structured_core_warning(value: StructuredAnswer | None) -> str:
+        if getattr(value, "answer_type", None) != "maintenance_guide":
+            return ""
+        return " ".join(str(getattr(getattr(value, "summary", None), "core_warning", "")).split())
+
+    @staticmethod
+    def _question_task_label(question: str) -> str:
+        subject = ChatService._question_subject(question)
+        action = next(
+            (
+                value
+                for value in (
+                    "설치",
+                    "교체",
+                    "사용",
+                    "재기동",
+                    "변경",
+                    "점검",
+                    "청소",
+                    "정비",
+                    "수리",
+                    "조정",
+                    "분리",
+                    "연결",
+                )
+                if value in question
+            ),
+            "",
+        )
+        if subject and action:
+            return f"{subject} {action}"
+        return subject or action
+
+    @staticmethod
+    def _question_subject(question: str) -> str:
+        tokens = [
+            token
+            for token in re.findall(r"[0-9A-Za-z가-힣_-]+", question)
+            if len(token) >= 2
+            and token.casefold()
+            not in QWEN_RELEVANCE_STOPWORDS
+            and token.casefold()
+            not in {
+                "거야",
+                "할거야",
+                "예정",
+                "예정이야",
+                "하려고",
+                "할게",
+                "기능",
+                "상태",
+                "상태에서",
+                "확인",
+                "확인해야",
+                "주의사항",
+                "알려줘",
+                "뭐",
+                "뭘",
+            }
+            and not any(
+                action in token
+                for action in (
+                    "설치",
+                    "교체",
+                    "사용",
+                    "운전",
+                    "작동",
+                    "재기동",
+                    "리셋",
+                    "해제",
+                    "변경",
+                    "확인",
+                    "점검",
+                    "청소",
+                    "정비",
+                    "수리",
+                    "조정",
+                    "작업",
+                    "방법",
+                    "절차",
+                )
+            )
+        ]
+        return " ".join(tokens[:6]).strip()
+
+    @staticmethod
+    def _scope_pdf_sources_to_primary_document(
+        response: ChatResponse,
+        *,
+        answer_type: AnswerType,
+    ) -> ChatResponse:
+        if not response.sources:
+            return response
+        if answer_type == "document_qa":
+            primary_document_id = max(
+                response.sources,
+                key=lambda source: (
+                    source.reranker_score,
+                    source.retrieval_score,
+                    source.similarity,
+                ),
+            ).document_id
+            scoped_sources = [
+                source
+                for source in response.sources
+                if source.document_id == primary_document_id
+            ]
+            return response.model_copy(update={"sources": scoped_sources})
+
+        primary_manual_document_id = next(
+            (
+                source.document_id
+                for source in response.sources
+                if ChatService._is_pdf_rag_source(source)
+            ),
+            None,
+        )
+        if primary_manual_document_id is None:
+            return response
+        scoped_sources = [
+            source
+            for source in response.sources
+            if (
+                not ChatService._is_pdf_rag_source(source)
+                or source.document_id == primary_manual_document_id
+            )
+        ]
+        return response.model_copy(update={"sources": scoped_sources})
+
+    @staticmethod
+    def _should_reretrieve_with_primary_pdf(
+        request: ChatRequest,
+        response: ChatResponse,
+    ) -> bool:
+        if len(request.context.selected_document_ids) <= 1:
+            return False
+        selected_ids = {
+            str(document_id) for document_id in request.context.selected_document_ids
+        }
+        manual_document_ids = {
+            source.document_id
+            for source in response.sources
+            if ChatService._is_pdf_rag_source(source)
+            and source.document_id in selected_ids
+        }
+        return len(manual_document_ids) > 1
+
+    @staticmethod
+    def _request_scoped_to_primary_pdf(
+        request: ChatRequest,
+        response: ChatResponse,
+    ) -> ChatRequest:
+        selected_ids = {
+            str(document_id) for document_id in request.context.selected_document_ids
+        }
+        primary_source = next(
+            (
+                source
+                for source in response.sources
+                if ChatService._is_pdf_rag_source(source)
+                and source.document_id in selected_ids
+            ),
+            None,
+        )
+        if primary_source is None:
+            return request
+        try:
+            primary_document_id = UUID(primary_source.document_id)
+        except ValueError:
+            return request
+        version_ids: list[UUID] = []
+        if primary_source.document_version_id:
+            try:
+                version_ids = [UUID(primary_source.document_version_id)]
+            except ValueError:
+                version_ids = []
+        return request.model_copy(
+            update={
+                "context": request.context.model_copy(
+                    update={
+                        "selected_document_ids": [primary_document_id],
+                        "selected_document_version_ids": version_ids,
+                    }
+                )
+            }
+        )
+
+    @staticmethod
+    def _is_pdf_rag_source(source: ChatSource) -> bool:
+        return canonical_document_type(source.source_type) in MANUAL_DOCUMENT_TYPES
+
+    @staticmethod
     def _qwen_context_response(
         request: ChatRequest,
         response: ChatResponse,
@@ -680,10 +1214,15 @@ class ChatService:
             return response.model_copy(update={"sources": []})
         max_sentences = 2 if answer_type == "maintenance_guide" else 3
         if answer_type == "maintenance_guide":
+            candidate_source_ids = ChatService._structured_evidence_ids(
+                response.structured_answer,
+                response.checklist_items,
+            )
             selected_sources = ChatService._select_maintenance_qwen_sources(
                 request.question,
                 response.sources,
                 limit=limit,
+                priority_source_ids=candidate_source_ids,
             )
         else:
             selected_sources = response.sources[:limit]
@@ -706,12 +1245,30 @@ class ChatService:
         sources: list[ChatSource],
         *,
         limit: int,
+        priority_source_ids: set[str] | None = None,
     ) -> list[ChatSource]:
         if limit <= 0:
             return []
+        question_terms = ChatService._relevance_terms(question)
+        target_phrase_indexes = ChatService._target_phrase_group_indexes(question)
+        if target_phrase_indexes:
+            phrase_matched_sources = [
+                source
+                for source in sources
+                if ChatService._target_phrase_matches(
+                    target_phrase_indexes,
+                    ChatService._source_search_text(source),
+                )
+                and not ChatService._target_phrase_negative_matches(
+                    target_phrase_indexes,
+                    ChatService._source_search_text(source),
+                )
+            ]
+            if phrase_matched_sources:
+                sources = phrase_matched_sources
         if len(sources) <= limit:
             return sources
-        question_terms = ChatService._relevance_terms(question)
+        priority_source_ids = priority_source_ids or set()
         selected: list[ChatSource] = []
         selected_indexes: set[int] = set()
         used_doc_pages: set[tuple[str, int | None, int | None]] = set()
@@ -722,7 +1279,11 @@ class ChatService:
             for index, source in enumerate(sources):
                 if index in selected_indexes:
                     continue
-                score = ChatService._maintenance_source_score(source, question_terms)
+                score = ChatService._maintenance_source_score(
+                    source,
+                    question_terms,
+                    target_phrase_indexes,
+                )
                 if ChatService._source_doc_page_key(source) in used_doc_pages:
                     score -= 0.35
                 group = ChatService._source_group(source)
@@ -730,6 +1291,8 @@ class ChatService:
                     score -= 0.08
                 if selected and group not in used_groups:
                     score += 0.12
+                if source.chunk_id in priority_source_ids:
+                    score += 0.28
                 candidate = (score, -index, source)
                 if best is None or candidate > best:
                     best = candidate
@@ -743,9 +1306,37 @@ class ChatService:
         return selected
 
     @staticmethod
+    def _structured_evidence_ids(
+        structured_answer: StructuredAnswer | None,
+        checklist_items: list,
+    ) -> set[str]:
+        found: set[str] = set()
+
+        def collect(value: object) -> None:
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    if key == "evidence_chunk_ids" and isinstance(nested, list):
+                        found.update(str(item) for item in nested if item)
+                    else:
+                        collect(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    collect(nested)
+
+        if structured_answer is not None:
+            collect(structured_answer.model_dump(mode="python"))
+        for item in checklist_items:
+            if hasattr(item, "model_dump"):
+                collect(item.model_dump(mode="python"))
+            else:
+                collect(item)
+        return found
+
+    @staticmethod
     def _maintenance_source_score(
         source: ChatSource,
         question_terms: set[str],
+        target_phrase_indexes: tuple[int, ...] = (),
     ) -> float:
         text = ChatService._source_search_text(source)
         source_terms = ChatService._relevance_terms(text)
@@ -763,6 +1354,24 @@ class ChatService:
         )
         source_type = source.source_type.casefold()
         source_type = canonical_document_type(source_type)
+        phrase_bonus = 0.0
+        phrase_match = ChatService._target_phrase_matches(
+            target_phrase_indexes,
+            text,
+        )
+        if (
+            target_phrase_indexes
+            and ChatService._target_phrase_negative_matches(target_phrase_indexes, text)
+            and not phrase_match
+        ):
+            return -1000.0
+        if target_phrase_indexes:
+            if phrase_match:
+                phrase_bonus = 0.55
+            elif source_type in QWEN_PUBLIC_INCIDENT_TYPES:
+                phrase_bonus = -0.35
+            elif source_type in QWEN_PUBLIC_REFERENCE_TYPES:
+                phrase_bonus = -0.18
         type_bonus = 0.0
         if source_type in QWEN_PUBLIC_INCIDENT_TYPES:
             type_bonus = 0.18
@@ -776,6 +1385,7 @@ class ChatService:
             + min(signal_hits, 4) * 0.035
             + min(action_hits, 3) * 0.025
             + type_bonus
+            + phrase_bonus
             + ChatService._source_excerpt_quality(source.excerpt)
         )
 
@@ -824,6 +1434,44 @@ class ChatService:
         ).casefold()
 
     @staticmethod
+    def _compact_target_phrase(value: str) -> str:
+        return re.sub(r"[\s_-]+", "", value.casefold())
+
+    @staticmethod
+    def _target_phrase_group_indexes(value: str) -> tuple[int, ...]:
+        compact_text = ChatService._compact_target_phrase(value)
+        matched: list[int] = []
+        for index, (aliases, _) in enumerate(QWEN_DOMAIN_PHRASE_GROUPS):
+            if any(
+                ChatService._compact_target_phrase(alias) in compact_text
+                for alias in aliases
+            ):
+                matched.append(index)
+        return tuple(matched)
+
+    @staticmethod
+    def _target_phrase_matches(indexes: tuple[int, ...], text: str) -> bool:
+        compact_text = ChatService._compact_target_phrase(text)
+        return any(
+            any(
+                ChatService._compact_target_phrase(alias) in compact_text
+                for alias in QWEN_DOMAIN_PHRASE_GROUPS[index][0]
+            )
+            for index in indexes
+        )
+
+    @staticmethod
+    def _target_phrase_negative_matches(indexes: tuple[int, ...], text: str) -> bool:
+        compact_text = ChatService._compact_target_phrase(text)
+        return any(
+            any(
+                ChatService._compact_target_phrase(term) in compact_text
+                for term in QWEN_DOMAIN_PHRASE_GROUPS[index][1]
+            )
+            for index in indexes
+        )
+
+    @staticmethod
     def _relevance_terms(text: str) -> set[str]:
         terms: set[str] = set()
         for token in re.findall(r"[0-9A-Za-z가-힣_-]+", text.casefold()):
@@ -864,6 +1512,53 @@ class ChatService:
         return source.model_copy(update={"excerpt": excerpt})
 
     @staticmethod
+    def _with_display_source_excerpts(
+        response: ChatResponse,
+        question: str,
+    ) -> ChatResponse:
+        if not response.sources:
+            return response
+        return response.model_copy(
+            update={
+                "sources": [
+                    ChatService._compact_display_source(source, question)
+                    for source in response.sources
+                ]
+            }
+        )
+
+    @staticmethod
+    def _compact_display_source(source: ChatSource, question: str) -> ChatSource:
+        source_type = canonical_document_type(source.source_type)
+        max_sentences = 1 if source_type in QWEN_PUBLIC_REFERENCE_TYPES else 2
+        excerpt = ChatService._focused_excerpt(
+            source.excerpt,
+            question,
+            max_sentences=max_sentences,
+        )
+        excerpt = ChatService._trim_display_excerpt(excerpt, question, max_chars=180)
+        return source.model_copy(update={"excerpt": excerpt})
+
+    @staticmethod
+    def _trim_display_excerpt(excerpt: str, question: str, *, max_chars: int) -> str:
+        if len(excerpt) <= max_chars:
+            return excerpt
+        lowered = excerpt.casefold()
+        terms = ChatService._question_focus_terms(question)
+        positions = [
+            lowered.find(term)
+            for term in sorted(terms, key=len, reverse=True)
+            if term and lowered.find(term) >= 0
+        ]
+        start = max(0, min(positions) - 12) if positions else 0
+        snippet = excerpt[start : start + max_chars].strip()
+        if start > 0:
+            snippet = "..." + snippet.lstrip(" ,.;:·-")
+        if start + max_chars < len(excerpt):
+            snippet = snippet.rstrip(" ,.;:·-") + "..."
+        return snippet
+
+    @staticmethod
     def _focused_excerpt(
         excerpt: str,
         question: str,
@@ -880,11 +1575,7 @@ class ChatService:
         ]
         if not sentences:
             return normalized
-        question_terms = {
-            token.casefold()
-            for token in re.findall(r"[0-9A-Za-z가-힣_-]+", question)
-            if len(token) >= 2
-        }
+        question_terms = ChatService._question_focus_terms(question)
 
         def score(indexed_sentence: tuple[int, str]) -> tuple[float, int]:
             index, sentence = indexed_sentence
@@ -900,6 +1591,51 @@ class ChatService:
         selected_indexes = sorted(index for index, _ in ranked[:max_sentences])
         focused = " ".join(sentences[index] for index in selected_indexes).strip()
         return focused or normalized
+
+    @staticmethod
+    def _question_focus_terms(question: str) -> set[str]:
+        terms = {
+            token.casefold().strip("_-")
+            for token in re.findall(r"[0-9A-Za-z가-힣_-]+", question)
+            if len(token) >= 2
+            and token.casefold().strip("_-") not in QWEN_RELEVANCE_STOPWORDS
+        }
+        lowered = question.casefold()
+        if any(term in lowered for term in ("설치", "장착", "고정", "체결", "install")):
+            terms.update(
+                {
+                    "설치",
+                    "장착",
+                    "고정",
+                    "체결",
+                    "위치",
+                    "거리",
+                    "간격",
+                    "정격",
+                    "전원",
+                    "배선",
+                    "주의",
+                    "기준",
+                }
+            )
+        if any(term in lowered for term in ("점검", "검사", "정비", "보수", "교체", "청소", "세척")):
+            terms.update(
+                {
+                    "점검",
+                    "검사",
+                    "정비",
+                    "정지",
+                    "차단",
+                    "잠금",
+                    "재가동",
+                    "방호",
+                    "위험",
+                    "사고",
+                }
+            )
+        if any(term in lowered for term in ("뭐야", "무엇", "정의", "설명", "알려", "용도", "사용")):
+            terms.update({"정의", "역할", "기능", "용도", "구성", "사양", "사용"})
+        return terms
 
     @staticmethod
     def _clean_qwen_excerpt(excerpt: str) -> str:
@@ -929,6 +1665,8 @@ class ChatService:
         if re.match(r"^(?:및|또는|이|그|해당|검색된|있어|되어|하여야)\s+", text):
             return False
         if text.count("|") >= 2:
+            return False
+        if len(re.findall(r"\b[0-9A-Za-z가-힣]{1,10}:\s*", text)) >= 3:
             return False
         return bool(re.search(r"[A-Za-z가-힣]", text))
 
@@ -1073,6 +1811,25 @@ class ChatService:
         )
 
     @staticmethod
+    def _needs_qwen_intent_resolution(
+        request: ChatRequest,
+        *,
+        explicit_question_intent: bool,
+    ) -> bool:
+        if explicit_question_intent:
+            return False
+        analysis = request.analysis
+        if analysis is None or analysis.question_intent is None:
+            return True
+        if analysis.question_intent == "clarification_required":
+            return True
+        confidence = analysis.intent_confidence
+        return (
+            confidence is not None
+            and confidence < settings.question_intent_confidence_threshold
+        )
+
+    @staticmethod
     def _merge_qwen_analysis(
         fallback: QueryAnalysis | None,
         qwen_analysis: QueryAnalysis,
@@ -1089,10 +1846,18 @@ class ChatService:
                 "component",
                 "explicit_risk_factors",
                 "energy_sources",
-                "search_keywords",
             )
             if (value := getattr(qwen_analysis, field))
         }
+        if qwen_analysis.search_keywords:
+            updates["search_keywords"] = list(
+                dict.fromkeys(
+                    [
+                        *qwen_analysis.search_keywords,
+                        *base.search_keywords,
+                    ]
+                )
+            )[:30]
         if not preserve_intent and qwen_analysis.question_intent:
             confidence = qwen_analysis.intent_confidence
             if (
@@ -1109,7 +1874,9 @@ class ChatService:
                         ),
                     }
                 )
-            elif confidence is not None:
+            elif confidence is not None or (
+                base.question_intent in {None, "clarification_required"}
+            ):
                 updates.update(
                     {
                         "question_intent": qwen_analysis.question_intent,

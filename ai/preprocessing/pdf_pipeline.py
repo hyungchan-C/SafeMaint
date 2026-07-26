@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 _HEADER_LABELS = {"section_header", "title"}
 _SKIP_LABELS = {"picture", "page_header", "page_footer"}
@@ -56,6 +56,11 @@ _MODEL_ARTIFACT_SUFFIXES = {
 
 logger = logging.getLogger(__name__)
 
+ProcessingProgressCallback = Callable[
+    [str, int, str, Mapping[str, int]],
+    None,
+]
+
 
 class DoclingDeploymentError(RuntimeError):
     """Docling package or offline artifacts are not deployable."""
@@ -75,8 +80,8 @@ class DoclingRuntimeSettings:
     allow_pymupdf_fallback: bool = True
     artifacts_path: str | None = None
     offline: bool = False
-    max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES
-    max_pages: int = _DEFAULT_MAX_PAGES
+    max_file_bytes: int | None = _DEFAULT_MAX_FILE_BYTES
+    max_pages: int | None = _DEFAULT_MAX_PAGES
     num_threads: int = _DEFAULT_NUM_THREADS
     accelerator_device: str = DOCLING_ACCELERATOR_DEVICE
 
@@ -89,10 +94,10 @@ class DoclingRuntimeSettings:
             ),
             artifacts_path=os.getenv("DOCLING_ARTIFACTS_PATH", "").strip() or None,
             offline=_bool_env("DOCLING_OFFLINE", False),
-            max_file_bytes=_positive_int_env(
+            max_file_bytes=_limit_int_env(
                 "DOCLING_MAX_FILE_BYTES", _DEFAULT_MAX_FILE_BYTES
             ),
-            max_pages=_positive_int_env("DOCLING_MAX_PAGES", _DEFAULT_MAX_PAGES),
+            max_pages=_limit_int_env("DOCLING_MAX_PAGES", _DEFAULT_MAX_PAGES),
             num_threads=_positive_int_env(
                 "DOCLING_NUM_THREADS", _DEFAULT_NUM_THREADS
             ),
@@ -128,6 +133,14 @@ def _positive_int_env(name: str, default: int) -> int:
     return value
 
 
+def _limit_int_env(name: str, default: int) -> int | None:
+    """Parse a processing limit where zero explicitly means unlimited."""
+    value = int(os.getenv(name, str(default)))
+    if value < 0:
+        raise ValueError(f"{name} must be zero or greater.")
+    return None if value == 0 else value
+
+
 def _installed_version(distribution_name: str) -> str:
     try:
         return version(distribution_name)
@@ -135,6 +148,14 @@ def _installed_version(distribution_name: str) -> str:
         raise DoclingDeploymentError(
             f"Required package {distribution_name!r} is not installed."
         ) from exc
+
+
+def _sha256_file(path: Path, chunk_bytes: int = 4 * 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(chunk_bytes):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _validate_artifacts_path(runtime: DoclingRuntimeSettings) -> Path | None:
@@ -374,11 +395,12 @@ def extract_sections_with_docling(
         )
 
     converter = _build_converter(do_ocr, runtime)
-    doc = converter.convert(
-        pdf_path,
-        max_file_size=runtime.max_file_bytes,
-        max_num_pages=runtime.max_pages,
-    ).document
+    conversion_limits: dict[str, int] = {}
+    if runtime.max_file_bytes is not None:
+        conversion_limits["max_file_size"] = runtime.max_file_bytes
+    if runtime.max_pages is not None:
+        conversion_limits["max_num_pages"] = runtime.max_pages
+    doc = converter.convert(pdf_path, **conversion_limits).document
 
     sections = []
     header_stack: list[tuple[int, str]] = []
@@ -547,7 +569,10 @@ def extract_sections(
     runtime = runtime or DoclingRuntimeSettings.from_env()
     path = Path(pdf_path)
     file_size = path.stat().st_size
-    if file_size > runtime.max_file_bytes:
+    if (
+        runtime.max_file_bytes is not None
+        and file_size > runtime.max_file_bytes
+    ):
         raise PdfProcessingLimitError(
             f"PDF file size {file_size} exceeds limit {runtime.max_file_bytes}."
         )
@@ -555,7 +580,7 @@ def extract_sections(
 
     with fitz.open(path) as pdf:
         page_count = len(pdf)
-    if page_count > runtime.max_pages:
+    if runtime.max_pages is not None and page_count > runtime.max_pages:
         raise PdfProcessingLimitError(
             f"PDF page count {page_count} exceeds limit {runtime.max_pages}."
         )
@@ -858,6 +883,8 @@ def process_pdf(
     access_level: str = "restricted",
     docling_settings: DoclingRuntimeSettings | None = None,
     log_context: Mapping[str, Any] | None = None,
+    total_pages: int | None = None,
+    progress_callback: ProcessingProgressCallback | None = None,
 ) -> dict:
     """
     PDF 한 개를 받아서 docs/preprocessing-contract.md 규격의
@@ -873,7 +900,7 @@ def process_pdf(
 
     doc_name = Path(pdf_path).stem
     external_id = f"{source_type}:{manufacturer}:{model_name}:{doc_name}"
-    file_sha256 = hashlib.sha256(Path(pdf_path).read_bytes()).hexdigest()
+    file_sha256 = _sha256_file(Path(pdf_path))
 
     doc_metadata = {
         "manufacturer": manufacturer,
@@ -897,6 +924,24 @@ def process_pdf(
         runtime=docling_settings,
         log_context=log_context,
     )
+    if total_pages is None:
+        total_pages = max(
+            (
+                int(section.get("end_page") or section.get("start_page") or 0)
+                for section in extraction.sections
+            ),
+            default=0,
+        )
+    if progress_callback is not None:
+        progress_callback(
+            "extracting",
+            50,
+            "PDF 내용 추출을 완료했습니다.",
+            {
+                "processed_pages": total_pages,
+                "total_pages": total_pages,
+            },
+        )
     sections = extraction.sections
     for s in sections:
         s["blocks"] = clean_blocks(s["blocks"])
@@ -904,6 +949,18 @@ def process_pdf(
     sections = filter_sections(sections, exclude_sections)
 
     chunks = []
+    if progress_callback is not None:
+        progress_callback(
+            "chunking",
+            50,
+            "문서 청크를 생성하고 있습니다.",
+            {
+                "processed_pages": total_pages,
+                "total_pages": total_pages,
+                "processed_chunks": 0,
+                "total_chunks": 0,
+            },
+        )
     for s in sections:
         text_chunks = chunk_section(s["blocks"], chunk_size, overlap)
         if s["start_page"] == s["end_page"]:
@@ -925,6 +982,31 @@ def process_pdf(
                 "metadata": doc_metadata,
                 "embedding_status": "pending",
             })
+        if progress_callback is not None:
+            progress_callback(
+                "chunking",
+                50,
+                f"문서 청크 생성 중 · 현재 {len(chunks)}개",
+                {
+                    "processed_pages": total_pages,
+                    "total_pages": total_pages,
+                    "processed_chunks": len(chunks),
+                    "total_chunks": 0,
+                },
+            )
+
+    if progress_callback is not None:
+        progress_callback(
+            "chunking",
+            65,
+            f"문서 청크 {len(chunks)}개를 생성했습니다.",
+            {
+                "processed_pages": total_pages,
+                "total_pages": total_pages,
+                "processed_chunks": len(chunks),
+                "total_chunks": len(chunks),
+            },
+        )
 
     return {
         "document": document,

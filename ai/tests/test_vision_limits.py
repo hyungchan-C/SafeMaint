@@ -8,7 +8,13 @@ from starlette.datastructures import Headers
 
 from vision_service import main as vision_main
 from vision_service.catalog_matcher import CatalogMatchSignals
-from vision_service.main import _read_limited, _validate_image, match_catalog
+from vision_service.config import _limit_env
+from vision_service.main import (
+    _read_limited,
+    _stage_pdf_upload,
+    _validate_image,
+    match_catalog,
+)
 from vision_service.schemas import CatalogAnalysisResponse, CatalogCandidate
 
 
@@ -23,6 +29,68 @@ def test_internal_service_rejects_oversized_upload() -> None:
     with pytest.raises(HTTPException) as error:
         _read_limited(upload, 5)
     assert error.value.status_code == 413
+
+
+def test_pdf_upload_streams_without_limit(tmp_path: Path) -> None:
+    content = b"%PDF-" + (b"x" * 1024)
+    upload = UploadFile(filename="large.pdf", file=BytesIO(content))
+
+    path = _stage_pdf_upload(upload, None)
+    try:
+        assert path.read_bytes() == content
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_pdf_upload_keeps_positive_limit() -> None:
+    upload = UploadFile(filename="large.pdf", file=BytesIO(b"%PDF-" + b"x" * 6))
+
+    with pytest.raises(HTTPException) as error:
+        _stage_pdf_upload(upload, 10)
+
+    assert error.value.status_code == 413
+
+
+def test_pdf_upload_rejects_empty_and_spoofed_files() -> None:
+    with pytest.raises(HTTPException) as empty_error:
+        _stage_pdf_upload(UploadFile(filename="empty.pdf", file=BytesIO(b"")), None)
+    assert empty_error.value.status_code == 422
+
+    with pytest.raises(HTTPException) as header_error:
+        _stage_pdf_upload(
+            UploadFile(filename="fake.pdf", file=BytesIO(b"not-a-pdf")),
+            None,
+        )
+    assert header_error.value.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "expected"),
+    [
+        ("VISION_PDF_MAX_UPLOAD_BYTES", "0", None),
+        ("VISION_PDF_MAX_PAGES", "0", None),
+        ("VISION_CATALOG_MAX_IMAGES", "0", None),
+        ("VISION_PDF_MAX_PAGES", "500", 500),
+    ],
+)
+def test_vision_limit_env_supports_zero_as_unlimited(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    expected: int | None,
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    assert _limit_env(name, 2000) == expected
+
+
+def test_vision_limit_env_rejects_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VISION_CATALOG_MAX_IMAGES", "-1")
+
+    with pytest.raises(ValueError, match="zero or greater"):
+        _limit_env("VISION_CATALOG_MAX_IMAGES", 12000)
 
 
 def test_internal_service_validates_image_bytes() -> None:

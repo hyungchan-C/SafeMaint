@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -94,6 +94,7 @@ class ChatSource(BaseModel):
     keyword_score: float = Field(default=0.0, ge=0.0)
     retrieval_score: float = Field(default=0.0, ge=0.0)
     reranker_score: float = Field(default=0.0, ge=0.0)
+    document_profile: dict[str, Any] | None = None
 
 
 class AccidentClassification(BaseModel):
@@ -158,6 +159,7 @@ class MaintenanceAnswerDetails(BaseModel):
     pre_checks: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
     hazards: list[MaintenanceHazard] = Field(default_factory=list, max_length=3)
     manual_steps: list[EvidenceBackedItem] = Field(default_factory=list, max_length=30)
+    precautions: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
     stop_conditions: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
     related_regulations_and_incidents: list[EvidenceBackedItem] = Field(
         default_factory=list, max_length=20

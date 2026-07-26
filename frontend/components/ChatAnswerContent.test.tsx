@@ -45,12 +45,12 @@ describe("ChatAnswerContent", () => {
           additional_information_needed: [],
         }}
         sources={[source]}
+        onOpenDocument={() => {}}
       />,
     );
 
-    expect(screen.getByRole("region", { name: "AI 핵심 답변" })).toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "AI 답변 상세 항목" })).toBeInTheDocument();
     expect(screen.getByText(/라이트커튼은 접근을 감지/)).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "근거 기반 상세 내용" })).toBeInTheDocument();
     expect(screen.getByText("위험 영역 접근 감지")).toBeInTheDocument();
   });
 
@@ -60,10 +60,52 @@ describe("ChatAnswerContent", () => {
         answer="검증 가능한 근거를 찾지 못했습니다."
         structuredAnswer={null}
         sources={[]}
+        onOpenDocument={() => {}}
       />,
     );
 
     expect(screen.getByText("검증 가능한 근거를 찾지 못했습니다.")).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "근거 기반 상세 내용" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+  });
+
+  it("shows no-evidence guidance as a single card without empty tabs", () => {
+    render(
+      <ChatAnswerContent
+        answer="검증 가능한 문서 근거가 필요합니다."
+        structuredAnswer={{
+          answer_type: "no_evidence",
+          message: "질문과 일치하는 근거를 찾지 못했습니다.",
+          required_information: ["정확한 모델명"],
+          required_documents: ["승인된 제조사 매뉴얼"],
+          work_safety_notice: "근거 확인 전에는 작업하지 마세요.",
+        }}
+        sources={[]}
+        warning="검색 근거 없음"
+        onOpenDocument={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "AI 안내" })).toBeInTheDocument();
+    expect(screen.getByText("정확한 모델명")).toBeInTheDocument();
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+  });
+
+  it("shows clarification guidance as a single card", () => {
+    render(
+      <ChatAnswerContent
+        answer="질문 목적을 확인해 주세요."
+        structuredAnswer={{
+          answer_type: "clarification_required",
+          question: "부품 정보와 설치 방법 중 어떤 내용이 필요한가요?",
+          options: ["부품 정보", "설치 방법"],
+        }}
+        sources={[]}
+        onOpenDocument={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("부품 정보와 설치 방법 중 어떤 내용이 필요한가요?"))
+      .toBeInTheDocument();
+    expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
   });
 });

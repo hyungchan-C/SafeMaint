@@ -25,6 +25,17 @@ export interface UserDocumentSummary {
   processing_warning: string | null;
   failure_reason: string | null;
   page_count: number | null;
+  processing_stage?: string | null;
+  progress_percent?: number | null;
+  progress_message?: string | null;
+  progress_metadata?: {
+    processed_pages?: number;
+    total_pages?: number;
+    processed_chunks?: number;
+    total_chunks?: number;
+    embedded_chunks?: number;
+  };
+  processing_attempt?: number;
   created_at: string;
 }
 
@@ -56,6 +67,29 @@ export interface ApproveDocumentResponse {
   version_number: number;
   status: "active";
   is_active: true;
+}
+
+export interface DocumentProcessingProgress {
+  document_id: string;
+  document_version_id: string;
+  filename: string;
+  status: string;
+  stage: string;
+  attempt: number;
+  progress_percent: number;
+  message: string;
+  processed_pages: number;
+  total_pages: number;
+  processed_chunks: number;
+  total_chunks: number;
+  embedded_chunks: number;
+  updated_at: string;
+  is_terminal: boolean;
+  rag_ready: boolean;
+}
+
+export interface FileProcessingProgress extends DocumentProcessingProgress {
+  client_key: string;
 }
 
 export const DOCUMENT_STATUS_LABELS: Record<DocumentVersionStatus, string> = {

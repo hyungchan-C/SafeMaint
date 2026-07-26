@@ -38,6 +38,7 @@ from app.db.session import get_db
 from app.schemas.chat import RetrievalAccessScope
 from app.schemas.documents import (
     ApproveDocumentResponse,
+    DocumentProcessingProgressResponse,
     ReviewQueueDocumentSummary,
     UploadDocumentResponse,
     UserDocumentSummary,
@@ -98,6 +99,31 @@ def _processing_summary(
     return extractor, fallback_used, processing_warning
 
 
+def _job_progress_summary(
+    version: DocumentVersion,
+) -> tuple[str | None, int | None, str | None, dict[str, int], int]:
+    job = version.processing_job
+    if job is None:
+        return None, None, None, {}, 0
+    counters = {
+        key: _progress_counter(dict(job.progress_metadata or {}), key)
+        for key in (
+            "processed_pages",
+            "total_pages",
+            "processed_chunks",
+            "total_chunks",
+            "embedded_chunks",
+        )
+    }
+    return (
+        job.processing_stage,
+        job.progress_percent,
+        job.progress_message,
+        counters,
+        job.attempts,
+    )
+
+
 def _resolve_document_version(
     db: Session,
     document: Document,
@@ -150,6 +176,13 @@ def list_my_documents(
             continue
         seen_document_ids.add(document.id)
         extractor, fallback_used, processing_warning = _processing_summary(version)
+        (
+            processing_stage,
+            progress_percent,
+            progress_message,
+            progress_metadata,
+            processing_attempt,
+        ) = _job_progress_summary(version)
         summaries.append(
             UserDocumentSummary(
                 document_id=document.id,
@@ -168,6 +201,11 @@ def list_my_documents(
                 processing_warning=processing_warning,
                 failure_reason=version.failure_reason,
                 page_count=version.page_count,
+                processing_stage=processing_stage,
+                progress_percent=progress_percent,
+                progress_message=progress_message,
+                progress_metadata=progress_metadata,
+                processing_attempt=processing_attempt,
                 created_at=version.created_at,
             )
         )
@@ -253,6 +291,121 @@ def list_document_review_queue(
             )
         )
     return summaries
+
+
+def _progress_counter(metadata: dict, key: str) -> int:
+    try:
+        return max(0, int(metadata.get(key, 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+@router.get(
+    "/{document_id}/processing-progress",
+    response_model=DocumentProcessingProgressResponse,
+)
+def get_document_processing_progress(
+    document_id: UUID,
+    current_user: Annotated[User, Depends(require_document_read)],
+    access_scope: Annotated[RetrievalAccessScope, Depends(get_retrieval_access_scope)],
+    db: Annotated[Session, Depends(get_db)],
+) -> DocumentProcessingProgressResponse:
+    """Return durable progress for the document's newest non-deleted version."""
+
+    document = require_accessible_document(
+        db, document_id, current_user, access_scope
+    )
+    version = db.scalar(
+        select(DocumentVersion)
+        .where(
+            DocumentVersion.document_id == document.id,
+            DocumentVersion.status != "deleted",
+        )
+        .order_by(
+            DocumentVersion.version_number.desc(),
+            DocumentVersion.created_at.desc(),
+            DocumentVersion.id.desc(),
+        )
+        .limit(1)
+    )
+    if version is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "문서 파일을 찾을 수 없습니다.")
+
+    job = db.scalar(
+        select(DocumentProcessingJob).where(
+            DocumentProcessingJob.document_version_id == version.id
+        )
+    )
+    progress_metadata = dict(job.progress_metadata or {}) if job else {}
+    rag_ready = bool(
+        version.status == "active"
+        and version.is_active
+        and document.lifecycle_status == "active"
+        and document.current_version_id == version.id
+    )
+
+    if rag_ready:
+        response_status = "active"
+        stage = "completed"
+        percent = 100
+        message = "승인이 완료되어 RAG 검색에 사용할 수 있습니다."
+        is_terminal = True
+    elif version.status == "review_required":
+        response_status = "review_required"
+        stage = "review_required"
+        percent = 100
+        message = "PDF 처리가 완료되었습니다. 관리자 승인이 필요합니다."
+        is_terminal = True
+    elif version.status == "ocr_required":
+        response_status = "ocr_required"
+        stage = "ocr_required"
+        percent = min(99, job.progress_percent if job else 20)
+        message = "텍스트를 확인할 수 없어 OCR 처리가 필요합니다."
+        is_terminal = True
+    elif version.status == "failed" or (job is not None and job.status == "failed"):
+        response_status = "failed"
+        stage = "failed"
+        percent = min(99, job.progress_percent if job else 15)
+        message = (
+            job.progress_message
+            if job and job.progress_message
+            else "PDF 처리에 실패했습니다."
+        )
+        is_terminal = True
+    else:
+        response_status = version.status
+        stage = job.processing_stage if job else "queued"
+        percent = max(0, min(99, job.progress_percent if job else 15))
+        message = (
+            job.progress_message
+            if job and job.progress_message
+            else "PDF 처리 대기 중"
+        )
+        is_terminal = False
+
+    updated_at = (
+        (job.progress_updated_at or job.updated_at)
+        if job is not None
+        else version.updated_at
+    )
+    return DocumentProcessingProgressResponse(
+        document_id=document.id,
+        document_version_id=version.id,
+        filename=version.original_filename,
+        status=response_status,
+        stage=stage,
+        attempt=job.attempts if job else 0,
+        progress_percent=percent,
+        message=message,
+        processed_pages=_progress_counter(progress_metadata, "processed_pages"),
+        total_pages=_progress_counter(progress_metadata, "total_pages"),
+        processed_chunks=_progress_counter(progress_metadata, "processed_chunks"),
+        total_chunks=_progress_counter(progress_metadata, "total_chunks"),
+        embedded_chunks=_progress_counter(progress_metadata, "embedded_chunks"),
+        updated_at=updated_at,
+        is_terminal=is_terminal,
+        rag_ready=rag_ready,
+    )
 
 
 @router.get("/{document_id}/file")
@@ -447,7 +600,16 @@ def upload_document(
         )
         db.add(version)
         db.flush()
-        db.add(DocumentProcessingJob(document_version_id=version.id))
+        db.add(
+            DocumentProcessingJob(
+                document_version_id=version.id,
+                processing_stage="queued",
+                progress_percent=15,
+                progress_message="PDF 처리 대기 중",
+                progress_metadata={},
+                progress_updated_at=datetime.now(timezone.utc),
+            )
+        )
         db.commit()
     except EmptyPdfUploadError as error:
         db.rollback()
