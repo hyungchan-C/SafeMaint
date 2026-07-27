@@ -756,6 +756,17 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 ## 팀 Qwen3.5-9B LoRA 로컬 실행
 
+### Colab용 Qwen 서비스 패키지
+
+Colab에 올릴 Qwen 서비스 ZIP은 소스와 함께 바이너리로 보관하지 않습니다.
+현재 `ai/qwen_service` 기준 패키지는 다음 명령으로 생성합니다.
+
+```powershell
+.\scripts\package-qwen-colab.ps1
+```
+
+생성 파일과 SHA-256 값은 `artifacts` 아래에 출력되며 Git에는 포함하지 않습니다.
+
 팀 파인튜닝 모델은 일반 채팅 모델이 아니라 작업 설명을 14개 산업재해 발생형태로
 분류하는 LoRA다. 웹 질의는 다음 순서로 처리한다.
 

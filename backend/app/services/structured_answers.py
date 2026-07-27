@@ -391,7 +391,8 @@ STOP_CONDITION_MARKERS = (
 STOP_ACTION_MARKERS = ("중지", "정지", "보류", "금지")
 
 MANUAL_STEP_ACTION_PATTERN = re.compile(
-    r"(?:확인|차단|잠금|표시|점검|검사|설치|분리|연결|정렬|고정|측정|"
+    r"(?:확인|차단|잠금|표시|점검|검사|설치|분리|연결|정렬|고정|측정|확보|"
+    r"방지|배치|사용|일치|맞추|"
     r"청소|교체|조정|기록|중지|준수|적용|verify|check|inspect|install|"
     r"remove|replace|lock|isolate|align|clean)",
     re.IGNORECASE,
@@ -3102,55 +3103,8 @@ def _manual_step_phrase(text: str) -> str:
         and any(term in lowered for term in ("상태로", "off", "오프", "차단 위치"))
     ):
         return "청소·점검·수리 전 전원 차단 스위치를 차단 위치로 전환합니다."
-    if "베어링" in lowered and any(term in lowered for term in ("축", "하우징")) and any(
-        term in lowered for term in ("손상", "치수")
-    ):
-        return "베어링 설치 전 축·하우징의 손상과 치수를 확인합니다."
-    if "윤활" in lowered:
-        return "지정된 윤활제의 종류와 주입량을 확인합니다."
-    if ("베어링" in lowered or "축" in lowered) and "정렬" in lowered:
-        return "축·베어링의 정렬 상태를 확인합니다."
-    if "베어링" in lowered and any(term in lowered for term in ("이상음", "과열")):
-        return "조립 후 시운전하여 베어링의 이상음·과열 여부를 확인합니다."
     if any(term in lowered for term in ("전원 차단", "전원을 차단", "잠금", "lockout")):
         return "작업 전 전원을 차단하고 잠금·표지를 적용합니다."
-    if "안전 거리" in lowered or "안전거리" in lowered:
-        return "기계 위험부와 라이트커튼 사이의 안전거리를 확보합니다."
-    if (
-        ("검출 영역" in lowered or "검출영역" in lowered)
-        and "통과" in lowered
-    ):
-        return "위험부 접근 시 반드시 라이트커튼 검출영역을 통과하도록 설치합니다."
-    if (
-        ("검출 영역" in lowered or "검출영역" in lowered)
-        and ("별도의 가드" in lowered or "가드" in lowered)
-    ):
-        return "검출영역을 우회할 수 있으면 별도 가드를 설치합니다."
-    if (
-        any(term in lowered for term in ("투광기", "수광기", "투/수광기"))
-        and "광축 표시등" in lowered
-    ):
-        return "투광기·수광기의 상·하단 광축 표시등을 정확히 맞춥니다."
-    if (
-        any(term in lowered for term in ("투광기", "수광기", "투/수광기"))
-        and any(term in lowered for term in ("벽면", "반사면"))
-    ):
-        return "투광기·수광기를 벽면·반사면의 영향을 받지 않는 위치에 설치합니다."
-    if (
-        any(term in lowered for term in ("여러 세트", "복수", "다수"))
-        and ("상호 간섭" in lowered or "상호간섭" in lowered)
-    ):
-        return "여러 세트 설치 시 상호간섭을 방지하거나 차광판을 사용합니다."
-    if (
-        any(term in lowered for term in ("외란광", "직사광선", "스포트라이트", "반사광"))
-        and ("수광기" in lowered or "설치" in lowered)
-    ):
-        return "외란광·반사광이 수광기에 직접 입사하지 않도록 설치합니다."
-    if (
-        any(term in lowered for term in ("반사형", "회귀 반사형", "회귀반사형"))
-        and any(term in lowered for term in ("사용하지", "배치"))
-    ):
-        return "반사형 또는 회귀반사형 배치로 사용하지 않습니다."
 
     content = _compact_phrase(cleaned, max_chars=72)
     if not _looks_like_actionable_manual_step(content):
@@ -3366,32 +3320,8 @@ def _chat_checklist_items_from_evidence(
 
 def _tbm_checklist_key(text: str) -> str:
     lowered = _clean_source_excerpt(text).casefold()
-    if "베어링" in lowered and any(term in lowered for term in ("손상", "치수", "하우징")):
-        return "tbm:bearing_fit"
-    if "윤활" in lowered:
-        return "tbm:lubrication"
-    if ("베어링" in lowered or "축" in lowered) and "정렬" in lowered:
-        return "tbm:bearing_alignment"
-    if "베어링" in lowered and any(term in lowered for term in ("이상음", "과열")):
-        return "tbm:bearing_condition"
     if any(term in lowered for term in ("전원 차단", "전원을 차단", "잠금", "lockout")):
         return "tbm:lockout"
-    if "안전거리" in lowered or "안전 거리" in lowered:
-        return "tbm:safety_distance"
-    if "광축 표시등" in lowered or (
-        "투광기" in lowered and "수광기" in lowered and "정렬" in lowered
-    ):
-        return "tbm:optical_alignment"
-    if "상호간섭" in lowered or "상호 간섭" in lowered or "차광판" in lowered:
-        return "tbm:mutual_interference"
-    if any(term in lowered for term in ("외란광", "직사광선", "스포트라이트", "반사광")):
-        return "tbm:external_light"
-    if "반사면" in lowered or "회귀반사형" in lowered or "회귀 반사형" in lowered:
-        return "tbm:reflection"
-    if ("검출영역" in lowered or "검출 영역" in lowered) and any(
-        term in lowered for term in ("우회", "통과", "가드")
-    ):
-        return "tbm:detection_access"
     return f"tbm:{_maintenance_semantic_key(text)}"
 
 
@@ -5073,26 +5003,8 @@ def _to_tbm_action_phrase(text: str) -> str:
     if not content:
         return ""
     lowered = content.casefold()
-    if "베어링" in lowered and any(term in lowered for term in ("손상", "치수", "하우징")):
-        return "베어링·축·하우징의 손상 및 치수 확인하기"
-    if ("베어링" in lowered or "축" in lowered) and "정렬" in lowered:
-        return "축·베어링 정렬 상태 확인하기"
-    if "윤활" in lowered:
-        return "지정 윤활제의 종류·주입량 확인하기"
-    if "이상음" in lowered or "과열" in lowered:
-        return "시운전 후 베어링 이상음·과열 여부 확인하기"
     if any(term in lowered for term in ("전원 차단", "전원을 차단", "잠금", "lockout")):
         return "전원 차단 후 잠금·표지 부착 상태 확인하기"
-    if "광축 표시등" in lowered:
-        return "투광기·수광기의 상·하단 광축 표시등 정렬 확인하기"
-    if "상호간섭" in lowered or "상호 간섭" in lowered or "차광판" in lowered:
-        return "복수 라이트커튼의 상호간섭 방지·차광판 적용 확인하기"
-    if any(term in lowered for term in ("외란광", "직사광선", "스포트라이트", "반사광")):
-        return "외란광·반사광이 수광기에 직접 입사하지 않는지 확인하기"
-    if ("검출영역" in lowered or "검출 영역" in lowered) and any(
-        term in lowered for term in ("통과", "우회", "가드")
-    ):
-        return "위험부 접근 시 검출영역 통과·우회 방지 구조 확인하기"
     key = _maintenance_semantic_key(content)
     if key == "metal_clearance":
         return "주변 금속·장애물 이격거리 확인하기"

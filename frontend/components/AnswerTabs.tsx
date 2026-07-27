@@ -277,14 +277,6 @@ export default function AnswerTabs({
       source.source_type === "equipment_manual"
       || source.source_type === "component_manual"
     ));
-    const relatedSourceIds = new Set(
-      related.flatMap((item) => item.evidence_chunk_ids),
-    );
-    const maintenanceEvidenceSources = sources.filter((source) => (
-      manualSources.some((manual) => manual.chunk_id === source.chunk_id)
-      || relatedSourceIds.has(source.chunk_id)
-    ));
-
     tabs = [
       {
         id: "summary",
@@ -304,6 +296,11 @@ export default function AnswerTabs({
             {structuredAnswer.summary.risk_basis.length > 0 && (
               <AnswerSection title="위험 판단 근거">
                 {evidenceList(structuredAnswer.summary.risk_basis)}
+              </AnswerSection>
+            )}
+            {structuredAnswer.additional_information_needed.length > 0 && (
+              <AnswerSection title="추가 확인이 필요한 내용" tone="muted">
+                <TextList items={structuredAnswer.additional_information_needed} />
               </AnswerSection>
             )}
             {warning && <p className="answer-tab-warning">⚠ {warning}</p>}
@@ -388,9 +385,9 @@ export default function AnswerTabs({
               />
             </AnswerSection>
             <AnswerSection title="검색 근거">
-              {maintenanceEvidenceSources.length > 0 ? (
+              {sources.length > 0 ? (
                 <ChatSources
-                  sources={maintenanceEvidenceSources}
+                  sources={sources}
                   onOpenDocument={onOpenDocument}
                   idPrefix={instanceId}
                   hideHeading
@@ -494,6 +491,11 @@ export default function AnswerTabs({
                 </dl>
               ) : <p className="answer-tab-empty">확인된 문서 메타데이터가 없습니다.</p>}
             </section>
+            {structuredAnswer.unverified_information.length > 0 && (
+              <AnswerSection title="확인하지 못한 내용" tone="muted">
+                <TextList items={structuredAnswer.unverified_information} />
+              </AnswerSection>
+            )}
             {warning && <p className="answer-tab-warning">⚠ {warning}</p>}
           </div>
         ),

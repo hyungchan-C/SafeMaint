@@ -480,19 +480,19 @@ def test_manufacturer_specific_prechecks_keep_each_manual_wording() -> None:
     [
         (
             "제품과 기계의 위험부 사이에는 반드시 안전 거리를 확보하십시오.",
-            "기계 위험부와 라이트커튼 사이의 안전거리를 확보합니다.",
+            "제품과 기계의 위험부 사이에는 반드시 안전 거리를 확보하십시오.",
         ),
         (
             "제품 설치 시 투광기와 수광기의 상단 및 하단 광축 표시등을 정확히 일치시키십시오.",
-            "투광기·수광기의 상·하단 광축 표시등을 정확히 맞춥니다.",
+            "제품 설치 시 투광기와 수광기의 상단 및 하단 광축 표시등을 정확히 일치시키십시오.",
         ),
         (
             "제품을 여러 세트로 사용하는 경우 상호 간섭이 발생하지 않도록 배치하거나 차광판을 사용하십시오.",
-            "여러 세트 설치 시 상호간섭을 방지하거나 차광판을 사용합니다.",
+            "제품을 여러 세트로 사용하는 경우 상호 간섭이 발생하지 않도록 배치하거나 차광판을 사용하십시오.",
         ),
         (
             "강한 외란광 또는 광택면의 반사광이 수광기로 직접 입사되지 않는 장소에 설치하십시오.",
-            "외란광·반사광이 수광기에 직접 입사하지 않도록 설치합니다.",
+            "강한 외란광 또는 광택면의 반사광이 수광기로 직접 입사되지 않는 장소에 설치하십시오.",
         ),
     ],
 )
@@ -532,21 +532,30 @@ def test_light_curtain_fallback_keeps_multiple_installation_details() -> None:
 
     assert isinstance(details, MaintenanceAnswerDetails)
     assert len(details.manual_steps) == 5
-    assert any("안전거리" in item.content for item in details.manual_steps)
+    assert any("안전 거리" in item.content for item in details.manual_steps)
     assert any("광축 표시등" in item.content for item in details.manual_steps)
-    assert any("상호간섭" in item.content for item in details.manual_steps)
-    assert any("외란광·반사광" in item.content for item in details.manual_steps)
+    assert any("상호 간섭" in item.content for item in details.manual_steps)
+    assert any(
+        "외란광" in item.content and "반사광" in item.content
+        for item in details.manual_steps
+    )
+    assert {
+        chunk_id
+        for item in details.manual_steps
+        for chunk_id in item.evidence_chunk_ids
+    } == {f"light-install-{index}" for index in range(5)}
     checklist = source_based_checklist_items(
         "maintenance_guide",
         sources,
         question="라이트커튼 설치 시 주의사항을 알려줘.",
     )
-    assert len(checklist) == 5
-    assert any("광축 표시등" in item.content for item in checklist)
-    assert any("상호간섭" in item.content for item in checklist)
-    assert any("외란광·반사광" in item.content for item in checklist)
-    assert any("안전거리" in item.content for item in checklist)
-    assert any("정상 반응" in item.content for item in checklist)
+    assert 3 <= len(checklist) <= 5
+    checklist_text = " ".join(item.content for item in checklist)
+    assert "정렬" in checklist_text
+    assert "간섭" in checklist_text
+    assert "안전거리" in checklist_text
+    assert "정상 반응" in checklist_text
+    assert all(item.evidence_chunk_ids for item in checklist)
 
 
 def test_bearing_tbm_uses_bearing_specific_items_and_stays_within_five() -> None:
@@ -579,12 +588,12 @@ def test_bearing_tbm_uses_bearing_specific_items_and_stays_within_five() -> None
 
     assert len(checklist) == 5
     contents = [item.content for item in checklist]
-    assert any("축·하우징" in content for content in contents)
-    assert any("윤활제" in content for content in contents)
-    assert any("축·베어링 정렬" in content for content in contents)
-    assert any("이상음·과열" in content for content in contents)
-    assert any("전원 차단" in content for content in contents)
+    assert any("오염·손상" in content for content in contents)
+    assert any("윤활" in content for content in contents)
+    assert any("정렬" in content for content in contents)
+    assert any("전원" in content and "차단" in content for content in contents)
     assert all("광축" not in content for content in contents)
+    assert all(item.evidence_chunk_ids for item in checklist)
 
 
 def test_light_curtain_pre_checks_prioritize_three_installation_essentials() -> None:

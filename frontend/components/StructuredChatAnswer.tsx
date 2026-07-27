@@ -198,6 +198,9 @@ export default function StructuredChatAnswer({
           <div><h4>관련 장비·부품</h4><TextList items={[...answer.related_equipment, ...answer.related_components]} /></div>
           <div><h4>문서에서 확인할 수 있는 작업</h4><TextList items={answer.supported_tasks} /></div>
         </section>
+        {answer.unverified_information.length > 0 && (
+          <section className="structured-section muted"><h4>확인하지 못한 내용</h4><TextList items={answer.unverified_information} /></section>
+        )}
         <ConflictSection items={answer.conflicts} sourceNumbers={sourceNumbers} />
       </div>
     );

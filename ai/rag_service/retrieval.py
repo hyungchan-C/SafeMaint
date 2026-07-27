@@ -542,7 +542,6 @@ def maintenance_query_expansions(value: str) -> tuple[str, ...]:
     terms: list[str] = []
     for action in action_terms(value):
         terms.extend(MAINTENANCE_ACTION_QUERY_EXPANSIONS.get(action, ()))
-    terms.extend(_generic_query_expansion_terms(value))
     return tuple(dict.fromkeys(terms))
 
 
@@ -565,20 +564,46 @@ def _compact_for_phrase(value: str) -> str:
     )
 
 
+DOMAIN_PHRASE_GROUPS: tuple[dict[str, tuple[str, ...]], ...] = (
+    {
+        "triggers": ("라이트커튼", "라이트 커튼", "light curtain"),
+        "aliases": ("라이트커튼", "광전자식 방호장치", "ESPE"),
+        "matches": ("라이트커튼", "라이트 커튼", "광전자식 방호장치", "espe"),
+        "negatives": ("커튼월", "커튼 월", "curtain wall"),
+    },
+)
+
+
 def domain_phrase_group_indexes(value: str) -> tuple[int, ...]:
-    return ()
+    compact = _compact_for_phrase(value)
+    return tuple(
+        index
+        for index, group in enumerate(DOMAIN_PHRASE_GROUPS)
+        if any(_compact_for_phrase(trigger) in compact for trigger in group["triggers"])
+    )
 
 
 def domain_phrase_query_terms(value: str) -> tuple[str, ...]:
-    return _generic_query_expansion_terms(value)
+    terms: list[str] = []
+    for index in domain_phrase_group_indexes(value):
+        terms.extend(DOMAIN_PHRASE_GROUPS[index]["aliases"])
+    return tuple(dict.fromkeys(terms))
 
 
 def _domain_phrase_matches(indexes: Sequence[int], text: str) -> bool:
-    return False
+    compact = _compact_for_phrase(text)
+    return any(
+        any(_compact_for_phrase(term) in compact for term in DOMAIN_PHRASE_GROUPS[index]["matches"])
+        for index in indexes
+    )
 
 
 def _domain_phrase_negative_matches(indexes: Sequence[int], text: str) -> bool:
-    return False
+    compact = _compact_for_phrase(text)
+    return any(
+        any(_compact_for_phrase(term) in compact for term in DOMAIN_PHRASE_GROUPS[index]["negatives"])
+        for index in indexes
+    )
 
 
 def _topic_phrase_terms(value: str) -> tuple[str, ...]:

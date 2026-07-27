@@ -485,12 +485,13 @@ def extract_sections_with_docling(
     header/rows를 분리해서 보관한다 (문장 중간이 아니라 표 중간에서 잘리는 것을 막기 위함).
     section_path는 제목 레벨을 스택으로 추적해 상위 제목까지 포함한 경로로 남긴다.
     """
-    from docling_core.types.doc import TableItem
-
     do_ocr = (
         force_ocr
         or _needs_ocr(pdf_path)
-        or _embedded_text_has_broken_font_mapping(pdf_path)
+        or (
+            Path(pdf_path).is_file()
+            and _embedded_text_has_broken_font_mapping(pdf_path)
+        )
     )
     if do_ocr:
         logger.info(
@@ -505,6 +506,16 @@ def extract_sections_with_docling(
     if runtime.max_pages is not None:
         conversion_limits["max_num_pages"] = runtime.max_pages
     doc = converter.convert(pdf_path, **conversion_limits).document
+
+    # Import only when the converted document actually contains items.  This
+    # keeps converter-limit tests and lightweight deployments independent from
+    # docling_core while the production Docling image still uses TableItem for
+    # real table extraction.
+    items = list(doc.iterate_items())
+    if items:
+        from docling_core.types.doc import TableItem
+    else:
+        TableItem = ()  # type: ignore[assignment,misc]
 
     sections = []
     header_stack: list[tuple[int, str]] = []
@@ -523,7 +534,7 @@ def extract_sections_with_docling(
                 "blocks": buf_blocks,
             })
 
-    for item, level in doc.iterate_items():
+    for item, level in items:
         label = str(getattr(item, "label", "") or "")
         if label in _SKIP_LABELS:
             continue
