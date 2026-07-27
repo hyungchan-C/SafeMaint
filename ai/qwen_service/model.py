@@ -94,20 +94,25 @@ class QwenEngine:
 
     def _classify_sync(self, request: ClassifyRequest) -> ClassifyResponse:
         labels = ", ".join(self.settings.occurrence_labels)
+        # 기존 영문 프롬프트:
+        # You are the SafeMaint accident-type classifier. Return JSON only.
+        # Classify only accident/risk occurrence labels. Do not classify the user's question intent.
         system_prompt = (
-            "You are the SafeMaint accident-type classifier. Return JSON only. "
-            "Classify only accident/risk occurrence labels. Do not classify the "
-            "user's question intent."
+            "당신은 SafeMaint의 사고유형 분류기입니다. JSON만 반환하세요. "
+            "사고·위험 발생 유형 라벨만 분류하고 사용자의 질문 의도는 분류하지 마세요."
         )
+        # 기존 영문 프롬프트:
+        # Choose one occurrence_type and up to three explicit_risk_factors from this label list.
+        # Return JSON exactly like the example below.
         user_prompt = (
-            "Choose one occurrence_type and up to three explicit_risk_factors "
-            "from this label list:\n"
+            "다음 라벨 목록에서 occurrence_type 하나와 explicit_risk_factors를 "
+            "최대 세 개까지 선택하세요:\n"
             f"{labels}\n\n"
-            "Return JSON exactly like "
+            "필드명은 변경하지 말고 다음 형식의 JSON만 반환하세요: "
             '{"occurrence_type":"label","confidence":0.0,'
             '"explicit_risk_factors":["label"]}.\n\n'
-            f"Work context:\n{self._context_text(request.context)}\n\n"
-            f"Question:\n{request.question}"
+            f"작업 맥락:\n{self._context_text(request.context)}\n\n"
+            f"질문:\n{request.question}"
         )
         text = self._generate(
             system_prompt,
@@ -134,21 +139,26 @@ class QwenEngine:
         )
 
     def _intent_sync(self, request: ClassifyRequest) -> IntentClassifyResponse:
+        # 기존 영문 프롬프트:
+        # You are the SafeMaint question-intent classifier. Return JSON only.
+        # Classify the user's purpose. Do not classify accident occurrence type.
         system_prompt = (
-            "You are the SafeMaint question-intent classifier. Return JSON only. "
-            "Classify the user's purpose. Do not classify accident occurrence type."
+            "당신은 SafeMaint의 질문 의도 분류기입니다. JSON만 반환하세요. "
+            "사용자의 질문 목적만 분류하고 사고 발생 유형은 분류하지 마세요."
         )
+        # 기존 영문 프롬프트:
+        # Choose question_intent by the user's purpose and return JSON exactly like the example.
         user_prompt = (
-            "Choose question_intent by the user's purpose:\n"
-            "- document_qa: asks what a selected PDF/document contains, asks about file metadata, or requests a document summary\n"
-            "- maintenance_guide: asks how to install, inspect, clean, repair, replace, stop, isolate, or perform work safely\n"
-            "- component_info: asks what a component is, what it does, where it is used, or what to watch for as component information\n"
-            "- clarification_required: the purpose is ambiguous\n\n"
-            "Return JSON exactly like "
+            "사용자의 목적에 따라 question_intent를 선택하세요:\n"
+            "- document_qa: 선택한 PDF·문서의 내용, 파일 정보 또는 문서 요약을 요청함\n"
+            "- maintenance_guide: 설치·점검·청소·수리·교체·정지·격리 또는 안전한 작업 방법을 요청함\n"
+            "- component_info: 부품의 정의·역할·용도·사용 위치 또는 부품 관련 주의점을 요청함\n"
+            "- clarification_required: 질문 목적이 모호함\n\n"
+            "필드명과 열거값은 변경하지 말고 다음 형식의 JSON만 반환하세요: "
             '{"question_intent":"component_info","intent_confidence":0.0,'
             '"clarification_question":null}.\n\n'
-            f"Work context:\n{self._context_text(request.context)}\n\n"
-            f"Question:\n{request.question}"
+            f"작업 맥락:\n{self._context_text(request.context)}\n\n"
+            f"질문:\n{request.question}"
         )
         text = self._generate(
             system_prompt,
@@ -174,24 +184,31 @@ class QwenEngine:
 
     def _answer_sync(self, request: AnswerRequest) -> AnswerResponse:
         evidence = self._evidence_text(request)
+        # 기존 영문 프롬프트:
+        # You are SafeMaint AI. Return exactly one valid JSON object. Do not output
+        # markdown, tables, hidden reasoning, or a full structured_answer object.
+        # Use only the provided evidence and candidate cards. Do not invent facts
+        # or state that work is approved or safe to proceed.
         system_prompt = (
-            "You are SafeMaint AI. Return exactly one valid JSON object. "
-            "Do not output markdown, tables, hidden reasoning, or a full structured_answer object. "
-            "Use only the provided evidence and candidate cards. "
-            "The top-level answer must be short Korean polite prose that directly answers the user's question. "
-            "All card/list values must be short Korean checklist-style phrases, not long explanations. "
-            "For maintenance answers, checklist_items must come only from final pre_checks. "
-            "Do not invent filenames, pages, laws, incidents, steps, or source IDs. "
-            "Do not say the work is approved or safe to proceed."
+            "당신은 SafeMaint AI입니다. 유효한 JSON 객체 하나만 반환하세요. "
+            "마크다운, 표, 숨겨진 추론 과정 또는 전체 structured_answer 객체를 출력하지 마세요. "
+            "제공된 근거와 후보 카드만 사용하세요. "
+            "최상위 answer는 사용자 질문에 직접 답하는 짧고 공손한 한국어 문장이어야 합니다. "
+            "모든 카드·목록 값은 긴 설명이 아닌 짧은 한국어 체크리스트 문구로 작성하세요. "
+            "유지보수 답변의 checklist_items는 최종 pre_checks에서만 가져오세요. "
+            "파일명, 페이지, 법령, 사고사례, 절차 또는 출처 ID를 지어내지 마세요. "
+            "작업이 승인되었거나 진행해도 안전하다고 말하지 마세요."
         )
+        # 기존 영문 입력 구분명: Answer type, Work context, Analysis,
+        # Candidate cards from backend, Evidence, Question.
         user_prompt = (
-            f"Answer type: {request.answer_type}\n"
+            f"답변 유형: {request.answer_type}\n"
             f"{self._compact_answer_format_for_type(request)}\n\n"
-            f"Work context:\n{self._context_text(request.context)}\n\n"
-            f"Analysis:\n{self._analysis_text(request.analysis)}\n\n"
-            f"Candidate cards from backend:\n{self._candidate_text(request)}\n\n"
-            f"Evidence:\n{evidence}\n\n"
-            f"Question:\n{request.question}"
+            f"작업 맥락:\n{self._context_text(request.context)}\n\n"
+            f"분석 결과:\n{self._analysis_text(request.analysis)}\n\n"
+            f"백엔드 후보 카드:\n{self._candidate_text(request)}\n\n"
+            f"근거:\n{evidence}\n\n"
+            f"질문:\n{request.question}"
         )
         generated = self._generate(
             system_prompt,
@@ -226,39 +243,46 @@ class QwenEngine:
         request: DocumentProfileRequest,
     ) -> DocumentProfileResponse:
         sample_text = self._profile_sample_text(request.sample_text)
+        # 기존 영문 프롬프트:
+        # You extract structured metadata from industrial PDF manuals. Return exactly
+        # one valid JSON object. Do not output markdown or reasoning. Use only the
+        # provided filename, form metadata, and sample text.
         system_prompt = (
-            "You extract structured metadata from industrial PDF manuals. "
-            "Return exactly one valid JSON object. Do not output markdown or reasoning. "
-            "Use only the provided filename, form metadata, and sample text."
+            "당신은 산업용 PDF 매뉴얼에서 구조화된 메타데이터를 추출합니다. "
+            "유효한 JSON 객체 하나만 반환하고 마크다운이나 추론 과정은 출력하지 마세요. "
+            "제공된 파일명, 입력 양식 메타데이터와 샘플 텍스트만 사용하세요."
         )
+        # 기존 영문 프롬프트:
+        # Extract a document profile for RAG routing and answer cards.
+        # Return this JSON schema only and keep every list item short and specific.
         user_prompt = (
-            "Extract a document profile for RAG routing and answer cards.\n"
-            "Return this JSON schema only:\n"
+            "RAG 검색 경로와 답변 카드에 사용할 문서 프로필을 추출하세요.\n"
+            "키 이름은 변경하지 말고 다음 JSON 스키마만 반환하세요:\n"
             "{"
-            '"product_names":["product or product family names"],'
-            '"model_names":["model or series names"],'
-            '"aliases":["short names users may ask"],'
-            '"equipment":["equipment or machines mentioned"],'
-            '"components":["parts, sensors, switches, modules, cables, covers, controllers"],'
-            '"supported_tasks":["installation/setting/wiring/inspection/maintenance tasks found"],'
-            '"safety_topics":["warnings, hazards, stop/safety topics found"],'
-            '"summary_points":["short Korean summary points"],'
-            '"document_keywords":["search keywords"],'
+            '"product_names":["제품명 또는 제품군 이름"],'
+            '"model_names":["모델명 또는 시리즈명"],'
+            '"aliases":["사용자가 질문할 수 있는 짧은 별칭"],'
+            '"equipment":["언급된 설비 또는 기계"],'
+            '"components":["부품·센서·스위치·모듈·케이블·커버·제어기"],'
+            '"supported_tasks":["확인된 설치·설정·배선·점검·유지보수 작업"],'
+            '"safety_topics":["확인된 경고·위험·정지·안전 주제"],'
+            '"summary_points":["짧은 한국어 요약"],'
+            '"document_keywords":["검색 키워드"],'
             '"confidence":0.0,'
-            '"extraction_notes":["uncertain or missing fields"]'
+            '"extraction_notes":["불확실하거나 누락된 필드"]'
             "}\n"
-            "Rules:\n"
-            "- Keep every list item short and specific.\n"
-            "- Do not include generic words alone such as 제품, 문서, 매뉴얼, 장비, 기계.\n"
-            "- Do not invent a manufacturer, model, equipment, task, law, or warning.\n"
-            "- Korean output is preferred for task/safety/summary fields.\n\n"
-            f"Title: {request.title}\n"
-            f"Original filename: {request.original_filename or ''}\n"
-            f"Manufacturer: {request.manufacturer or ''}\n"
-            f"Form product_type: {request.product_type or ''}\n"
-            f"Form model_name: {request.model_name or ''}\n"
-            f"Document type: {request.document_type or ''}\n\n"
-            f"Sample text:\n{sample_text}"
+            "규칙:\n"
+            "- 모든 목록 항목은 짧고 구체적으로 작성하세요.\n"
+            "- 제품, 문서, 매뉴얼, 장비, 기계 같은 일반 단어만 단독으로 넣지 마세요.\n"
+            "- 제조사, 모델, 설비, 작업, 법령 또는 경고를 지어내지 마세요.\n"
+            "- 작업·안전·요약 필드는 한국어로 작성하세요.\n\n"
+            f"제목: {request.title}\n"
+            f"원본 파일명: {request.original_filename or ''}\n"
+            f"제조사: {request.manufacturer or ''}\n"
+            f"입력된 제품 유형: {request.product_type or ''}\n"
+            f"입력된 모델명: {request.model_name or ''}\n"
+            f"문서 유형: {request.document_type or ''}\n\n"
+            f"샘플 텍스트:\n{sample_text}"
         )
         generated = self._generate(
             system_prompt,
@@ -2115,7 +2139,8 @@ class QwenEngine:
                     add_generation_prompt=True,
                 )
         else:
-            prompt = f"{system_prompt}\n\n{user_prompt}\n\nAnswer:"
+            # 기존 영문 생성 표지: Answer:
+            prompt = f"{system_prompt}\n\n{user_prompt}\n\n답변:"
         inputs = tokenizer(prompt, return_tensors="pt")
         input_device = self._input_device(model)
         inputs = inputs.to(input_device)
@@ -2359,28 +2384,31 @@ class QwenEngine:
 
     def _compact_answer_format_for_type(self, request: AnswerRequest) -> str:
         source_count = len(request.sources)
+        # 기존 영문 프롬프트:
+        # Return JSON only. Do not include structured_answer. Cite sources by number,
+        # use {content, evidence_chunk_ids}, and keep answers/cards short.
         common = (
-            "Return JSON only. Do not include structured_answer. "
-            "Cite sources by their number only, matching the [n] markers in Evidence "
-            f"(valid numbers are 1 to {source_count}); do not use chunk_id strings. "
-            "Every evidence-backed card item must be an object with content and evidence_chunk_ids, "
-            'where evidence_chunk_ids is a list of source numbers, e.g. ["2"]. '
-            "Keep answer under 2 Korean sentences. Keep each card item under 40 Korean characters."
+            "JSON만 반환하고 structured_answer는 포함하지 마세요. "
+            "근거의 [n] 표시에 맞춰 출처 번호만 인용하세요"
+            f"(유효한 번호는 1부터 {source_count}까지). chunk_id 문자열은 사용하지 마세요. "
+            "근거가 필요한 각 카드 항목은 content와 evidence_chunk_ids를 가진 객체여야 하며, "
+            'evidence_chunk_ids에는 ["2"]처럼 출처 번호 목록을 넣으세요. '
+            "answer는 한국어 두 문장 이내, 각 카드 항목은 한국어 40자 이내로 작성하세요."
         )
         if request.answer_type == "document_qa":
             return (
                 f"{common}\n"
-                "Schema: {answer, main_contents, related_equipment, related_components, "
+                "스키마: {answer, main_contents, related_equipment, related_components, "
                 "supported_tasks, unverified_information, conflicts, used_source_ids}. "
-                "supported_tasks means activities actually found in the selected PDF evidence. "
-                "If no activity is found, supported_tasks must be []."
+                "supported_tasks에는 선택한 PDF 근거에서 실제로 확인된 작업만 넣으세요. "
+                "확인된 작업이 없으면 supported_tasks는 []로 반환하세요."
             )
         if request.answer_type == "component_info":
             return (
                 f"{common}\n"
-                "Schema: {answer, one_line_description, main_roles, usage_locations, "
+                "스키마: {answer, one_line_description, main_roles, usage_locations, "
                 "precautions, additional_information_needed, conflicts, used_source_ids}. "
-                "Do not produce installation or maintenance procedure steps."
+                "설치 또는 유지보수 절차 단계는 작성하지 마세요."
             )
         manual_numbers = [
             index
@@ -2400,21 +2428,21 @@ class QwenEngine:
         ]
         return (
             f"{common}\n"
-            "Schema: {answer, status, core_warning, risk_basis, pre_checks, hazards, "
+            "스키마: {answer, status, core_warning, risk_basis, pre_checks, hazards, "
             "manual_steps, precautions, stop_conditions, related_regulations_and_incidents, "
             "additional_information_needed, conflicts, used_source_ids}. "
-            "hazards items must be {name, content, evidence_chunk_ids} and maximum 3 items. "
-            f"manual_steps may cite only these source numbers: {manual_numbers}. "
-            f"precautions (work precautions, not stop conditions) may cite only these source numbers: {precaution_numbers}. "
-            f"related_regulations_and_incidents and risk_basis may cite only these source numbers: {reference_numbers}. "
-            "Do not generate checklist_items; backend will derive them from pre_checks. "
-            "Do not output a risk score or risk level."
+            "hazards 항목은 {name, content, evidence_chunk_ids} 형식으로 최대 세 개만 작성하세요. "
+            f"manual_steps는 다음 출처 번호만 인용할 수 있습니다: {manual_numbers}. "
+            f"precautions는 작업 주의사항이며 정지 조건이 아닙니다. 다음 출처 번호만 인용하세요: {precaution_numbers}. "
+            f"related_regulations_and_incidents와 risk_basis는 다음 출처 번호만 인용하세요: {reference_numbers}. "
+            "checklist_items는 생성하지 마세요. 백엔드가 pre_checks에서 생성합니다. "
+            "위험 점수나 위험 등급은 출력하지 마세요."
         )
 
     def _candidate_text(self, request: AnswerRequest) -> str:
         candidate = self._normalized_candidate_structured_answer(request)
         if not candidate:
-            return "No backend candidate cards were supplied."
+            return "백엔드 후보 카드가 제공되지 않았습니다."
         compact = self._compact_candidate_value(candidate)
         return json.dumps(compact, ensure_ascii=False)
 

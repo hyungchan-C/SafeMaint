@@ -665,9 +665,45 @@ GENERIC_ENTITY_VALUES = {
     "제품",
     "제품과 기계",
     "기계장치",
+    "안전장치",
+    "광축",
+    "커튼",
     "문서",
     "매뉴얼",
 }
+DOCUMENT_ENTITY_PROFILE_PLACEHOLDERS = (
+    "미분류",
+    "미지정",
+    "알 수 없음",
+    "확인 불가",
+    "unknown",
+)
+DOCUMENT_ENTITY_EXCLUDED_APPLICATION_TERMS = (
+    "원자력",
+    "연소장치",
+    "연소 장치",
+    "방범/방재",
+    "방범·방재",
+    "방범 장치",
+    "방재 장치",
+)
+DOCUMENT_ENTITY_DESCRIPTION_MARKERS = (
+    "차단하여",
+    "향상",
+    "서버로",
+    "데이터 저장",
+    "저장하는",
+    "저장용",
+    "반드시",
+    "2중으로",
+    "방지하기 위해",
+    "방지하기 위한",
+    "기종 형태",
+)
+DOCUMENT_ENTITY_METADATA_PREFIX_PATTERN = re.compile(
+    r"^(?:\S*[_]\S*|\S*(?:19|20)\d{6}\S*|\S*(?:^|[-_.])KO(?:[-_.]|$)\S*)\s+",
+    re.IGNORECASE,
+)
 QUESTION_ACTION_WORDS = (
     "설치",
     "교체",
@@ -795,9 +831,7 @@ def source_based_fallback(
                     ),
                 ),
                 evidence_chunk_ids=chunk_ids,
-                unverified_information=[
-                    "검색된 부분 밖의 문서 전문은 확인하지 못했습니다."
-                ],
+                unverified_information=[],
             ),
             sources=sources,
             question=question,
@@ -1215,7 +1249,14 @@ def enriched_structured_answer(
                 # Do not let a model fill missing manufacturer requirements.
                 "pre_checks": fallback.pre_checks,
                 "hazards": value.hazards or fallback.hazards,
-                "manual_steps": value.manual_steps or fallback.manual_steps,
+                # A short Qwen answer must not replace the richer set of
+                # manufacturer-manual procedures found by RAG.
+                "manual_steps": _merge_evidence_items(
+                    value.manual_steps,
+                    fallback.manual_steps,
+                    dedupe_chunk_ids=False,
+                    limit=12,
+                ),
                 "precautions": _dedupe_maintenance_items(
                     value.precautions or fallback.precautions,
                     limit=8,
@@ -1224,12 +1265,23 @@ def enriched_structured_answer(
                     value.stop_conditions or fallback.stop_conditions,
                     limit=8,
                 ),
-                "related_regulations_and_incidents": (
-                    value.related_regulations_and_incidents
-                    or fallback.related_regulations_and_incidents
+                # Qwen may cite only one public-reference category even when RAG
+                # also retrieved verified laws, guides, or incident cases. Keep
+                # the model's verified references and supplement missing source
+                # categories from the evidence-based fallback.
+                "related_regulations_and_incidents": _merge_evidence_items(
+                    value.related_regulations_and_incidents,
+                    fallback.related_regulations_and_incidents,
+                    limit=8,
                 ),
-                "evidence_chunk_ids": value.evidence_chunk_ids
-                or fallback.evidence_chunk_ids,
+                "evidence_chunk_ids": list(
+                    dict.fromkeys(
+                        [
+                            *value.evidence_chunk_ids,
+                            *fallback.evidence_chunk_ids,
+                        ]
+                    )
+                ),
                 "additional_information_needed": (
                     value.additional_information_needed
                     or fallback.additional_information_needed
@@ -1250,8 +1302,7 @@ def enriched_structured_answer(
                 "supported_tasks": value.supported_tasks or fallback.supported_tasks,
                 "evidence_chunk_ids": value.evidence_chunk_ids
                 or fallback.evidence_chunk_ids,
-                "unverified_information": value.unverified_information
-                or fallback.unverified_information,
+                "unverified_information": [],
             }
         )
     if isinstance(value, ComponentAnswerDetails) and isinstance(
@@ -1273,6 +1324,38 @@ def enriched_structured_answer(
             }
         )
     return value
+
+
+def _merge_evidence_items(
+    primary: list[EvidenceBackedItem],
+    supplemental: list[EvidenceBackedItem],
+    *,
+    dedupe_chunk_ids: bool = True,
+    limit: int,
+) -> list[EvidenceBackedItem]:
+    merged: list[EvidenceBackedItem] = []
+    seen_chunk_ids: set[str] = set()
+    seen_content: set[str] = set()
+    for item in [*primary, *supplemental]:
+        chunk_ids = list(dict.fromkeys(item.evidence_chunk_ids))
+        content_key = " ".join(item.content.casefold().split())
+        if (
+            dedupe_chunk_ids
+            and chunk_ids
+            and all(chunk_id in seen_chunk_ids for chunk_id in chunk_ids)
+        ):
+            continue
+        if content_key and content_key in seen_content:
+            continue
+        merged.append(
+            item.model_copy(update={"evidence_chunk_ids": chunk_ids})
+        )
+        seen_chunk_ids.update(chunk_ids)
+        if content_key:
+            seen_content.add(content_key)
+        if len(merged) >= limit:
+            break
+    return merged
 
 
 def validated_checklist_items(
@@ -1544,8 +1627,18 @@ def finalize_maintenance_answer(
                     "core_warning": _core_warning_from_labels(labels),
                 }
             ),
-            "pre_checks": _dedupe_maintenance_items(value.pre_checks, limit=3),
+            "pre_checks": _dedupe_maintenance_items(
+                value.pre_checks,
+                validator=_is_maintenance_pre_check_phrase,
+                limit=3,
+            ),
             "hazards": hazards,
+            "manual_steps": _normalize_maintenance_items(
+                value.manual_steps,
+                formatter=_manual_step_phrase,
+                dedupe_semantic_keys=False,
+                limit=8,
+            ),
             "precautions": _dedupe_maintenance_items(value.precautions, limit=8),
             "stop_conditions": _dedupe_maintenance_items(
                 value.stop_conditions,
@@ -1597,7 +1690,7 @@ def finalize_document_answer(
         document_sources,
         "components",
         "product_names",
-        limit=8,
+        limit=16,
     ) or _document_related_entities(
         document_sources,
         existing=value.related_components,
@@ -1605,6 +1698,10 @@ def finalize_document_answer(
         generic_kind="component",
         limit=8,
     )
+    related_components = _dedupe_document_components(
+        related_components,
+        equipment=related_equipment,
+    )[:8]
     supported_tasks = _document_profile_strings(
         document_sources,
         "supported_tasks",
@@ -1627,10 +1724,7 @@ def finalize_document_answer(
                 if chunk_id in allowed_ids
             ]
             or chunk_ids,
-            "unverified_information": _document_unverified_information(
-                value.unverified_information,
-                has_supported_tasks=bool(supported_tasks),
-            ),
+            "unverified_information": [],
         }
     )
 
@@ -2295,13 +2389,23 @@ def _document_overview(
     profile = getattr(source, "document_profile", None)
     model_names = _profile_string_values(profile, "model_names") if isinstance(profile, dict) else []
     fallback_model_name = _document_model_name_from_source(source)
+    model_name = next(
+        (
+            normalized
+            for candidate in (
+                current.model_name,
+                *model_names,
+                fallback_model_name,
+            )
+            if (normalized := _normalize_document_model_name(candidate))
+        ),
+        None,
+    )
     return DocumentOverview(
         filename=source.original_filename or source.title or current.filename,
         document_type=_document_type_label(source),
         manufacturer=current.manufacturer,
-        model_name=current.model_name
-        or (model_names[0] if model_names else None)
-        or fallback_model_name,
+        model_name=model_name,
         version=(
             str(source.document_version)
             if source.document_version is not None
@@ -2309,6 +2413,39 @@ def _document_overview(
         ),
         authored_at=current.authored_at,
     )
+
+
+def _normalize_document_model_name(value: str | None) -> str | None:
+    if not value:
+        return None
+    model_name = _clean_source_excerpt(value).strip(" .,_-/")
+    if not model_name:
+        return None
+    if model_name.casefold() in {
+        "미지정",
+        "미지정 모델",
+        "미분류",
+        "알 수 없음",
+        "확인 불가",
+        "unknown",
+        "unknown model",
+        "n/a",
+    }:
+        return None
+    without_document_prefix = re.sub(
+        r"^(?:MSO|MANUAL|USER[-_ ]?MANUAL|UM)[-_ ]+",
+        "",
+        model_name,
+        flags=re.IGNORECASE,
+    ).strip(" .,_-/")
+    if without_document_prefix != model_name and without_document_prefix:
+        model_name = without_document_prefix
+        if (
+            re.fullmatch(r"[A-Z][A-Z0-9-]{1,20}", model_name, flags=re.IGNORECASE)
+            and not model_name.casefold().endswith(("series", "시리즈"))
+        ):
+            model_name = f"{model_name} 시리즈"
+    return model_name or None
 
 
 def _document_type_label(source: ChatSource) -> str:
@@ -2324,6 +2461,15 @@ def _document_type_label(source: ChatSource) -> str:
 
 
 def _document_model_name_from_source(source: ChatSource) -> str | None:
+    filename = source.original_filename or ""
+    locale_series_match = re.match(
+        r"^(?P<series>[A-Z][A-Z0-9-]{1,20})_(?:KO|KR|EN|JP|CN|ZH)_",
+        filename,
+        flags=re.IGNORECASE,
+    )
+    if locale_series_match:
+        return f"{locale_series_match.group('series').upper()} 시리즈"
+
     text = " ".join(
         value
         for value in (source.title or "", source.original_filename or "")
@@ -2339,7 +2485,6 @@ def _document_model_name_from_source(source: ChatSource) -> str | None:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
             return re.sub(r"\s+", " ", match.group(1)).strip(" .,_-/")
-    filename = source.original_filename or ""
     stem = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", filename).strip()
     if not stem:
         return None
@@ -2349,6 +2494,8 @@ def _document_model_name_from_source(source: ChatSource) -> str | None:
         if part and part.casefold() not in {"ko", "kr", "manual", "user", "pdf"}
     ]
     for part in parts:
+        if re.fullmatch(r"(?:TCD|DOC|MAN)\d+[A-Z0-9-]*", part, flags=re.IGNORECASE):
+            continue
         if re.search(r"[A-Z]{2,}", part) and re.search(r"\d|[-/]", part):
             return part.strip(" .,_-/")
     return None
@@ -2494,6 +2641,8 @@ def _polite_document_sentence(text: str) -> str:
         (r"있다$", "있습니다"),
         (r"없다$", "없습니다"),
         (r"이다$", "입니다"),
+        (r"였음$", "였습니다"),
+        (r"었음$", "었습니다"),
         (r"임$", "입니다"),
         (r"함$", "합니다"),
     )
@@ -2622,6 +2771,18 @@ def _document_entity_phrase(raw: str, *, known: bool = False) -> str:
         text,
     )
     text = re.sub(r"^(?:관련|주요|문서 내)\s+", "", text)
+    if DOCUMENT_ENTITY_METADATA_PREFIX_PATTERN.match(text):
+        text = _document_entity_name_from_description(text)
+    if re.fullmatch(r"SELV\s*전원\s*(?:공급\s*)?장치", text, flags=re.IGNORECASE):
+        return "안전 초저전압(SELV) 전원 공급 장치"
+    if any(marker in text.casefold() for marker in DOCUMENT_ENTITY_PROFILE_PLACEHOLDERS):
+        return ""
+    if any(marker in text for marker in DOCUMENT_ENTITY_EXCLUDED_APPLICATION_TERMS):
+        return ""
+    if any(marker in text for marker in DOCUMENT_ENTITY_DESCRIPTION_MARKERS):
+        text = _document_entity_name_from_description(text)
+    if re.fullmatch(r"전원\s+I/O\s+케이블", text, flags=re.IGNORECASE):
+        text = "전원·I/O 케이블"
     if len(text) > 32:
         nested = _document_generic_entity_candidates(text, kind="component")
         nested.extend(_document_generic_entity_candidates(text, kind="equipment"))
@@ -2653,6 +2814,62 @@ def _document_entity_phrase(raw: str, *, known: bool = False) -> str:
     if not known and len(tokens) > 1 and tokens[-1] in {"기계", "장비", "제품", "설비", "라인"}:
         return ""
     return text
+
+
+def _document_entity_name_from_description(text: str) -> str:
+    """Reduce a profile's feature sentence to its terminal product/component name."""
+
+    cleaned = _clean_source_excerpt(text).strip(" .,:;·-/[]()")
+    tokens = cleaned.split()
+    if not tokens:
+        return ""
+    last = tokens[-1]
+    if any(last.endswith(suffix) for suffix in COMPONENT_ENTITY_SUFFIXES):
+        if last == "케이블" and len(tokens) >= 3 and tokens[-2].casefold() == "i/o":
+            return " ".join(tokens[-3:])
+        if last == "커튼" and len(tokens) >= 2:
+            return " ".join(tokens[-2:])
+        if last in {"커버", "브라켓", "케이블", "모듈", "컨트롤러"} and len(tokens) >= 2:
+            return " ".join(tokens[-2:])
+        return last
+    return ""
+
+
+def _dedupe_document_components(
+    values: Iterable[str],
+    *,
+    equipment: Iterable[str],
+) -> list[str]:
+    """Remove usage fragments and collapse model-specific cable variants."""
+
+    equipment_keys = {
+        re.sub(r"\s+", "", value.casefold())
+        for value in equipment
+        if value
+    }
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        value = str(raw_value).strip()
+        if not value:
+            continue
+        compact = re.sub(r"\s+", "", value.casefold())
+        if value.endswith("방호장치"):
+            base = re.sub(r"\s*방호장치$", "", value).strip()
+            if re.sub(r"\s+", "", base.casefold()) in equipment_keys:
+                continue
+        if compact in seen:
+            continue
+        normalized.append(value)
+        seen.add(compact)
+
+    if any(value == "케이블" for value in normalized):
+        normalized = [
+            value
+            for value in normalized
+            if value == "케이블" or not value.endswith("케이블")
+        ]
+    return normalized
 
 
 def _document_phrase_in_sources(phrase: str, sources: list[ChatSource]) -> bool:
@@ -2758,23 +2975,6 @@ def _document_task_phrase(text: str) -> str:
     if content.endswith(("설치", "교체", "청소", "정비", "보수", "설정")):
         return f"{content} 확인"
     return ""
-
-
-def _document_unverified_information(
-    existing: Iterable[str],
-    *,
-    has_supported_tasks: bool,
-) -> list[str]:
-    values: list[str] = []
-    for item in existing:
-        text = _clean_source_excerpt(str(item))
-        if text and text not in values:
-            values.append(text)
-    if "검색된 부분 밖의 문서 전문은 확인하지 못했습니다." not in values:
-        values.append("검색된 부분 밖의 문서 전문은 확인하지 못했습니다.")
-    if not has_supported_tasks:
-        values.append("검색 근거에서 확인 가능한 작업 항목은 찾지 못했습니다.")
-    return values
 
 
 def _maintenance_pre_check_items(
@@ -2894,6 +3094,12 @@ def _manual_step_phrase(text: str) -> str:
         return ""
     lowered = cleaned.casefold()
 
+    if (
+        any(term in lowered for term in ("청소", "점검", "수리", "정비"))
+        and any(term in lowered for term in ("전원차단 스위치", "전원 차단 스위치"))
+        and any(term in lowered for term in ("상태로", "off", "오프", "차단 위치"))
+    ):
+        return "청소·점검·수리 전 전원 차단 스위치를 차단 위치로 전환합니다."
     if "베어링" in lowered and any(term in lowered for term in ("축", "하우징")) and any(
         term in lowered for term in ("손상", "치수")
     ):
@@ -3194,6 +3400,7 @@ def _normalize_maintenance_items(
     excluded_keys: set[str] | None = None,
     fallback_to_excluded: bool = False,
     min_items: int = 0,
+    dedupe_semantic_keys: bool = True,
     limit: int,
 ) -> list[EvidenceBackedItem]:
     normalized: list[EvidenceBackedItem] = []
@@ -3212,11 +3419,15 @@ def _normalize_maintenance_items(
             key = _maintenance_semantic_key(f"{item.content} {content}")
             if key in excluded and not allow_excluded:
                 continue
-            if key in seen_keys or content in seen_phrases:
+            if (
+                (dedupe_semantic_keys and key in seen_keys)
+                or content in seen_phrases
+            ):
                 continue
             normalized.append(item.model_copy(update={"content": content}))
             seen_phrases.add(content)
-            seen_keys.add(key)
+            if dedupe_semantic_keys:
+                seen_keys.add(key)
 
     collect(allow_excluded=False)
     if fallback_to_excluded and len(normalized) < min_items:
@@ -3336,6 +3547,10 @@ def _maintenance_item_priority(content: str) -> int:
 
 def _is_maintenance_pre_check_phrase(content: str) -> bool:
     text = content.casefold()
+    if _is_scope_or_applicability_candidate(text):
+        return False
+    if _looks_like_incomplete_pre_check(text):
+        return False
     if _looks_like_reference_only_phrase(text):
         return False
     return any(
@@ -3370,6 +3585,27 @@ def _is_maintenance_pre_check_phrase(content: str) -> bool:
             "교육",
         )
     )
+
+
+def _looks_like_incomplete_pre_check(text: str) -> bool:
+    """Reject OCR/table fragments that cannot stand as a check instruction."""
+
+    normalized = " ".join(text.split()).strip()
+    if not normalized:
+        return True
+    if normalized.count("(") != normalized.count(")"):
+        return True
+    if normalized.count("[") != normalized.count("]"):
+        return True
+    if normalized.count("'") % 2 or normalized.count('"') % 2:
+        return True
+    if re.search(
+        r"(?:,\s*자\s*산업|(?:을|를|이|가|은|는|및|또는|등|경우|전원|스위치|"
+        r"태그|태그를|케이블|작업자|상태로|상태를|상태에서))\s*[,.。]?$",
+        normalized,
+    ):
+        return True
+    return False
 
 
 def _looks_like_reference_only_phrase(text: str) -> bool:
@@ -3470,6 +3706,28 @@ def _pre_check_phrase(text: str) -> str:
     if not _has_meaningful_text(cleaned):
         return ""
     lowered = cleaned.casefold()
+    if _is_scope_or_applicability_candidate(lowered):
+        return ""
+    # Normalize common LOTO table fragments into complete, evidence-backed
+    # checks instead of exposing a sentence cut at a PDF column boundary.
+    if (
+        "작업을 완료" in lowered
+        and "작업자" in lowered
+        and "태그를 제거" in lowered
+    ):
+        return "작업 완료 후 담당 작업자만 잠금·표지를 제거하는지 확인합니다."
+    if (
+        "스위치" in lowered
+        and "조작금지" in lowered
+        and "태그" in lowered
+    ):
+        return "전원 차단 스위치에 조작금지 표지가 부착되어 있는지 확인합니다."
+    if (
+        any(term in lowered for term in ("청소", "점검", "수리", "정비"))
+        and any(term in lowered for term in ("전원차단 스위치", "전원 차단 스위치"))
+        and any(term in lowered for term in ("상태로", "off", "오프", "차단 위치"))
+    ):
+        return "청소·점검·수리 전 전원 차단 스위치가 차단 위치인지 확인합니다."
     if any(
         term in lowered
         for term in (
@@ -3534,6 +3792,32 @@ def _pre_check_phrase(text: str) -> str:
         return ""
 
     sentence = re.split(r"(?<=[.!?。])\s+", cleaned, maxsplit=1)[0]
+    # PDF 표·목록에서 추출된 요구조건은 종종 서술형 문장으로 끝난다.
+    # 작업 전 확인사항에는 그 문장을 그대로 복사하지 않고 확인 행동으로 표시한다.
+    sentence = re.sub(
+        r"설치된\s+(?P<equipment>.+?)의\s+외형\s+구조를\s+확인하였을\s+때\s+"
+        r"(?P<condition>.+?)\s+없는\s+상태로\s+구성되어\s+있다[.]?$",
+        lambda match: (
+            f"설치된 {match.group('equipment').strip()}에 "
+            f"{match.group('condition').strip()} 없는지 확인합니다."
+        ),
+        sentence,
+    )
+    sentence = re.sub(
+        r"(?P<condition>.+?)\s*(?:으로|로)\s*구성되어\s*있다[.]?$",
+        lambda match: f"{match.group('condition').strip()}인지 확인합니다.",
+        sentence,
+    )
+    sentence = re.sub(
+        r"(?P<condition>.+?)\s*상태로\s*(?:구성|설치)되어\s*있다[.]?$",
+        lambda match: f"{match.group('condition').strip()} 상태인지 확인합니다.",
+        sentence,
+    )
+    sentence = re.sub(
+        r"(?P<condition>.+?)\s*(?:되어|돼)\s*있다[.]?$",
+        lambda match: f"{match.group('condition').strip()}되어 있는지 확인합니다.",
+        sentence,
+    )
     sentence = re.sub(
         r"(?:반드시\s*)?(?:확인|점검|검사|시험|측정)하"
         r"(?:십시오|세요|여야 합니다|도록 합니다|기 바랍니다|여야 한다)[.]?$",
@@ -3550,10 +3834,42 @@ def _pre_check_phrase(text: str) -> str:
         sentence,
     )
     sentence = sentence.rstrip(" .。")
+    if sentence.endswith(("확인", "점검", "검사", "시험", "측정")):
+        sentence = f"{sentence}합니다"
     content = _compact_phrase(sentence, max_chars=72)
-    if not content or _looks_like_bad_card_text(content, enforce_length=False):
+    if (
+        not content
+        or _looks_like_incomplete_pre_check(content.casefold())
+        or _looks_like_bad_card_text(content, enforce_length=False)
+    ):
         return ""
     return content
+
+
+def _is_scope_or_applicability_candidate(text: str) -> bool:
+    """Exclude inspection scope/exemption prose from actionable pre-checks."""
+
+    compact = " ".join(text.casefold().split())
+    if any(
+        marker in compact
+        for marker in (
+            "적용범위",
+            "적용 범위",
+            "적용 대상",
+            "제외 대상",
+            "다음 각 목",
+            "다음 각 호",
+            "검사의 단위구간",
+        )
+    ):
+        return True
+    if "점검문을 열면" in compact and "컨베이어 시스템이 정지" in compact:
+        return True
+    if "점검문을 열어도" in compact and (
+        "철망" in compact or "감응형 방호장치" in compact
+    ):
+        return True
+    return False
 
 
 def _hazard_phrase(text: str) -> str:
@@ -4329,6 +4645,14 @@ REFERENCE_TOPIC_ALIASES: tuple[tuple[str, ...], ...] = (
         "근접센서",
         "근접스위치",
     ),
+    (
+        "컨베이어벨트",
+        "콘베이어벨트",
+        "벨트컨베이어",
+        "벨트콘베이어",
+        "컨베이어",
+        "콘베이어",
+    ),
 )
 
 
@@ -4360,6 +4684,15 @@ def _reference_source_relevant_to_question(
     source_topic = re.sub(r"[^0-9a-z가-힣]", "", source_text)
     if question_topic and question_topic in source_topic:
         return True
+    # A generic belt-conveyor question must not absorb a different conveyor
+    # subtype merely because both contain the word "컨베이어".
+    if (
+        any(term in source_topic for term in ("스크류컨베이어", "스크류콘베이어"))
+        and not any(
+            term in question_topic for term in ("스크류컨베이어", "스크류콘베이어")
+        )
+    ):
+        return False
     return any(
         any(alias in question_topic for alias in aliases)
         and any(alias in source_topic for alias in aliases)
@@ -4584,8 +4917,35 @@ def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword.casefold() in text for keyword in keywords)
 
 
+def repair_extracted_quantity_order(text: str) -> str:
+    """Repair a common PDF extraction error that displaces range/count tokens.
+
+    Some Korean PDFs store the parenthesized duration and repetition count in
+    separate positioned text boxes. Extractors can therefore emit
+    ``초 이상 을 회 이상 (5~6 ) 3 반복`` instead of
+    ``(5~6초 이상)을 3회 이상 반복``.
+    """
+
+    pattern = re.compile(
+        r"\s*(?P<duration_unit>초|분|시간)\s+이상\s+을\s+"
+        r"(?P<count_unit>회)\s+이상\s+"
+        r"\(\s*(?P<duration>\d+(?:\s*[~∼～-]\s*\d+)?)\s*\)\s*"
+        r"(?P<count>\d+)\s+반복"
+    )
+
+    def replacement(match: re.Match[str]) -> str:
+        duration = re.sub(r"\s+", "", match.group("duration"))
+        return (
+            f"({duration}{match.group('duration_unit')} 이상)을 "
+            f"{match.group('count')}{match.group('count_unit')} 이상 반복"
+        )
+
+    return pattern.sub(replacement, text)
+
+
 def _clean_source_excerpt(text: str) -> str:
     text = " ".join(text.split())
+    text = repair_extracted_quantity_order(text)
     text = re.sub(r"【[^】]{1,30}】\s*", "", text)
     text = re.sub(r"\[자료유형\].*?\[내용\]\s*", "", text)
     text = re.sub(r"\[제목\]\s*", "", text)
@@ -4594,6 +4954,16 @@ def _clean_source_excerpt(text: str) -> str:
     text = re.sub(r"\b점검\s*항목\s*확인\b", "", text)
     text = text.replace("○", " ")
     text = re.sub(r"^\(?[가-힣A-Za-z0-9]+\)?\s*[.)]\s*", "", text)
+    # OCR이 목록 번호 뒤의 마침표를 잃어버린 경우(예: "6 설치된 ...")도 제거한다.
+    # 숫자로 시작하는 모델·규격("16 GB" 등)은 보존하기 위해 한글 문장 앞 번호에만 적용한다.
+    text = re.sub(r"^\s*\d{1,3}\s+(?=[가-힣])", "", text)
+    # PDF/OCR 쪽 번호가 문장 끝에 붙은 경우("...상태였음.4")를 제거한다.
+    # 소수·규격 숫자는 보존하고, 한글 뒤 마침표와 고립된 숫자로 끝나는 경우만 정리한다.
+    text = re.sub(
+        r"(?<=[가-힣])([.。])\s*\d{1,3}(?:\s*입니다)?[.。]?\s*$",
+        r"\1",
+        text,
+    )
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 

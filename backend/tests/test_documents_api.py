@@ -235,6 +235,51 @@ def test_successful_upload_persists_streamed_size_hash_and_job(tmp_path: Path) -
     assert list(tmp_path.glob(".pdf-upload-*.part")) == []
 
 
+def test_reupload_reactivates_soft_deleted_document(tmp_path: Path) -> None:
+    content = b"%PDF-1.4\nreuploaded after delete\n%%EOF"
+    document = _existing_document()
+    document.lifecycle_status = "deleted"
+    document.deleted_at = datetime.now(timezone.utc)
+    document.metadata_json = {
+        "manufacturer": "old",
+        "model_number": "old",
+        "product_type": "old",
+    }
+    db = _UploadSession(
+        [
+            None,
+            DocumentType(
+                code="equipment_manual",
+                name="Equipment manual",
+                scope="company",
+                is_active=True,
+            ),
+            document,
+            1,
+        ]
+    )
+    original = settings.document_storage_dir
+    object.__setattr__(settings, "document_storage_dir", str(tmp_path))
+    try:
+        response = upload_document(
+            current_user=_current_user(),
+            db=db,  # type: ignore[arg-type]
+            file=UploadFile(filename="manual.pdf", file=BytesIO(content)),
+            product_type="bearing",
+            model_name="BTS",
+        )
+    finally:
+        object.__setattr__(settings, "document_storage_dir", original)
+
+    assert response.document_id == document.id
+    assert response.version_number == 2
+    assert document.lifecycle_status == "pending"
+    assert document.deleted_at is None
+    assert document.metadata_json["product_type"] == "bearing"
+    assert any(isinstance(item, DocumentVersion) for item in db.added)
+    assert any(isinstance(item, DocumentProcessingJob) for item in db.added)
+
+
 def test_upload_rejects_exact_duplicate_content(tmp_path: Path) -> None:
     content = b"%PDF-1.4\nduplicate\n%%EOF"
     document = _existing_document()

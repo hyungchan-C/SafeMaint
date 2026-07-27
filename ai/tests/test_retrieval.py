@@ -737,6 +737,78 @@ def test_maintenance_action_mismatch_is_excluded() -> None:
     assert [result.chunk_id for result in results] == ["chunk-replacement"]
 
 
+def test_conveyor_replacement_keeps_related_maintenance_incident() -> None:
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "컨베이어 벨트를 교체해야 해.",
+            "analysis": {"question_intent": "maintenance_guide"},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(min_similarity=0.1, maintenance_top_k=4),
+        embedder=object(),  # type: ignore[arg-type]
+    )
+    incident = {
+        "document_id": "incident-conveyor",
+        "chunk_id": "incident-belt-conveyor",
+        "title": "벨트컨베이어에 협착",
+        "source_type": "public_incident",
+        "document_scope": "public",
+        "original_filename": "belt-conveyor-incident.pdf",
+        "document_version": 1,
+        "section": "재해 원인",
+        "content": "벨트컨베이어 정비 작업 중 운전을 정지하지 않아 협착 사고가 발생했다.",
+        "content_hash": "z" * 64,
+        "page": 1,
+        "page_start": 1,
+        "page_end": 1,
+        "publisher": "public source",
+        "url": None,
+        "similarity": 0.8,
+        "postgres_keyword_score": 0.2,
+    }
+
+    results = retriever._rerank(request, [incident])
+
+    assert [result.chunk_id for result in results] == ["incident-belt-conveyor"]
+
+
+def test_conveyor_belt_replacement_keeps_plain_konveyor_incident_title() -> None:
+    request = InternalChatRequest.model_validate(
+        {
+            "question": "컨베이어 벨트를 교체해야 해.",
+            "analysis": {"question_intent": "maintenance_guide"},
+        }
+    )
+    retriever = PgvectorRetriever(
+        Settings(min_similarity=0.1, maintenance_top_k=4),
+        embedder=object(),  # type: ignore[arg-type]
+    )
+    incident = {
+        "document_id": "incident-konveyor",
+        "chunk_id": "incident-plain-konveyor",
+        "title": "콘베이어로 이송물질 운반 중 협착사고",
+        "source_type": "public_incident",
+        "document_scope": "public",
+        "original_filename": "konveyor-incident.pdf",
+        "document_version": 1,
+        "section": "재해 원인",
+        "content": "콘베이어 정비 작업 중 운전이 정지되지 않아 협착사고가 발생했다.",
+        "content_hash": "y" * 64,
+        "page": 1,
+        "page_start": 1,
+        "page_end": 1,
+        "publisher": "public source",
+        "url": None,
+        "similarity": 0.8,
+        "postgres_keyword_score": 0.2,
+    }
+
+    results = retriever._rerank(request, [incident])
+
+    assert [result.chunk_id for result in results] == ["incident-plain-konveyor"]
+
+
 def test_maintenance_bucket_quotas_prevent_one_source_type_from_dominating() -> None:
     request = InternalChatRequest.model_validate(
         {

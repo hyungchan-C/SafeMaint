@@ -3,10 +3,11 @@ import { describe, expect, it } from "vitest";
 
 import AnswerTabs from "@/components/AnswerTabs";
 import type {
+  ChatChecklistItem,
+  ChatSource,
   ComponentAnswerDetails,
   DocumentAnswerDetails,
   MaintenanceAnswerDetails,
-  ChatSource,
 } from "@/types/chat";
 
 
@@ -108,6 +109,7 @@ function renderTabs(
     | ComponentAnswerDetails
     | DocumentAnswerDetails,
   sources = [manualSource],
+  checklistItems: ChatChecklistItem[] = [],
 ) {
   return render(
     <AnswerTabs
@@ -116,6 +118,10 @@ function renderTabs(
       sources={sources}
       warning={null}
       onOpenDocument={() => {}}
+      checklistItems={checklistItems}
+      savedAssessmentId={null}
+      isSavingChecklist={false}
+      onSaveChecklist={() => {}}
     />,
   );
 }
@@ -140,6 +146,30 @@ describe("AnswerTabs", () => {
     expect(within(tablist).getByRole("tab", { name: "안전·중지" }))
       .toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("안전거리 기준을 확인하지 못한 경우")).toBeInTheDocument();
+    expect(screen.queryByText("추가 확인이 필요한 내용")).not.toBeInTheDocument();
+  });
+
+  it("renders the TBM checklist only inside the evidence tab", () => {
+    renderTabs(maintenanceAnswer, [manualSource, lawSource, incidentSource], [{
+      id: null,
+      content: "광축과 안전거리 확인",
+      sequence: 1,
+      is_required: true,
+      is_completed: false,
+      completed_by_user_id: null,
+      completed_at: null,
+      evidence_chunk_ids: ["manual-chunk"],
+    }]);
+
+    expect(screen.getByText("TBM 체크리스트")).not.toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "근거" }));
+
+    expect(screen.getByText("관련 법령")).toBeInTheDocument();
+    expect(screen.getByText("사고사례")).toBeInTheDocument();
+    expect(screen.getByText("매뉴얼 근거")).toBeInTheDocument();
+    expect(screen.getByText("검색 근거")).toBeInTheDocument();
+    expect(screen.getByText("TBM 체크리스트")).toBeVisible();
+    expect(screen.getByText("1. 광축과 안전거리 확인")).toBeInTheDocument();
   });
 
   it("renders component information as four purpose-specific tabs", () => {
@@ -207,7 +237,8 @@ describe("AnswerTabs", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "관련 항목" }));
     expect(screen.getByText("라이트커튼")).toBeInTheDocument();
-    expect(screen.getByText("체결 토크")).toBeInTheDocument();
+    expect(screen.queryByText("확인하지 못한 내용")).not.toBeInTheDocument();
+    expect(screen.queryByText("체결 토크")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "출처" }));
     const sourcePanel = screen.getByRole("tabpanel");

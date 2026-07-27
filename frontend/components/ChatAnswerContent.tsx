@@ -77,19 +77,11 @@ export default function ChatAnswerContent({
         sources={sources}
         warning={warning}
         onOpenDocument={onOpenDocument}
+        checklistItems={checklistItems}
+        savedAssessmentId={savedAssessmentId}
+        isSavingChecklist={isSavingChecklist}
+        onSaveChecklist={onSaveChecklist}
       />
-      {structuredAnswer.answer_type === "maintenance_guide" && checklistItems.length > 0 && (
-        <div className="answer-tabs-tbm-preserved" aria-label="TBM 체크리스트">
-          <StructuredChatAnswer
-            answer={structuredAnswer}
-            checklistItems={checklistItems}
-            sources={sources}
-            savedAssessmentId={savedAssessmentId}
-            isSavingChecklist={isSavingChecklist}
-            onSaveChecklist={onSaveChecklist}
-          />
-        </div>
-      )}
     </div>
   );
 }

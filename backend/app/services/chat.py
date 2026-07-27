@@ -44,6 +44,7 @@ from app.services.structured_answers import (
     finalize_maintenance_answer,
     no_evidence_answer,
     no_evidence_details,
+    repair_extracted_quantity_order,
     source_based_checklist_items,
     source_based_fallback,
     validated_structured_answer,
@@ -1670,6 +1671,7 @@ class ChatService:
     @staticmethod
     def _clean_qwen_excerpt(excerpt: str) -> str:
         text = " ".join(excerpt.split())
+        text = repair_extracted_quantity_order(text)
         text = re.sub(r"\[자료유형\]\s*.*?\[내용\]\s*", "", text)
         text = re.sub(r"\[제목\]\s*", "", text)
         text = re.sub(r"\s*\|\s*", " ", text)

@@ -173,6 +173,24 @@ SAFETY_CONTROL_ACTION_TERMS = frozenset(
         "lock",
     }
 )
+INCIDENT_MAINTENANCE_ACTION_TERMS = frozenset(
+    {
+        "교체",
+        "청소",
+        "세척",
+        "점검",
+        "검사",
+        "정비",
+        "보수",
+        "해체",
+        "분리",
+        "replace",
+        "clean",
+        "inspect",
+        "check",
+        "maintain",
+    }
+)
 KOREAN_TOKEN_SUFFIXES = (
     "으로는",
     "에서는",
@@ -411,6 +429,10 @@ def _strip_korean_suffix(token: str) -> str:
 
 
 def _term_matches(term: str, text: str) -> bool:
+    # Older public safety material frequently uses the spelling "콘베이어".
+    # Treat it as the same topic as the modern spelling "컨베이어".
+    term = term.replace("콘베이어", "컨베이어")
+    text = text.replace("콘베이어", "컨베이어")
     if re.fullmatch(r"[a-z]{1,3}", term):
         if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text):
             return True
@@ -443,6 +465,23 @@ def action_terms(value: str) -> tuple[str, ...]:
                 terms.append(action)
                 break
     return tuple(dict.fromkeys(terms))
+
+
+def _incident_maintenance_actions_compatible(
+    query_actions: Sequence[str],
+    row_actions: Sequence[str],
+) -> bool:
+    """Treat maintenance work variants as related only for accident evidence.
+
+    Accident datasets commonly describe a replacement accident as maintenance,
+    inspection, cleaning, or repair work.  Requiring the exact verb hides useful
+    cases even when the equipment topic matches.
+    """
+
+    return bool(
+        set(query_actions).intersection(INCIDENT_MAINTENANCE_ACTION_TERMS)
+        and set(row_actions).intersection(INCIDENT_MAINTENANCE_ACTION_TERMS)
+    )
 
 
 def _generic_query_expansion_terms(value: str) -> tuple[str, ...]:
@@ -519,7 +558,11 @@ def topic_terms(value: str) -> tuple[str, ...]:
 
 
 def _compact_for_phrase(value: str) -> str:
-    return re.sub(r"[\s_-]+", "", value.casefold())
+    return re.sub(
+        r"[\s_-]+",
+        "",
+        value.casefold().replace("콘베이어", "컨베이어"),
+    )
 
 
 def domain_phrase_group_indexes(value: str) -> tuple[int, ...]:
@@ -547,6 +590,35 @@ def _topic_phrase_matches(terms: Sequence[str], text: str) -> bool:
         return False
     compact_phrase = "".join(_compact_for_phrase(term) for term in terms)
     return bool(compact_phrase) and compact_phrase in _compact_for_phrase(text)
+
+
+def _conveyor_incident_topic_matches(
+    terms: Sequence[str],
+    text: str,
+    *,
+    source_type: str,
+) -> bool:
+    """Keep conveyor incidents relevant to a belt-conveyor maintenance query.
+
+    Public incident titles commonly say only "콘베이어" even when the selected
+    equipment/manual uses "컨베이어 벨트". Requiring the separate word "벨트"
+    discarded those otherwise relevant accident cases.
+    """
+
+    if source_type != "public_incident":
+        return False
+    normalized_terms = tuple(
+        term.replace("콘베이어", "컨베이어") for term in terms
+    )
+    if not any("컨베이어" in term for term in normalized_terms):
+        return False
+    normalized_text = text.replace("콘베이어", "컨베이어")
+    if (
+        "스크류컨베이어" in normalized_text
+        and not any("스크류컨베이어" in term for term in normalized_terms)
+    ):
+        return False
+    return "컨베이어" in normalized_text
 
 
 def _topic_match_threshold(term_count: int) -> int:
@@ -1777,6 +1849,11 @@ class PgvectorRetriever:
                 selected_topic_phrase_terms,
                 combined,
             )
+            conveyor_incident_topic_match = _conveyor_incident_topic_matches(
+                active_topic_terms,
+                combined,
+                source_type=source_type,
+            )
             topic_phrase_partial_collision = bool(
                 selected_documents_match_topic_phrase
                 and selected_topic_phrase_terms
@@ -1821,6 +1898,7 @@ class PgvectorRetriever:
                 and not is_selected_document
                 and document_scope == "public"
                 and not topic_phrase_match
+                and not conveyor_incident_topic_match
                 and not occurrence_match
                 and not (maintenance_safety_match and not topic_phrase_partial_collision)
             ):
@@ -1831,6 +1909,7 @@ class PgvectorRetriever:
             has_topic_match = (
                 not active_topic_terms
                 or topic_match_count >= _topic_match_threshold(len(active_topic_terms))
+                or conveyor_incident_topic_match
             )
             if (
                 not has_topic_match
@@ -1893,6 +1972,14 @@ class PgvectorRetriever:
                     query_action_terms
                     and row_action_terms
                     and not set(query_action_terms).intersection(row_action_terms)
+                    and not (
+                        source_type == "public_incident"
+                        and has_topic_match
+                        and _incident_maintenance_actions_compatible(
+                            query_action_terms,
+                            row_action_terms,
+                        )
+                    )
                     and not (
                         maintenance_safety_match
                         and set(row_action_terms).issubset(SAFETY_CONTROL_ACTION_TERMS)

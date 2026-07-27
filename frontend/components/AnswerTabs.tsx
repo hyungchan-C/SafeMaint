@@ -11,7 +11,9 @@ import {
 } from "react";
 
 import ChatSources from "@/components/ChatSources";
+import ChatChecklist from "@/components/ChatChecklist";
 import type {
+  ChatChecklistItem,
   ChatSource,
   ComponentAnswerDetails,
   DocumentAnswerDetails,
@@ -31,6 +33,10 @@ type Props = {
   sources: ChatSource[];
   warning?: string | null;
   onOpenDocument: (source: ChatSource) => void;
+  checklistItems: ChatChecklistItem[];
+  savedAssessmentId: string | null;
+  isSavingChecklist: boolean;
+  onSaveChecklist: (checkedIndices: number[]) => void;
 };
 
 type TabDefinition = {
@@ -204,6 +210,10 @@ export default function AnswerTabs({
   sources,
   warning,
   onOpenDocument,
+  checklistItems,
+  savedAssessmentId,
+  isSavingChecklist,
+  onSaveChecklist,
 }: Props) {
   const rawInstanceId = useId();
   const instanceId = `answer-${rawInstanceId.replaceAll(":", "")}`;
@@ -347,11 +357,6 @@ export default function AnswerTabs({
             <AnswerSection title="즉시 작업을 중지해야 하는 조건" tone="danger">
               {evidenceList(structuredAnswer.stop_conditions)}
             </AnswerSection>
-            {structuredAnswer.additional_information_needed.length > 0 && (
-              <AnswerSection title="추가 확인이 필요한 내용" tone="muted">
-                <TextList items={structuredAnswer.additional_information_needed} />
-              </AnswerSection>
-            )}
             {structuredAnswer.conflicts.length > 0 && (
               <AnswerSection title="근거 간 차이" tone="warning">
                 {evidenceList(structuredAnswer.conflicts)}
@@ -392,15 +397,25 @@ export default function AnswerTabs({
                 onSelectSource={selectSource}
               />
             </AnswerSection>
-            {maintenanceEvidenceSources.length > 0
-              ? (
+            <AnswerSection title="검색 근거">
+              {maintenanceEvidenceSources.length > 0 ? (
                 <ChatSources
                   sources={maintenanceEvidenceSources}
                   onOpenDocument={onOpenDocument}
                   idPrefix={instanceId}
+                  hideHeading
                 />
               )
-              : <p className="answer-tab-empty">표시할 검색 출처가 없습니다.</p>}
+                : <p className="answer-tab-empty">표시할 검색 출처가 없습니다.</p>}
+            </AnswerSection>
+            <AnswerSection title="TBM 체크리스트">
+              <ChatChecklist
+                items={checklistItems}
+                savedAssessmentId={savedAssessmentId}
+                isSaving={isSavingChecklist}
+                onSave={onSaveChecklist}
+              />
+            </AnswerSection>
           </div>
         ),
       },
@@ -464,6 +479,10 @@ export default function AnswerTabs({
       },
     ];
   } else {
+    const relatedItems = Array.from(new Set([
+      ...structuredAnswer.related_equipment,
+      ...structuredAnswer.related_components,
+    ]));
     const overview = [
       ["파일명", structuredAnswer.overview.filename],
       ["문서 종류", structuredAnswer.overview.document_type],
@@ -503,19 +522,11 @@ export default function AnswerTabs({
         content: (
           <div className="answer-tab-stack">
             <AnswerSection title="관련 장비·부품">
-              <TextList items={[
-                ...structuredAnswer.related_equipment,
-                ...structuredAnswer.related_components,
-              ]} />
+              <TextList items={relatedItems} />
             </AnswerSection>
             <AnswerSection title="문서에서 확인 가능한 작업">
               <TextList items={structuredAnswer.supported_tasks} />
             </AnswerSection>
-            {structuredAnswer.unverified_information.length > 0 && (
-              <AnswerSection title="확인하지 못한 내용" tone="muted">
-                <TextList items={structuredAnswer.unverified_information} />
-              </AnswerSection>
-            )}
             {structuredAnswer.conflicts.length > 0 && (
               <AnswerSection title="근거 간 차이" tone="warning">
                 {evidenceList(structuredAnswer.conflicts)}

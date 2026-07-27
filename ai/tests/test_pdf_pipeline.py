@@ -424,6 +424,41 @@ def test_positive_docling_convert_passes_limit_arguments(monkeypatch) -> None:
     assert calls == [{"max_file_size": 100, "max_num_pages": 5}]
 
 
+def test_broken_multiscript_font_mapping_requires_ocr() -> None:
+    corrupted = (
+        "\u0a95\u0a96\u0a97\u0a98\u0a99 "
+        "\u0985\u0986\u0987\u0988\u0989 "
+        "\u0b85\u0b86\u0b87\u0b88\u0b89 "
+        "\u0d05\u0d06\u0d07\u0d08\u0d09 "
+    ) * 20
+    sections = [{
+        "section_path": [corrupted],
+        "blocks": [{"type": "text", "text": corrupted}],
+    }]
+
+    assert pdf_pipeline._looks_like_broken_font_mapping(sections) is True
+
+
+def test_normal_korean_sections_do_not_require_ocr_retry() -> None:
+    korean = "단열 깊은 홈 볼 베어링의 교체와 설치 절차를 확인합니다. " * 20
+    sections = [{
+        "section_path": ["베어링 교체"],
+        "blocks": [{"type": "text", "text": korean}],
+    }]
+
+    assert pdf_pipeline._looks_like_broken_font_mapping(sections) is False
+
+
+def test_replacement_character_font_mapping_requires_ocr() -> None:
+    corrupted = ("������� �������İ� Ư¡ " * 30)
+    sections = [{
+        "section_path": [],
+        "blocks": [{"type": "text", "text": corrupted}],
+    }]
+
+    assert pdf_pipeline._looks_like_broken_font_mapping(sections) is True
+
+
 def test_docling_settings_parse_false_and_thread_count(monkeypatch) -> None:
     monkeypatch.setenv("DOCLING_REQUIRED", "false")
     monkeypatch.setenv("DOCLING_ALLOW_PYMUPDF_FALLBACK", "true")
