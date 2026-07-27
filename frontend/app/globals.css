@@ -824,7 +824,7 @@ a {
 .interface-icon { display: block; flex: 0 0 auto; height: 20px; width: 20px; }
 .quick-toolbar > span { color: var(--muted); font-size: 12px; margin-left: auto; }
 .toolbar-upload input, .file-icon input { display: none; }
-.gps-drawer { border-radius: 14px; border-top: 2px solid #132b3b; margin: 0 auto 18px; max-width: 1500px; overflow: hidden; }
+.gps-drawer { border-radius: 14px; border-top: 2px solid #132b3b; margin: 0 0 18px; overflow: hidden; width: 100%; }
 .gps-drawer summary { display: flex; align-items: center; gap: 10px; }
 .gps-map-panel, .gps-result-panel { margin: 18px auto; max-width: 1500px; }
 .gps-map-panel:first-child { margin-top: 0; }

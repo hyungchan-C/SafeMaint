@@ -1045,11 +1045,24 @@ class ChatService:
             return f"{subject} {action}"
         return subject or action
 
+    _TRAILING_PARTICLE_PATTERN = re.compile(
+        r"(?:으로부터|에서부터|이라도|라도|에서|으로|부터|까지|마저|조차|밖에|"
+        r"이나|은|는|을|를|이|가|과|와|도|만|의|에|나|로)$"
+    )
+
+    @staticmethod
+    def _strip_trailing_particle(token: str) -> str:
+        stripped = ChatService._TRAILING_PARTICLE_PATTERN.sub("", token)
+        return stripped if len(stripped) >= 2 else token
+
     @staticmethod
     def _question_subject(question: str) -> str:
         tokens = [
             token
-            for token in re.findall(r"[0-9A-Za-z가-힣_-]+", question)
+            for token in (
+                ChatService._strip_trailing_particle(raw_token)
+                for raw_token in re.findall(r"[0-9A-Za-z가-힣_-]+", question)
+            )
             if len(token) >= 2
             and token.casefold()
             not in QWEN_RELEVANCE_STOPWORDS

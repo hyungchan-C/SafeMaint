@@ -1,8 +1,8 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import SafetyAnswerView from "@/components/SafetyAnswerView";
-import StructuredChatAnswer from "@/components/StructuredChatAnswer";
+import StructuredChatAnswer, { ChatChecklist } from "@/components/StructuredChatAnswer";
 import type { ChatSource, StructuredAnswer } from "@/types/chat";
 
 
@@ -32,11 +32,7 @@ function renderAnswer(answer: StructuredAnswer) {
   return render(
     <StructuredChatAnswer
       answer={answer}
-      checklistItems={[]}
       sources={[source]}
-      savedAssessmentId={null}
-      isSavingChecklist={false}
-      onSaveChecklist={() => {}}
     />,
   );
 }
@@ -84,48 +80,32 @@ describe("StructuredChatAnswer", () => {
     expect(screen.queryByText("TBM 체크리스트")).not.toBeInTheDocument();
   });
 
-  it("renders maintenance summary, stop conditions and real checkboxes", () => {
-    render(
-      <StructuredChatAnswer
-        answer={{
-          answer_type: "maintenance_guide",
-          summary: {
-            status: "안전관리자 확인 필요",
-            risk_level: "높음",
-            risk_basis: [{ content: "설치 매뉴얼 근거", evidence_chunk_ids: ["chunk-1"] }],
-            core_warning: "모델별 기준을 확인하세요.",
-          },
-          pre_checks: [],
-          hazards: [{ name: "오검출", content: "검출 성능 저하", evidence_chunk_ids: ["chunk-1"] }],
-          manual_steps: [{ content: "설치 위치 확인", evidence_chunk_ids: ["chunk-1"] }],
-          precautions: [],
-          stop_conditions: [{ content: "모델 확인 불가", evidence_chunk_ids: ["chunk-1"] }],
-          related_regulations_and_incidents: [],
-          evidence_chunk_ids: ["chunk-1"],
-          conflicts: [],
-          additional_information_needed: [],
-        }}
-        checklistItems={[{
-          id: null,
-          content: "설치 위치 기준 확인",
-          sequence: 1,
-          is_required: true,
-          is_completed: false,
-          completed_by_user_id: null,
-          completed_at: null,
-          evidence_chunk_ids: ["chunk-1"],
-        }]}
-        sources={[source]}
-        savedAssessmentId={null}
-        isSavingChecklist={false}
-        onSaveChecklist={() => {}}
-      />,
-    );
+  it("renders maintenance summary and stop conditions without an inline checklist", () => {
+    renderAnswer({
+      answer_type: "maintenance_guide",
+      summary: {
+        status: "안전관리자 확인 필요",
+        risk_level: "높음",
+        risk_basis: [{ content: "설치 매뉴얼 근거", evidence_chunk_ids: ["chunk-1"] }],
+        core_warning: "모델별 기준을 확인하세요.",
+      },
+      pre_checks: [],
+      hazards: [{ name: "오검출", content: "검출 성능 저하", evidence_chunk_ids: ["chunk-1"] }],
+      manual_steps: [{ content: "설치 위치 확인", evidence_chunk_ids: ["chunk-1"] }],
+      precautions: [],
+      stop_conditions: [{ content: "모델 확인 불가", evidence_chunk_ids: ["chunk-1"] }],
+      related_regulations_and_incidents: [],
+      evidence_chunk_ids: ["chunk-1"],
+      conflicts: [],
+      additional_information_needed: [],
+    });
 
     expect(screen.queryByText("위험성평가")).not.toBeInTheDocument();
     expect(screen.queryByText("별도 위험성평가 필요")).not.toBeInTheDocument();
     expect(screen.getByText("4. 즉시 작업을 중지해야 하는 조건")).toBeInTheDocument();
-    expect(screen.getByRole("checkbox")).toBeInTheDocument();
+    // TBM 체크리스트는 이제 이 컴포넌트가 아니라 상단의 전용 카드에서 렌더링된다.
+    expect(screen.queryByText("TBM 체크리스트")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   });
 
   it("renders no-evidence and clarification layouts", () => {
@@ -138,11 +118,7 @@ describe("StructuredChatAnswer", () => {
           required_documents: ["제조사 매뉴얼"],
           work_safety_notice: null,
         }}
-        checklistItems={[]}
         sources={[]}
-        savedAssessmentId={null}
-        isSavingChecklist={false}
-        onSaveChecklist={() => {}}
       />,
     );
     expect(screen.getByText("검증 근거 부족")).toBeInTheDocument();
@@ -154,11 +130,7 @@ describe("StructuredChatAnswer", () => {
           question: "어떤 정보가 필요한가요?",
           options: ["부품 정보", "설치 방법"],
         }}
-        checklistItems={[]}
         sources={[]}
-        savedAssessmentId={null}
-        isSavingChecklist={false}
-        onSaveChecklist={() => {}}
       />,
     );
     expect(screen.getByText("질문 목적 확인")).toBeInTheDocument();
@@ -186,11 +158,7 @@ describe("StructuredChatAnswer", () => {
             conflicts: [],
             additional_information_needed: [],
           }}
-          checklistItems={[]}
           sources={[source]}
-          savedAssessmentId={null}
-          isSavingChecklist={false}
-          onSaveChecklist={() => {}}
         />
         <article id="chat-source-1">검색 근거 카드</article>
       </>,
@@ -201,5 +169,33 @@ describe("StructuredChatAnswer", () => {
       "#chat-source-1",
     );
     expect(document.getElementById("chat-source-1")).not.toBeNull();
+  });
+});
+
+describe("ChatChecklist", () => {
+  it("saves the checked indices when the save button is clicked", () => {
+    const onSave = vi.fn();
+    render(
+      <ChatChecklist
+        items={[{
+          id: null,
+          content: "설치 위치 기준 확인",
+          sequence: 1,
+          is_required: true,
+          is_completed: false,
+          completed_by_user_id: null,
+          completed_at: null,
+          evidence_chunk_ids: [],
+        }]}
+        savedAssessmentId={null}
+        isSaving={false}
+        onSave={onSave}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByText("이 체크리스트 저장"));
+
+    expect(onSave).toHaveBeenCalledWith([0]);
   });
 });

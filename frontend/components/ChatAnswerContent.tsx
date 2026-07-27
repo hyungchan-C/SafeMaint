@@ -1,7 +1,6 @@
 "use client";
 
 import type {
-  ChatChecklistItem,
   ChatSource,
   StructuredAnswer,
 } from "@/types/chat";
@@ -14,24 +13,16 @@ import StructuredChatAnswer from "@/components/StructuredChatAnswer";
 type Props = {
   answer: string;
   structuredAnswer?: StructuredAnswer | null;
-  checklistItems: ChatChecklistItem[];
   sources: ChatSource[];
   warning?: string | null;
-  savedAssessmentId: string | null;
-  isSavingChecklist: boolean;
-  onSaveChecklist: (checkedIndices: number[]) => void;
   onOpenDocument: (source: ChatSource) => void;
 };
 
 export default function ChatAnswerContent({
   answer,
   structuredAnswer,
-  checklistItems,
   sources,
   warning,
-  savedAssessmentId,
-  isSavingChecklist,
-  onSaveChecklist,
   onOpenDocument,
 }: Props) {
   if (!structuredAnswer) {
@@ -57,11 +48,7 @@ export default function ChatAnswerContent({
         <p className="chat-answer-full-text">{answer}</p>
         <StructuredChatAnswer
           answer={structuredAnswer}
-          checklistItems={checklistItems}
           sources={sources}
-          savedAssessmentId={savedAssessmentId}
-          isSavingChecklist={isSavingChecklist}
-          onSaveChecklist={onSaveChecklist}
         />
         <ChatSources sources={sources} onOpenDocument={onOpenDocument} />
         {warning && <p className="answer-tab-warning">⚠ {warning}</p>}
@@ -78,18 +65,6 @@ export default function ChatAnswerContent({
         warning={warning}
         onOpenDocument={onOpenDocument}
       />
-      {structuredAnswer.answer_type === "maintenance_guide" && checklistItems.length > 0 && (
-        <div className="answer-tabs-tbm-preserved" aria-label="TBM 체크리스트">
-          <StructuredChatAnswer
-            answer={structuredAnswer}
-            checklistItems={checklistItems}
-            sources={sources}
-            savedAssessmentId={savedAssessmentId}
-            isSavingChecklist={isSavingChecklist}
-            onSaveChecklist={onSaveChecklist}
-          />
-        </div>
-      )}
     </div>
   );
 }

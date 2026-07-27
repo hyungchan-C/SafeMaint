@@ -40,19 +40,6 @@ def _detail(response: object, fallback: str) -> str:
         return fallback
 
 
-def _catalog_id_for_match(document: Document) -> str:
-    metadata = document.metadata_json or {}
-    catalog_id = str(metadata.get(CATALOG_METADATA_KEY) or "")
-    if not catalog_id:
-        raise HTTPException(status.HTTP_409_CONFLICT, "선택한 문서의 이미지 인덱스가 준비되지 않았습니다.")
-    if not str(metadata.get(CATALOG_INDEX_VERSION_KEY) or ""):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "선택한 문서는 이전 비전 인덱스 형식입니다. 문서 목록에서 비전 재인덱싱을 실행해 주세요.",
-        )
-    return catalog_id
-
-
 def _current_catalog_id(document: Document) -> str | None:
     """Return the catalog id only when the document has a current vision index."""
     metadata = document.metadata_json or {}
