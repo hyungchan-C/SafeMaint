@@ -14,24 +14,24 @@ import StructuredChatAnswer from "@/components/StructuredChatAnswer";
 type Props = {
   answer: string;
   structuredAnswer?: StructuredAnswer | null;
-  checklistItems: ChatChecklistItem[];
   sources: ChatSource[];
   warning?: string | null;
-  savedAssessmentId: string | null;
-  isSavingChecklist: boolean;
-  onSaveChecklist: (checkedIndices: number[]) => void;
+  checklistItems?: ChatChecklistItem[];
+  savedAssessmentId?: string | null;
+  isSavingChecklist?: boolean;
+  onSaveChecklist?: (checkedIndices: number[]) => void;
   onOpenDocument: (source: ChatSource) => void;
 };
 
 export default function ChatAnswerContent({
   answer,
   structuredAnswer,
-  checklistItems,
   sources,
   warning,
-  savedAssessmentId,
-  isSavingChecklist,
-  onSaveChecklist,
+  checklistItems = [],
+  savedAssessmentId = null,
+  isSavingChecklist = false,
+  onSaveChecklist = () => {},
   onOpenDocument,
 }: Props) {
   if (!structuredAnswer) {
@@ -57,11 +57,7 @@ export default function ChatAnswerContent({
         <p className="chat-answer-full-text">{answer}</p>
         <StructuredChatAnswer
           answer={structuredAnswer}
-          checklistItems={checklistItems}
           sources={sources}
-          savedAssessmentId={savedAssessmentId}
-          isSavingChecklist={isSavingChecklist}
-          onSaveChecklist={onSaveChecklist}
         />
         <ChatSources sources={sources} onOpenDocument={onOpenDocument} />
         {warning && <p className="answer-tab-warning">⚠ {warning}</p>}

@@ -8,6 +8,11 @@ import wave
 from app.core.config import settings
 
 _TTS_CHUNK_MAX_LENGTH = 120
+# CPU synthesis takes roughly proportional to chunk length, so the first
+# streamed chunk (which sets time-to-first-audio) is re-split much shorter
+# than the rest so playback can start sooner; later chunks stay at the
+# normal size since the user is already listening by then.
+_TTS_FIRST_CHUNK_MAX_LENGTH = 30
 
 
 KOREAN_TTS_REPLACEMENTS = {
@@ -137,8 +142,33 @@ class SupertonicSpeechService:
             )
         return self._encode_wav(samples)
 
+    async def warmup(self) -> None:
+        """서버 시작 시 미리 한 번 호출해 TTS 모델을 메모리에 올려 둔다. 그렇지 않으면
+        재시작 이후 첫 사용자가 모델 로딩 지연(수 초~수십 초)을 그대로 겪게 된다."""
+        await asyncio.to_thread(self._get_tts)
+
     async def synthesize(self, text: str, speed: float) -> bytes:
         return await asyncio.to_thread(self._synthesize_sync, text, speed)
+
+    @staticmethod
+    def _split_head_by_words(text: str, max_len: int) -> list[str]:
+        """Word-boundary split, used only for the first streamed chunk.
+        chunk_text() only breaks at sentence ends, so a single long
+        comma-separated sentence (common in checklist-style answers) would
+        otherwise pass through as one oversized first chunk."""
+        words = text.split(" ")
+        pieces: list[str] = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if not current or len(candidate) <= max_len:
+                current = candidate
+            else:
+                pieces.append(current)
+                current = word
+        if current:
+            pieces.append(current)
+        return pieces
 
     async def synthesize_stream(self, text: str, speed: float) -> AsyncIterator[bytes]:
         """Yield length-prefixed WAV frames (4-byte big-endian length + WAV bytes)
@@ -148,6 +178,11 @@ class SupertonicSpeechService:
 
         prepared = prepare_korean_text(text)
         pieces = chunk_text(prepared, _TTS_CHUNK_MAX_LENGTH)
+        if pieces and len(pieces[0]) > _TTS_FIRST_CHUNK_MAX_LENGTH:
+            head_pieces = self._split_head_by_words(
+                pieces[0], _TTS_FIRST_CHUNK_MAX_LENGTH
+            )
+            pieces = head_pieces + pieces[1:]
         for piece in pieces:
             wav_bytes = await asyncio.to_thread(self._synthesize_piece_sync, piece, speed)
             yield len(wav_bytes).to_bytes(4, "big") + wav_bytes

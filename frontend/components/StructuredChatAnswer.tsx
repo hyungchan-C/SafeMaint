@@ -1,8 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
-
-import ChatChecklist from "@/components/ChatChecklist";
+import { useEffect, useMemo, useState } from "react";
 import type {
   ChatChecklistItem,
   ChatSource,
@@ -13,11 +11,7 @@ import type {
 
 type Props = {
   answer: StructuredAnswer;
-  checklistItems: ChatChecklistItem[];
   sources: ChatSource[];
-  savedAssessmentId: string | null;
-  isSavingChecklist: boolean;
-  onSaveChecklist: (checkedIndices: number[]) => void;
 };
 
 function EvidenceList({
@@ -80,13 +74,85 @@ function ConflictSection({
   );
 }
 
+function initialCheckedIndices(items: ChatChecklistItem[]): Set<number> {
+  const indices = new Set<number>();
+  items.forEach((item, index) => {
+    if (item.is_completed) indices.add(index);
+  });
+  return indices;
+}
+
+export function ChatChecklist({
+  items,
+  savedAssessmentId,
+  isSaving,
+  onSave,
+}: {
+  items: ChatChecklistItem[];
+  savedAssessmentId: string | null;
+  isSaving: boolean;
+  onSave: (checkedIndices: number[]) => void;
+}) {
+  // 체크는 항상 로컬 상태로 자유롭게 바꾸고, "저장"을 눌러야 그 시점의 체크 상태
+  // 전체가 DB에 반영된다(처음 저장이든, 이미 저장된 뒤 다시 저장이든 동일). 그래야
+  // 저장이 한 번으로 끝나지 않고 몇 번이든 다시 체크하고 다시 저장할 수 있다.
+  // 인덱스(배열 위치) 기준으로 추적하는 이유: 백엔드가 저장 시 sequence를 1부터
+  // 다시 매기기 때문에, 원래 항목의 sequence 값과 저장 직후 sequence 값이 어긋날
+  // 수 있다(예: 모델 출력 중 일부가 걸러져 원래 sequence에 구멍이 있던 경우).
+  const [checked, setChecked] = useState<Set<number>>(() => initialCheckedIndices(items));
+  useEffect(() => setChecked(initialCheckedIndices(items)), [items]);
+  if (!items.length) return null;
+  const isSaved = savedAssessmentId !== null;
+
+  return (
+    <section className="structured-section maintenance-checklist">
+      <div className="structured-section-title">
+        <h4>TBM 체크리스트</h4>
+        <span>{isSaved ? "저장됨" : "채팅 미리보기"}</span>
+      </div>
+      <div className="chat-checklist-items">
+        {items.map((item, index) => {
+          const isChecked = checked.has(index);
+          return (
+            <label className={isChecked ? "checked" : ""} key={`${item.sequence}-${item.content}`}>
+              <input
+                type="checkbox"
+                checked={isChecked}
+                onChange={(event) => setChecked((current) => {
+                  const next = new Set(current);
+                  if (event.target.checked) next.add(index);
+                  else next.delete(index);
+                  return next;
+                })}
+              />
+              <span>{item.sequence}. {item.content}</span>
+              {item.is_required && <strong>필수</strong>}
+            </label>
+          );
+        })}
+      </div>
+      <button
+        type="button"
+        className="chat-checklist-save"
+        onClick={() => onSave(Array.from(checked))}
+        disabled={isSaving}
+      >
+        {isSaving ? "저장 중..." : isSaved ? "변경사항 저장" : "이 체크리스트 저장"}
+      </button>
+      <p className="structured-note">
+        {isSaved
+          ? "체크 상태를 바꾼 뒤에는 \"변경사항 저장\"을 다시 눌러야 DB에 반영됩니다."
+          : "저장 전에는 미리보기이며 DB에 반영되지 않습니다. \"이 체크리스트 저장\"을 누르면 위험성평가로 "
+            + "등록되고, 이후에도 체크 상태를 바꾼 뒤 다시 저장할 수 있습니다. 실제 작업 전 현장 조건과 "
+            + "매뉴얼을 다시 확인하고 안전관리자의 검토를 받아야 합니다."}
+      </p>
+    </section>
+  );
+}
+
 export default function StructuredChatAnswer({
   answer,
-  checklistItems,
   sources,
-  savedAssessmentId,
-  isSavingChecklist,
-  onSaveChecklist,
 }: Props) {
   const sourceNumbers = useMemo(
     () => new Map(sources.map((source, index) => [source.chunk_id, index + 1])),
@@ -171,12 +237,6 @@ export default function StructuredChatAnswer({
         <section className="structured-section"><h4>5. 관련 회사 기준·법령·가이드·사고사례</h4><EvidenceList items={answer.related_regulations_and_incidents} sourceNumbers={sourceNumbers} /></section>
       )}
       <ConflictSection items={answer.conflicts} sourceNumbers={sourceNumbers} />
-      <ChatChecklist
-        items={checklistItems}
-        savedAssessmentId={savedAssessmentId}
-        isSaving={isSavingChecklist}
-        onSave={onSaveChecklist}
-      />
       {answer.additional_information_needed.length > 0 && (
         <section className="structured-section muted"><h4>6. 추가 확인이 필요한 내용</h4><TextList items={answer.additional_information_needed} /></section>
       )}

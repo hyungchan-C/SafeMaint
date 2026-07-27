@@ -44,11 +44,7 @@ describe("ChatAnswerContent", () => {
           conflicts: [],
           additional_information_needed: [],
         }}
-        checklistItems={[]}
         sources={[source]}
-        savedAssessmentId={null}
-        isSavingChecklist={false}
-        onSaveChecklist={() => {}}
         onOpenDocument={() => {}}
       />,
     );
@@ -63,11 +59,7 @@ describe("ChatAnswerContent", () => {
       <ChatAnswerContent
         answer="검증 가능한 근거를 찾지 못했습니다."
         structuredAnswer={null}
-        checklistItems={[]}
         sources={[]}
-        savedAssessmentId={null}
-        isSavingChecklist={false}
-        onSaveChecklist={() => {}}
         onOpenDocument={() => {}}
       />,
     );
@@ -87,12 +79,8 @@ describe("ChatAnswerContent", () => {
           required_documents: ["승인된 제조사 매뉴얼"],
           work_safety_notice: "근거 확인 전에는 작업하지 마세요.",
         }}
-        checklistItems={[]}
         sources={[]}
         warning="검색 근거 없음"
-        savedAssessmentId={null}
-        isSavingChecklist={false}
-        onSaveChecklist={() => {}}
         onOpenDocument={() => {}}
       />,
     );
@@ -111,11 +99,7 @@ describe("ChatAnswerContent", () => {
           question: "부품 정보와 설치 방법 중 어떤 내용이 필요한가요?",
           options: ["부품 정보", "설치 방법"],
         }}
-        checklistItems={[]}
         sources={[]}
-        savedAssessmentId={null}
-        isSavingChecklist={false}
-        onSaveChecklist={() => {}}
         onOpenDocument={() => {}}
       />,
     );
