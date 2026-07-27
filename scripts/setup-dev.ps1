@@ -116,10 +116,42 @@ try {
         }
 
         Write-Host "[4/8] 개발용 DB, migration, seed, backend, RAG, worker, frontend 실행"
+        # docker-compose.override.yml(있는 경우)이 COMPOSE_PROFILES=cpu/gpu에 따라
+        # worker(CPU) 또는 worker-gpu 중 하나만 활성화한다. 실제로 어느 쪽이 켜졌는지는
+        # `compose config --services`로 확인해야 정확하다(COMPOSE_PROFILES는 .env뿐
+        # 아니라 셸 환경변수로도 줄 수 있어서, .env만 파싱해서는 틀릴 수 있음).
+        $activeServicesResult = Invoke-SafeMaintNativeCapture -Command {
+            & docker @composeArguments config --services
+        }
+        if ($activeServicesResult.ExitCode -ne 0) {
+            throw "docker compose config --services 실행에 실패했습니다.`n$(($activeServicesResult.CombinedOutput | Out-String).Trim())"
+        }
+        $activeServices = @(
+            $activeServicesResult.StandardOutput | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ -ne "" }
+        )
+        $workerService = if ($activeServices -contains "worker-gpu") {
+            "worker-gpu"
+        } elseif ($activeServices -contains "worker") {
+            "worker"
+        } else {
+            throw (
+                "worker 또는 worker-gpu 서비스가 활성화되어 있지 않습니다. " +
+                "docker-compose.override.yml을 포함했다면 .env의 COMPOSE_PROFILES를 " +
+                "cpu 또는 gpu로 설정하세요."
+            )
+        }
+        Write-Host "      사용할 문서 처리 worker: $workerService"
+
         # migrate/seed/backend and rag/worker share images. Building via
         # `up --build` asks BuildKit to build the same image concurrently on
-        # Docker Desktop, which can fail with a duplicated gRPC session.
-        & docker @composeArguments build backend rag frontend
+        # Docker Desktop, which can fail with a duplicated gRPC session. worker-gpu
+        # uses a separate image (safemaint-rag:*-gpu), so it needs its own build
+        # entry only when it's the service actually in use.
+        $buildTargets = @("backend", "rag", "frontend")
+        if ($workerService -eq "worker-gpu") {
+            $buildTargets += "worker-gpu"
+        }
+        & docker @composeArguments build @buildTargets
         if ($LASTEXITCODE -ne 0) {
             throw "docker compose build 실행에 실패했습니다."
         }
@@ -138,7 +170,7 @@ try {
         Write-Host "[7/8] backend, RAG, worker와 frontend 상태 확인"
         $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "backend" -Expected "healthy" -TimeoutSeconds $TimeoutSeconds
         $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "rag" -Expected "healthy" -TimeoutSeconds $TimeoutSeconds
-        $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "worker" -Expected "running" -TimeoutSeconds $TimeoutSeconds
+        $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service $workerService -Expected "running" -TimeoutSeconds $TimeoutSeconds
         $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "frontend" -Expected "running" -TimeoutSeconds $TimeoutSeconds
         $null = Wait-SafeMaintHttp -Url "http://127.0.0.1:$backendPort/health/ready" -TimeoutSeconds $TimeoutSeconds
         $null = Wait-SafeMaintHttp -Url "http://127.0.0.1:$frontendPort" -TimeoutSeconds $TimeoutSeconds
@@ -153,7 +185,7 @@ try {
     Write-Host "`nSafeMaint 개발 환경이 정상적으로 실행되었습니다." -ForegroundColor Green
     Write-Host "- Frontend: http://127.0.0.1:$frontendPort"
     Write-Host "- Backend readiness: http://127.0.0.1:$backendPort/health/ready"
-    Write-Host "- Local RAG and document worker: running"
+    Write-Host "- Local RAG and document worker ($workerService): running"
     Write-Host "- DBeaver: 127.0.0.1:$postgresPort / DB=$($envValues['POSTGRES_DB']) / User=$($envValues['POSTGRES_USER'])"
     Write-Host "- 상세 검증: .\scripts\verify-db.ps1"
     exit 0
