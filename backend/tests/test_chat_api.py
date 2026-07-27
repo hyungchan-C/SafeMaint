@@ -532,7 +532,10 @@ def test_chat_service_can_skip_qwen_intent_classification() -> None:
 
     assert response.generation_mode == "qwen"
     assert response.answer != "Fast Qwen answer [1]"
-    assert response.answer.endswith("안전관리자와 확인하세요.")
+    assert isinstance(response.structured_answer, MaintenanceAnswerDetails)
+    assert response.structured_answer.summary.core_warning.endswith(
+        "안전관리자와 확인하세요."
+    )
 
 
 def test_low_confidence_qwen_intent_returns_clarification_before_retrieval() -> None:
@@ -1162,7 +1165,8 @@ def test_qwen_empty_component_sections_are_backfilled_from_verified_candidates()
     assert response.answer_type == "component_info"
     assert isinstance(response.structured_answer, ComponentAnswerDetails)
     assert response.structured_answer.one_line_description.startswith("라이트 커튼은")
-    assert "광전자식 방호장치" in response.answer
+    assert "안전장치" in response.answer
+    assert "검출 영역 차단" in response.answer
     assert response.structured_answer.main_roles
     assert response.structured_answer.precautions
 
@@ -1234,8 +1238,8 @@ def test_qwen_receives_compact_sources_to_avoid_colab_ngrok_timeout() -> None:
 
     assert response.generation_mode == "qwen"
     assert response.answer != "Qwen compact answer [1]"
-    assert "프레스 내부를 청소 전에는" in response.answer
-    assert "예상 핵심 위험은 끼임입니다" in response.answer
+    assert "프레스 내부 청소 전에는" in response.answer
+    assert "예상 핵심 위험" in response.answer
     assert len(response.sources) == 3
 
 

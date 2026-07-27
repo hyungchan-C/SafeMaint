@@ -193,7 +193,30 @@ QWEN_MAINTENANCE_ACTION_SIGNAL_TERMS = (
     "replace",
     "repair",
 )
-QWEN_DOMAIN_PHRASE_GROUPS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = ()
+# 질문의 핵심 설비명과 검색 문서의 표현이 다른 경우를 위한 검색 동의어다.
+# 답변 문구를 고정하는 규칙이 아니라, 유사한 일반명 때문에 전혀 다른 설비
+# (예: 라이트 커튼 ↔ 건축 커튼월)가 Qwen 근거로 전달되는 것을 막는 필터다.
+QWEN_DOMAIN_PHRASE_GROUPS: tuple[
+    tuple[tuple[str, ...], tuple[str, ...]], ...
+] = (
+    (
+        (
+            "라이트커튼",
+            "라이트 커튼",
+            "light curtain",
+            "광전자식 방호장치",
+            "광전자식방호장치",
+        ),
+        (
+            "커튼월",
+            "curtain wall",
+            "벨트컨베이어",
+            "벨트콘베이어",
+            "컨베이어",
+            "conveyor",
+        ),
+    ),
+)
 GENERIC_QWEN_FALLBACK_ANSWERS = frozenset(
     {
         "검색된 근거를 기준으로 작업 전 확인할 핵심 사항을 요약했습니다.",

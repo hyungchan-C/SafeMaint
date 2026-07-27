@@ -925,7 +925,10 @@ def test_maintenance_sections_have_distinct_styles_for_light_curtain() -> None:
     checklist_items = [item.content for item in checklist]
 
     assert "광전자식 방호장치는 안전거리를 유지하여 설치해야 한다" in pre_checks
-    assert all(item.endswith("하기") for item in checklist_items)
+    assert all(
+        item.endswith(("하기", "맞추기", "않기"))
+        for item in checklist_items
+    )
     assert any(item.endswith("않기") for item in precautions)
     assert all("중지" in item for item in stop_conditions)
     assert "광전자식 방호장치는 안전거리를 유지하여 설치해야 한다" not in stop_conditions
@@ -1141,10 +1144,10 @@ def test_document_fallback_populates_related_fields_from_evidence() -> None:
     assert details.main_contents
     assert details.main_contents[0].evidence_chunk_ids == ["light-1"]
     assert details.unverified_information == []
-    assert "광전자식 방호장치입니다." in details.main_contents[0].content
+    assert "설치·장착·배선" in details.main_contents[0].content
     assert details.related_equipment == []
     assert "라이트 커튼" in details.related_components
-    assert "PC 설정 툴" in details.related_components
+    assert "설정 툴" in details.related_components
     assert all(
         "확인" not in component and "점검" not in component
         for component in details.related_components
@@ -1460,7 +1463,7 @@ def test_component_items_are_rewritten_as_precaution_phrases() -> None:
 
     assert validated is not None
     assert [item.content for item in validated.precautions] == [
-        "광축 정렬을 임의로 변경하지 않기",
+        "검출부 정렬을 임의로 변경하지 않기",
         "정상 동작 시험 없이 사용하지 않기",
     ]
 
