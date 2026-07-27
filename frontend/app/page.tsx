@@ -80,7 +80,6 @@ const initialForm = {
 };
 
 const levelLabel = { low: "낮음", medium: "보통", high: "높음" } as const;
-const ppeItems = ["안전모", "보호장갑", "보안경", "안전화"] as const;
 // 위경도 ↔ 미터 변환(근사). 위경도 1도당 거리는 위도에 따라 달라지므로
 // 경도는 현재 위도의 코사인으로 보정한다. 좁은 지역(수백m 이내) 가정.
 const METERS_PER_DEG_LAT = 111_320;
@@ -645,7 +644,10 @@ function WorkspaceScreen({
   const [documentViewerTarget, setDocumentViewerTarget] = useState<DocumentViewerTarget | null>(null);
   const [visualCategories, setVisualCategories] = useState<string[]>([]);
   const [visualFeatures, setVisualFeatures] = useState<string[]>([]);
-  const [ppeChecks, setPpeChecks] = useState<Record<string, boolean>>({});
+  // 근처 설비들이 요구하는 보호구 확인 상태. 설비별로 따로 관리하지 않고 하나로
+  // 공유해서, 여러 설비가 동시에 잡혀도 겹치는 항목(예: 안전화)은 한 번만 체크하면
+  // 된다. 설비 각각은 자신의 required_ppe가 이 Set에 전부 포함됐는지로 잠금이 풀린다.
+  const [gpsPpeChecked, setGpsPpeChecked] = useState<Set<string>>(new Set());
   const [locationStatus, setLocationStatus] = useState("위치 미확인");
   const [gpsOrigin, setGpsOrigin] = useState<{ latitude: number; longitude: number } | null>(null);
   const [gpsLivePosition, setGpsLivePosition] = useState<{ latitude: number; longitude: number } | null>(null);
@@ -1070,6 +1072,16 @@ function WorkspaceScreen({
     (candidate) => candidate.role === "ai" && Boolean(candidate.checklistItems?.length),
   );
   const latestChecklistMessage = latestChecklistMessageIndex >= 0 ? messages[latestChecklistMessageIndex] : null;
+
+  // 반경 안에 있는 설비들이 요구하는 보호구를 중복 없이 합친 목록. 설비가 하나도
+  // 없으면 빈 배열이라 보호구 패널에 표시할 게 없다.
+  const gpsRequiredPpe = Array.from(
+    new Set(
+      (gpsResult?.nearby ?? [])
+        .filter((item) => item.distance_m <= GPS_EQUIPMENT_RADIUS_M)
+        .flatMap((item) => item.required_ppe),
+    ),
+  );
 
   function requireActiveSession(response: Response) {
     if (response.status !== 401) return;
@@ -2331,7 +2343,10 @@ function WorkspaceScreen({
             {inRangeItems.length === 0 ? (
               <p className="muted-copy">반경 {GPS_EQUIPMENT_RADIUS_M}m 이내에 설비가 없습니다.</p>
             ) : (
-              inRangeItems.map((item) => (
+              inRangeItems.map((item) => {
+                const allPpeChecked = item.required_ppe.every((ppe) => gpsPpeChecked.has(ppe));
+                const checklistLocked = gpsSource !== "real" || !allPpeChecked;
+                return (
                 <div className="gps-nearby-item" key={item.equipment_code}>
                   <div className="notice">{item.site_name} · {item.equipment_name} 앞 ({item.distance_m}m)</div>
                   <div className="hazard-list">
@@ -2352,6 +2367,9 @@ function WorkspaceScreen({
                         테스트 좌표로 확인한 결과입니다. 실제 위치가 설비 근처로 들어오면 체크할 수 있습니다.
                       </p>
                     )}
+                    {gpsSource === "real" && !allPpeChecked && (
+                      <p className="muted-copy">"필수 보호구" 패널에서 이 설비에 필요한 보호구를 모두 확인해야 체크리스트를 사용할 수 있습니다.</p>
+                    )}
                     {item.checklist.map((entry, entryIndex) => {
                       const checkedSet = gpsChecklistChecked[item.equipment_code];
                       const isChecked = checkedSet ? checkedSet.has(entryIndex) : false;
@@ -2360,7 +2378,7 @@ function WorkspaceScreen({
                           <input
                             type="checkbox"
                             checked={isChecked}
-                            disabled={gpsSource !== "real"}
+                            disabled={checklistLocked}
                             onChange={(event) => setGpsChecklistChecked((current) => {
                               const next = new Set(current[item.equipment_code] ?? []);
                               if (event.target.checked) next.add(entryIndex);
@@ -2377,7 +2395,7 @@ function WorkspaceScreen({
                         type="button"
                         className="chat-checklist-save"
                         onClick={() => void saveGpsChecklist(item)}
-                        disabled={savingGpsEquipmentCode === item.equipment_code}
+                        disabled={checklistLocked || savingGpsEquipmentCode === item.equipment_code}
                       >
                         {savingGpsEquipmentCode === item.equipment_code
                           ? "저장 중..."
@@ -2386,7 +2404,8 @@ function WorkspaceScreen({
                     )}
                   </div>
                 </div>
-              ))
+                );
+              })
             )}
             {nearbyOutOfRange.length > 0 && (
               <p className="muted-copy">
@@ -2400,35 +2419,8 @@ function WorkspaceScreen({
       })()}
       </details>
 
-      <section className="field-overview-grid">
-        <article className="panel risk-overview-card">
-          {latestChecklistMessage ? (
-            <ChatChecklist
-              items={latestChecklistMessage.checklistItems ?? []}
-              savedAssessmentId={latestChecklistMessage.savedAssessmentId ?? null}
-              isSaving={savingChecklistIndex === latestChecklistMessageIndex}
-              onSave={(checkedIndices) => void saveChatChecklist(latestChecklistMessageIndex, latestChecklistMessage, checkedIndices)}
-            />
-          ) : (
-            <>
-              <span className="eyebrow">TBM 체크리스트</span>
-              <p className="muted-copy">매뉴얼 기반 작업 안내를 받으면 여기에 체크리스트가 표시됩니다.</p>
-            </>
-          )}
-        </article>
-        <article className="panel ppe-panel">
-          <div className="panel-heading compact-heading"><h2>필수 보호구</h2><span className="panel-tag">현장 확인</span></div>
-          <div className="ppe-checklist">
-            {ppeItems.map((item) => <label className={ppeChecks[item] ? "checked" : ""} key={item}>
-              <input type="checkbox" checked={Boolean(ppeChecks[item])} onChange={(event) => setPpeChecks((current) => ({ ...current, [item]: event.target.checked }))} />
-              <span className="ppe-check-icon" aria-hidden="true">✓</span><b>{item}</b><small>{ppeChecks[item] ? "착용 확인" : "확인 필요"}</small>
-            </label>)}
-          </div>
-          <p className="muted-copy">작업과 화학물질 특성에 따라 추가 보호구가 필요할 수 있습니다.</p>
-        </article>
-      </section>
-
-      <div className="workspace-primary-grid">
+      <div className="workspace-columns">
+        <div className="workspace-column">
         <ManualManager
           manuals={manuals}
           documents={userDocuments}
@@ -2467,7 +2459,39 @@ function WorkspaceScreen({
               .catch(() => setManualStatus("문서 상태를 새로고치지 못했습니다."));
           }}
         />
-
+        <article className="panel ppe-panel">
+          <div className="panel-heading compact-heading"><h2>필수 보호구</h2><span className="panel-tag">현장 확인</span></div>
+          {gpsRequiredPpe.length === 0 ? (
+            <p className="muted-copy">근처에 감지된 설비가 없습니다. 설비 근처로 이동하면 필요한 보호구가 여기에 표시됩니다.</p>
+          ) : (
+            <>
+              <div className="ppe-checklist">
+                {gpsRequiredPpe.map((item) => {
+                  const isChecked = gpsPpeChecked.has(item);
+                  return (
+                    <label className={isChecked ? "checked" : ""} key={item}>
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={(event) => setGpsPpeChecked((current) => {
+                          const next = new Set(current);
+                          if (event.target.checked) next.add(item);
+                          else next.delete(item);
+                          return next;
+                        })}
+                      />
+                      <span className="ppe-check-icon" aria-hidden="true">✓</span>
+                      <span className="ppe-item-info"><b>{item}</b><small>{isChecked ? "착용 확인" : "확인 필요"}</small></span>
+                    </label>
+                  );
+                })}
+              </div>
+              <p className="muted-copy">근처 설비별로 필요한 보호구를 모두 표시합니다. 전부 확인해야 해당 설비의 GPS 체크리스트를 사용할 수 있습니다.</p>
+            </>
+          )}
+        </article>
+        </div>
+        <div className="workspace-column">
       <section className="chat-stage upgraded-chat" aria-labelledby="chat-title">
         <div className="chat-heading"><div><span className="section-number">02</span><div><strong id="chat-title">SafeMaint AI 상담</strong><span>질문과 선택한 근거 문서를 바탕으로 답변합니다.</span></div></div><button type="button" onClick={() => setMessages([])}>대화 지우기</button></div>
         <div className="chat-history">
@@ -2531,6 +2555,22 @@ function WorkspaceScreen({
           <button type="submit" disabled={isChatLoading || isVisionLoading || !question.trim()}>{isVisionLoading ? "사진 분석 중..." : isChatLoading ? "답변 생성 중..." : "전송"}</button>
         </form>
       </section>
+        <article className="panel risk-overview-card">
+          {latestChecklistMessage ? (
+            <ChatChecklist
+              items={latestChecklistMessage.checklistItems ?? []}
+              savedAssessmentId={latestChecklistMessage.savedAssessmentId ?? null}
+              isSaving={savingChecklistIndex === latestChecklistMessageIndex}
+              onSave={(checkedIndices) => void saveChatChecklist(latestChecklistMessageIndex, latestChecklistMessage, checkedIndices)}
+            />
+          ) : (
+            <>
+              <span className="eyebrow">TBM 체크리스트</span>
+              <p className="muted-copy">매뉴얼 기반 작업 안내를 받으면 여기에 체크리스트가 표시됩니다.</p>
+            </>
+          )}
+        </article>
+        </div>
       </div>
 
       <details className="admin-tools-drawer">
@@ -2589,7 +2629,11 @@ function WorkspaceScreen({
       <footer className="safety-footer">본 결과는 작업 전 검토를 위한 초안이며, 현장 안전관리자의 최종 확인과 승인 없이 작업을 시작할 수 없습니다.</footer>
       </div>
       {documentViewerTarget && (
-        <DocumentViewerModal target={documentViewerTarget} onClose={() => setDocumentViewerTarget(null)} />
+        <DocumentViewerModal
+          target={documentViewerTarget}
+          onClose={() => setDocumentViewerTarget(null)}
+          onLogout={onLogout}
+        />
       )}
     </main>
   );

@@ -841,8 +841,11 @@ a {
 .gps-manual-fields button { background: #f7fafb; border: 1px solid #cfdde3; border-radius: 8px; color: var(--navy); cursor: pointer; font-weight: 700; padding: 8px 12px; }
 .gps-map-marker { position: absolute; font-size: 22px; transform: translate(-50%, -100%); pointer-events: none; }
 .gps-map-marker-clamped { filter: grayscale(40%); opacity: 0.75; }
-.field-overview-grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1.3fr) minmax(290px, .7fr); margin: 0 auto 18px; max-width: 1500px; }
-.risk-overview-card { align-items: center; background: white; border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 280px; padding: 25px; text-align: center; }
+.workspace-columns { display: grid; gap: 18px; grid-template-columns: minmax(300px, .72fr) minmax(0, 1.55fr); margin: 0 auto 18px; max-width: 1500px; }
+.workspace-column { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.workspace-column > .ppe-panel, .workspace-column > .risk-overview-card { flex: 1 1 auto; }
+.risk-overview-card { align-items: center; background: white; border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; justify-content: center; min-height: 220px; padding: 25px; text-align: center; }
+.ppe-panel { min-height: 220px; }
 .risk-overview-card.risk-high { border-top: 6px solid var(--danger); }
 .risk-overview-card.risk-medium { border-top: 6px solid var(--orange); }
 .risk-overview-card.risk-low { border-top: 6px solid var(--success); }
@@ -853,10 +856,11 @@ a {
 .accident-chip-list { display: flex; flex-wrap: wrap; gap: 7px; justify-content: center; margin: 10px 0 15px; }
 .accident-chip-list span { background: var(--orange-soft); border: 1px solid #e8bd80; border-radius: 999px; color: #6f3d00; font-size: 12px; font-weight: 700; padding: 7px 10px; }
 .ppe-checklist { display: grid; gap: 9px; }
-.ppe-checklist label { align-items: center; background: #f7f9fa; border: 1px solid #d5e0e5; border-radius: 10px; cursor: pointer; display: grid; gap: 10px; grid-template-columns: 22px 30px 1fr auto; min-height: 51px; padding: 9px 12px; transition: background .15s, border-color .15s; }
+.ppe-checklist label { align-items: center; background: #f7f9fa; border: 1px solid #d5e0e5; border-radius: 10px; cursor: pointer; display: grid; gap: 10px; grid-template-columns: 22px 30px 1fr; min-height: 51px; padding: 9px 12px; transition: background .15s, border-color .15s; }
 .ppe-checklist label:hover { border-color: var(--teal); }
 .ppe-checklist label.checked { background: #eaf7f4; border-color: #86c8ba; }
 .ppe-checklist input { height: 19px; margin: 0; width: 19px; accent-color: var(--teal); }
+.ppe-item-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ppe-check-icon { align-items: center; background: #dfe8eb; border-radius: 50%; color: #6e8088; display: flex; font-size: 14px; font-weight: 900; height: 27px; justify-content: center; width: 27px; }
 .ppe-checklist .checked .ppe-check-icon { background: var(--teal); color: white; }
 .ppe-checklist b { font-size: 14px; }
@@ -970,7 +974,7 @@ a {
 
 @media (max-width: 900px) {
   .prototype-shell { padding: 10px; }
-  .field-overview-grid { grid-template-columns: 1fr; }
+  .workspace-columns { grid-template-columns: 1fr; }
   .progress-steps { grid-template-columns: repeat(3, 1fr); }
   .prototype-topbar { grid-template-columns: auto minmax(0, 1fr); }
   .prototype-topbar > div:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
@@ -993,7 +997,7 @@ a {
   .document-review-heading { align-items: stretch; flex-direction: column; }
   .document-review-heading > button { width: 100%; }
   .visual-stage { min-height: 260px; }
-  .quick-toolbar, .field-overview-grid, .manual-row, .chat-stage, .assessment-drawer { min-width: 0; width: 100%; }
+  .quick-toolbar, .workspace-columns, .manual-row, .chat-stage, .assessment-drawer { min-width: 0; width: 100%; }
   .panel, .manual-row > div, .chat-bubble, .chat-source-card, .catalog-candidate-card { min-width: 0; }
   .upgraded-chat .chat-input-row { grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(82px, .8fr); }
   .upgraded-chat .chat-input-row > input { grid-column: 1 / -1; grid-row: 2; min-width: 0; }
@@ -1169,8 +1173,7 @@ a {
 }
 .workflow-hero { order: 0; }
 .workspace-error { margin: 0; order: 1; }
-.workspace-primary-grid { order: 2; }
-.field-overview-grid { order: 3; }
+.workspace-columns { order: 2; }
 .assessment-drawer { order: 4; }
 .admin-tools-drawer { order: 5; }
 .gps-drawer { order: 6; }
@@ -1215,7 +1218,6 @@ a {
 .panel-tag { background: var(--teal-soft); border-radius: 999px; color: var(--teal); font-size: 10px; font-weight: 800; padding: 6px 9px; }
 .panel-tag.muted { background: #edf2f4; color: #5e737f; }
 
-.workspace-primary-grid { align-items: start; display: grid; gap: 20px; grid-template-columns: minmax(300px, .72fr) minmax(0, 1.55fr); }
 .manual-manager { border-top: 4px solid var(--orange); display: grid; gap: 16px; min-width: 0; padding: 20px; }
 .resource-actions { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
 .resource-upload {
@@ -1366,8 +1368,8 @@ a {
 .chat-checklist-items label { min-height: 48px; padding: 11px; }
 .chat-checklist-items input { accent-color: var(--teal); height: 18px; width: 18px; }
 
-.field-overview-grid { gap: 20px; grid-template-columns: minmax(0, 1fr) minmax(340px, .75fr); margin: 0; max-width: none; }
-.risk-overview-card { align-items: flex-start; border-radius: var(--radius-lg); box-shadow: var(--shadow-card); min-height: 0; padding: 22px; text-align: left; }
+.workspace-columns { gap: 20px; grid-template-columns: minmax(300px, .72fr) minmax(0, 1.55fr); margin: 0; max-width: none; }
+.risk-overview-card { align-items: flex-start; border-radius: var(--radius-lg); box-shadow: var(--shadow-card); padding: 22px; text-align: left; }
 .risk-overview-card .risk-symbol { align-items: center; display: flex; height: 22px; justify-content: center; width: 22px; }
 .risk-overview-card .risk-symbol span { background: #9fb0ba; border: 5px solid #e8edef; border-radius: 50%; height: 18px; width: 18px; }
 .risk-overview-card.risk-high .risk-symbol span { background: var(--danger); border-color: #f8dcdc; }
@@ -1428,7 +1430,7 @@ a {
 @media (max-width: 1180px) {
   .workspace-header { gap: 12px; grid-template-columns: minmax(190px, 1fr) auto; }
   .workspace-header-status { display: none; }
-  .workspace-primary-grid { grid-template-columns: minmax(280px, .8fr) minmax(0, 1.35fr); }
+  .workspace-columns { grid-template-columns: minmax(280px, .8fr) minmax(0, 1.35fr); }
   .workflow-hero { align-items: start; grid-template-columns: 1fr; }
 }
 
@@ -1437,8 +1439,7 @@ a {
   .workspace-header { min-height: 66px; padding: 8px 14px; }
   .workspace-content { padding: 20px 14px 0; }
   .workspace-brand small { display: none; }
-  .workspace-primary-grid { grid-template-columns: 1fr; }
-  .field-overview-grid { grid-template-columns: 1fr; }
+  .workspace-columns { grid-template-columns: 1fr; }
   .chat-history { min-height: 440px; }
   .assessment-drawer,
   .admin-tools-drawer,

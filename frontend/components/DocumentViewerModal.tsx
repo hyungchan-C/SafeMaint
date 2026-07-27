@@ -15,9 +15,11 @@ export interface DocumentViewerTarget {
 export default function DocumentViewerModal({
   target,
   onClose,
+  onLogout,
 }: {
   target: DocumentViewerTarget;
   onClose: () => void;
+  onLogout: () => void;
 }) {
   const [objectUrl, setObjectUrl] = useState("");
   const [error, setError] = useState("");
@@ -32,10 +34,15 @@ export default function DocumentViewerModal({
       headers: { Authorization: `Bearer ${getAccessToken()}` },
     })
       .then((response) => {
+        if (response.status === 401) {
+          onLogout();
+          return null;
+        }
         if (!response.ok) throw new Error("문서를 불러오지 못했습니다.");
         return response.blob();
       })
       .then((blob) => {
+        if (!blob) return;
         createdUrl = URL.createObjectURL(blob);
         if (active) setObjectUrl(createdUrl);
       })
@@ -46,7 +53,7 @@ export default function DocumentViewerModal({
       active = false;
       if (createdUrl) URL.revokeObjectURL(createdUrl);
     };
-  }, [target.documentId, target.documentVersionId]);
+  }, [target.documentId, target.documentVersionId, onLogout]);
 
   return (
     <div className="document-viewer-backdrop" role="presentation" onClick={onClose}>

@@ -179,6 +179,36 @@ def load_virtual_equipment_locations(db: Session) -> tuple[VirtualEquipmentLocat
     )
 
 
+# 설비 코드별 필요 보호구. 지금은 고정 매핑이지만, determine_required_ppe() 하나로
+# 캡슐화해 두어서 나중에 임베딩·LLM(Qwen) 기반 판단으로 교체할 때 호출부는 그대로
+# 두고 이 함수 내부만 바꾸면 되게 한다. 같은 equipment_type이라도(예: 컨베이어 2대)
+# 설비 코드가 다르면 배치 환경이 다를 수 있어 코드 단위로 값을 다르게 둔다.
+_PPE_BY_EQUIPMENT_CODE: dict[str, tuple[str, ...]] = {
+    "CONV-203": ("안전모", "보호장갑", "안전화"),
+    "PNL-01": ("절연장갑", "보안경", "안전화"),
+    "WLD-05": ("용접마스크", "보호장갑", "안전화"),
+    "CONV-101": ("안전모", "보안경", "보호장갑", "안전화"),
+}
+
+# equipment_code가 매핑에 없는 새 설비(향후 DB에 추가되는 경우 등)를 위한 유형별 기본값.
+_PPE_BY_EQUIPMENT_TYPE: dict[str, tuple[str, ...]] = {
+    "컨베이어": ("안전모", "보호장갑", "안전화"),
+    "전기설비": ("절연장갑", "보안경", "안전화"),
+    "용접기": ("용접마스크", "보호장갑", "안전화"),
+}
+
+_DEFAULT_PPE: tuple[str, ...] = ("안전모", "보호장갑", "안전화")
+
+
+def determine_required_ppe(location: VirtualEquipmentLocation) -> list[str]:
+    """설비에 필요한 보호구 목록을 반환한다."""
+
+    ppe = _PPE_BY_EQUIPMENT_CODE.get(location.equipment_code)
+    if ppe is None:
+        ppe = _PPE_BY_EQUIPMENT_TYPE.get(location.equipment_type, _DEFAULT_PPE)
+    return list(ppe)
+
+
 _RISK_ENGINE = RiskEngine()
 
 

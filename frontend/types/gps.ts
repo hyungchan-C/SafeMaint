@@ -17,6 +17,7 @@ export interface NearbyEquipmentItem {
   distance_m: number;
   hazards: HazardItem[];
   checklist: string[];
+  required_ppe: string[];
 }
 
 export interface GpsCheckResponse {

@@ -9,6 +9,7 @@ from app.db.session import get_db
 from app.schemas.gps import GpsCheckRequest, GpsCheckResponse, NearbyEquipmentItem
 from app.services.virtual_gps import (
     build_checklist,
+    determine_required_ppe,
     find_nearby_equipment,
     load_virtual_equipment_locations,
     resolve_locations,
@@ -112,6 +113,7 @@ def check_location(
                 distance_m=round(entry.distance_m, 1),
                 hazards=hazards,
                 checklist=checklist,
+                required_ppe=determine_required_ppe(entry.location),
             )
         )
 
