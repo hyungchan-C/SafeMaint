@@ -11,9 +11,7 @@ import {
 } from "react";
 
 import ChatSources from "@/components/ChatSources";
-import ChatChecklist from "@/components/ChatChecklist";
 import type {
-  ChatChecklistItem,
   ChatSource,
   ComponentAnswerDetails,
   DocumentAnswerDetails,
@@ -33,10 +31,6 @@ type Props = {
   sources: ChatSource[];
   warning?: string | null;
   onOpenDocument: (source: ChatSource) => void;
-  checklistItems: ChatChecklistItem[];
-  savedAssessmentId: string | null;
-  isSavingChecklist: boolean;
-  onSaveChecklist: (checkedIndices: number[]) => void;
 };
 
 type TabDefinition = {
@@ -210,10 +204,6 @@ export default function AnswerTabs({
   sources,
   warning,
   onOpenDocument,
-  checklistItems,
-  savedAssessmentId,
-  isSavingChecklist,
-  onSaveChecklist,
 }: Props) {
   const rawInstanceId = useId();
   const instanceId = `answer-${rawInstanceId.replaceAll(":", "")}`;
@@ -407,14 +397,6 @@ export default function AnswerTabs({
                 />
               )
                 : <p className="answer-tab-empty">표시할 검색 출처가 없습니다.</p>}
-            </AnswerSection>
-            <AnswerSection title="TBM 체크리스트">
-              <ChatChecklist
-                items={checklistItems}
-                savedAssessmentId={savedAssessmentId}
-                isSaving={isSavingChecklist}
-                onSave={onSaveChecklist}
-              />
             </AnswerSection>
           </div>
         ),

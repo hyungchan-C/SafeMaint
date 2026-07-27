@@ -1,7 +1,6 @@
 "use client";
 
 import type {
-  ChatChecklistItem,
   ChatSource,
   StructuredAnswer,
 } from "@/types/chat";
@@ -16,10 +15,6 @@ type Props = {
   structuredAnswer?: StructuredAnswer | null;
   sources: ChatSource[];
   warning?: string | null;
-  checklistItems?: ChatChecklistItem[];
-  savedAssessmentId?: string | null;
-  isSavingChecklist?: boolean;
-  onSaveChecklist?: (checkedIndices: number[]) => void;
   onOpenDocument: (source: ChatSource) => void;
 };
 
@@ -28,10 +23,6 @@ export default function ChatAnswerContent({
   structuredAnswer,
   sources,
   warning,
-  checklistItems = [],
-  savedAssessmentId = null,
-  isSavingChecklist = false,
-  onSaveChecklist = () => {},
   onOpenDocument,
 }: Props) {
   if (!structuredAnswer) {
@@ -73,10 +64,6 @@ export default function ChatAnswerContent({
         sources={sources}
         warning={warning}
         onOpenDocument={onOpenDocument}
-        checklistItems={checklistItems}
-        savedAssessmentId={savedAssessmentId}
-        isSavingChecklist={isSavingChecklist}
-        onSaveChecklist={onSaveChecklist}
       />
     </div>
   );
