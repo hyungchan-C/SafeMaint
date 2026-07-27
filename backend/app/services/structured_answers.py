@@ -2516,6 +2516,8 @@ def _document_entity_phrase(raw: str, *, known: bool = False) -> str:
         nested.extend(_document_generic_entity_candidates(text, kind="equipment"))
         nested = sorted(nested, key=lambda value: (len(value), value))
         for candidate in nested:
+            if len(candidate) >= len(text):
+                continue
             normalized = _document_entity_phrase(candidate, known=known)
             if normalized:
                 text = normalized
