@@ -1,0 +1,76 @@
+# 매뉴얼 PDF 처리(docling)를 GPU로 돌리고 싶은 사람만 사용하는 개인 설정 템플릿.
+# 이 PC에 NVIDIA GPU + 드라이버 + NVIDIA Container Toolkit이 설치돼 있어야 합니다.
+#
+# 사용법:
+#   1. 이 파일을 같은 폴더에 docker-compose.override.yml 이름으로 복사
+#      (docker-compose.override.yml은 .gitignore 대상이라 각자 로컬에만 남음)
+#   2. .env에 COMPOSE_PROFILES=cpu 또는 COMPOSE_PROFILES=gpu 중 하나를 반드시 추가
+#      (이 파일을 포함하면 CPU/GPU worker 중 하나만 배타적으로 뜹니다. 비워두면
+#      아무 worker도 안 떠서 업로드 처리가 전혀 안 되니 주의하세요)
+#   3. 앞으로 컴포즈 명령에 -f docker-compose.override.yml 을 추가:
+#        docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml \
+#          -f docker-compose.override.yml up -d
+#
+# GPU가 없거나 이 기능이 필요 없으면 이 파일을 복사하지 않아도 됩니다 —
+# 지금까지와 완전히 동일하게 CPU worker만으로 동작합니다.
+services:
+  # 기본 docker-compose.yml의 worker는 profile이 없어 항상 켜지므로, 여기서
+  # profile을 붙여 GPU를 선택했을 때 CPU worker와 동시에 돌지 않도록 막는다.
+  worker:
+    profiles: ["cpu"]
+
+  worker-gpu:
+    profiles: ["gpu"]
+    image: safemaint-rag:0.3.0-gpu
+    build:
+      context: .
+      dockerfile: ai/Dockerfile.rag
+      args:
+        TORCH_VARIANT: cuda
+    command: ["python", "-m", "rag_service.worker"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting SafeMaint}
+      RAG_MODEL: ${RAG_MODEL:-BAAI/bge-m3}
+      RAG_MODEL_CACHE_DIR: /models
+      # CPU worker와 달리 이 값은 .env의 RAG_DEVICE를 상속하지 않고 항상 cuda로 고정한다.
+      # (그대로 상속되면 docling 추출만 GPU를 쓰고 뒤이은 BGE-M3 임베딩 단계는 여전히
+      # CPU로 돌아, GPU를 켜도 크게 안 빨라지는 문제가 있었음)
+      RAG_DEVICE: cuda
+      DOCUMENT_WORKER_POLL_SECONDS: ${DOCUMENT_WORKER_POLL_SECONDS:-2}
+      DOCUMENT_WORKER_CHUNK_CHARACTERS: ${DOCUMENT_WORKER_CHUNK_CHARACTERS:-1200}
+      DOCUMENT_WORKER_CHUNK_OVERLAP: ${DOCUMENT_WORKER_CHUNK_OVERLAP:-150}
+      # GPU는 여유(VRAM 여유분 기준)가 있으니 배치를 키워 처리량을 더 확보한다.
+      DOCUMENT_WORKER_EMBEDDING_BATCH_SIZE: ${DOCUMENT_WORKER_EMBEDDING_BATCH_SIZE_GPU:-64}
+      DOCUMENT_WORKER_MAX_ATTEMPTS: ${DOCUMENT_WORKER_MAX_ATTEMPTS:-3}
+      DOCUMENT_WORKER_RETRY_DELAY_SECONDS: ${DOCUMENT_WORKER_RETRY_DELAY_SECONDS:-10}
+      DOCUMENT_WORKER_STALE_AFTER_SECONDS: ${DOCUMENT_WORKER_STALE_AFTER_SECONDS:-1800}
+      DOCUMENT_WORKER_HEARTBEAT_SECONDS: ${DOCUMENT_WORKER_HEARTBEAT_SECONDS:-30}
+      QWEN_ENABLED: ${QWEN_ENABLED:-false}
+      QWEN_SERVICE_URL: ${QWEN_SERVICE_URL:-http://qwen:8020}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      QWEN_TIMEOUT_SECONDS: ${QWEN_TIMEOUT_SECONDS:-600}
+      DOCUMENT_PROFILE_EXTRACTION_ENABLED: ${DOCUMENT_PROFILE_EXTRACTION_ENABLED:-}
+      DOCLING_REQUIRED: ${DOCLING_REQUIRED:-true}
+      DOCLING_ALLOW_PYMUPDF_FALLBACK: ${DOCLING_ALLOW_PYMUPDF_FALLBACK:-true}
+      DOCLING_OFFLINE: ${DOCLING_OFFLINE:-false}
+      DOCLING_ARTIFACTS_PATH: ${DOCLING_ARTIFACTS_PATH:-/models/docling}
+      DOCLING_MAX_FILE_BYTES: ${DOCLING_MAX_FILE_BYTES:-209715200}
+      DOCLING_MAX_PAGES: ${DOCLING_MAX_PAGES:-500}
+      DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-4}
+      DOCLING_ACCELERATOR_DEVICE: ${DOCLING_ACCELERATOR_DEVICE:-auto}
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
+    volumes:
+      - safemaint_model_cache:/models
+      - safemaint_documents:/data/documents
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

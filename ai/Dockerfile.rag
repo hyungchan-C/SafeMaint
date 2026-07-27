@@ -1,6 +1,12 @@
-# Docling 2.113 and the CPU Torch wheels below have stable support on Python 3.11.
+# Docling 2.113 and the Torch wheels below have stable support on Python 3.11.
 # Keep torch/torchvision paired; mismatched wheels make the worker image fail to build.
+# TORCH_VARIANT=cpu (default) builds the small CPU-only wheel that runs anywhere.
+# TORCH_VARIANT=cuda builds the CUDA 12.4 wheel (matches ai/Dockerfile.qwen's base
+# image) so docling's DOCLING_ACCELERATOR_DEVICE=auto can actually pick the GPU when
+# the container has one; it still falls back to CPU automatically when it doesn't.
 FROM python:3.11-slim AS base
+
+ARG TORCH_VARIANT=cpu
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -17,10 +23,17 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY ai/requirements-rag.txt ./requirements-rag.txt
-RUN python -m pip install --no-cache-dir \
-      "torch==2.6.0+cpu" \
-      "torchvision==0.21.0+cpu" \
-      --index-url https://download.pytorch.org/whl/cpu \
+RUN if [ "$TORCH_VARIANT" = "cuda" ]; then \
+      python -m pip install --no-cache-dir \
+        "torch==2.6.0" \
+        "torchvision==0.21.0" \
+        --index-url https://download.pytorch.org/whl/cu124 ; \
+    else \
+      python -m pip install --no-cache-dir \
+        "torch==2.6.0+cpu" \
+        "torchvision==0.21.0+cpu" \
+        --index-url https://download.pytorch.org/whl/cpu ; \
+    fi \
     && python -m pip install --no-cache-dir -r requirements-rag.txt
 
 FROM base AS test
