@@ -190,6 +190,17 @@ function New-SafeMaintComposeArguments {
         "-f", (Join-Path $script:SafeMaintRepoRoot "docker-compose.yml"),
         "-f", (Join-Path $script:SafeMaintRepoRoot "docker-compose.dev.yml")
     )
+
+    # docker-compose.override.yml is a personal, gitignored file (see
+    # docker-compose.override.yml.example). When present, it is what makes
+    # COMPOSE_PROFILES=cpu/gpu mutually exclusive (profiles::["cpu"] on the
+    # base worker service). Without including it here, the always-on CPU
+    # worker keeps running alongside worker-gpu regardless of COMPOSE_PROFILES.
+    $overridePath = Join-Path $script:SafeMaintRepoRoot "docker-compose.override.yml"
+    if (Test-Path -LiteralPath $overridePath -PathType Leaf) {
+        $arguments += @("-f", $overridePath)
+    }
+
     return $arguments
 }
 
