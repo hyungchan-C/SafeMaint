@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-
 import type {
   ChatChecklistItem,
   ChatSource,
@@ -199,8 +198,10 @@ export default function StructuredChatAnswer({
           <div><h4>관련 장비·부품</h4><TextList items={[...answer.related_equipment, ...answer.related_components]} /></div>
           <div><h4>문서에서 확인할 수 있는 작업</h4><TextList items={answer.supported_tasks} /></div>
         </section>
+        {answer.unverified_information.length > 0 && (
+          <section className="structured-section muted"><h4>확인하지 못한 내용</h4><TextList items={answer.unverified_information} /></section>
+        )}
         <ConflictSection items={answer.conflicts} sourceNumbers={sourceNumbers} />
-        <section className="structured-section muted"><h4>확인하지 못한 내용</h4><TextList items={answer.unverified_information} /></section>
       </div>
     );
   }
@@ -214,7 +215,9 @@ export default function StructuredChatAnswer({
         <section className="structured-section"><h4>주로 사용하는 곳</h4><EvidenceList items={answer.usage_locations} sourceNumbers={sourceNumbers} /></section>
         <section className="structured-section"><h4>사용 시 주의사항</h4><EvidenceList items={answer.precautions} sourceNumbers={sourceNumbers} /></section>
         <ConflictSection items={answer.conflicts} sourceNumbers={sourceNumbers} />
-        <section className="structured-section muted"><h4>추가 확인 필요</h4><TextList items={answer.additional_information_needed} /></section>
+        {answer.additional_information_needed.length > 0 && (
+          <section className="structured-section muted"><h4>추가 확인 필요</h4><TextList items={answer.additional_information_needed} /></section>
+        )}
       </div>
     );
   }
@@ -233,9 +236,13 @@ export default function StructuredChatAnswer({
       <section className="structured-section"><h4>2. 주요 위험요인</h4><EvidenceList items={answer.hazards.map(({ name, ...item }) => ({ ...item, content: `${name}: ${item.content}` }))} sourceNumbers={sourceNumbers} /></section>
       <section className="structured-section"><h4>3. 매뉴얼 기반 작업 절차</h4><EvidenceList items={answer.manual_steps} sourceNumbers={sourceNumbers} /></section>
       <section className="structured-section stop-section"><h4>4. 즉시 작업을 중지해야 하는 조건</h4><EvidenceList items={answer.stop_conditions} sourceNumbers={sourceNumbers} /></section>
-      <section className="structured-section"><h4>5. 관련 회사 기준·법령·가이드·사고사례</h4><EvidenceList items={answer.related_regulations_and_incidents} sourceNumbers={sourceNumbers} /></section>
+      {answer.related_regulations_and_incidents.length > 0 && (
+        <section className="structured-section"><h4>5. 관련 회사 기준·법령·가이드·사고사례</h4><EvidenceList items={answer.related_regulations_and_incidents} sourceNumbers={sourceNumbers} /></section>
+      )}
       <ConflictSection items={answer.conflicts} sourceNumbers={sourceNumbers} />
-      <section className="structured-section muted"><h4>6. 추가 확인이 필요한 내용</h4><TextList items={answer.additional_information_needed} /></section>
+      {answer.additional_information_needed.length > 0 && (
+        <section className="structured-section muted"><h4>6. 추가 확인이 필요한 내용</h4><TextList items={answer.additional_information_needed} /></section>
+      )}
       <p className="structured-critical">이 안내는 작업 승인이 아닙니다. 안전관리자의 최종 확인 전에는 작업을 시작하지 마세요.</p>
     </div>
   );

@@ -44,6 +44,7 @@ from app.services.structured_answers import (
     finalize_maintenance_answer,
     no_evidence_answer,
     no_evidence_details,
+    repair_extracted_quantity_order,
     source_based_checklist_items,
     source_based_fallback,
     validated_structured_answer,
@@ -192,7 +193,30 @@ QWEN_MAINTENANCE_ACTION_SIGNAL_TERMS = (
     "replace",
     "repair",
 )
-QWEN_DOMAIN_PHRASE_GROUPS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = ()
+# 질문의 핵심 설비명과 검색 문서의 표현이 다른 경우를 위한 검색 동의어다.
+# 답변 문구를 고정하는 규칙이 아니라, 유사한 일반명 때문에 전혀 다른 설비
+# (예: 라이트 커튼 ↔ 건축 커튼월)가 Qwen 근거로 전달되는 것을 막는 필터다.
+QWEN_DOMAIN_PHRASE_GROUPS: tuple[
+    tuple[tuple[str, ...], tuple[str, ...]], ...
+] = (
+    (
+        (
+            "라이트커튼",
+            "라이트 커튼",
+            "light curtain",
+            "광전자식 방호장치",
+            "광전자식방호장치",
+        ),
+        (
+            "커튼월",
+            "curtain wall",
+            "벨트컨베이어",
+            "벨트콘베이어",
+            "컨베이어",
+            "conveyor",
+        ),
+    ),
+)
 GENERIC_QWEN_FALLBACK_ANSWERS = frozenset(
     {
         "검색된 근거를 기준으로 작업 전 확인할 핵심 사항을 요약했습니다.",
@@ -876,6 +900,9 @@ class ChatService:
             return "검색된 근거를 기준으로 부품의 역할과 주의사항을 요약했습니다."
         if answer_type == "maintenance_guide":
             task_label = ChatService._question_task_label(request.question)
+            manual_step_labels = ChatService._structured_manual_step_labels(
+                response.structured_answer
+            )
             pre_check_labels = ChatService._structured_pre_check_labels(
                 response.structured_answer
             )
@@ -886,6 +913,13 @@ class ChatService:
                 response.structured_answer
             )
             target = task_label or "작업"
+            if manual_step_labels:
+                numbered_steps = " ".join(
+                    f"{index}. {step}"
+                    for index, step in enumerate(manual_step_labels[:3], start=1)
+                )
+                answer = f"매뉴얼에서 확인된 {target} 절차입니다. {numbered_steps}"
+                return answer
             if pre_check_labels:
                 joined = ", ".join(pre_check_labels[:3])
                 answer = (
@@ -999,6 +1033,19 @@ class ChatService:
         return labels
 
     @staticmethod
+    def _structured_manual_step_labels(value: StructuredAnswer | None) -> list[str]:
+        if getattr(value, "answer_type", None) != "maintenance_guide":
+            return []
+        labels: list[str] = []
+        for item in getattr(value, "manual_steps", []) or []:
+            content = " ".join(str(getattr(item, "content", "")).split())
+            if content and content not in labels:
+                labels.append(content)
+            if len(labels) >= 3:
+                break
+        return labels
+
+    @staticmethod
     def _structured_stop_condition_labels(value: StructuredAnswer | None) -> list[str]:
         if getattr(value, "answer_type", None) != "maintenance_guide":
             return []
@@ -1081,6 +1128,11 @@ class ChatService:
                 "확인해야",
                 "주의사항",
                 "알려줘",
+                "어떻게",
+                "해야",
+                "해야해",
+                "해야할까",
+                "할까",
                 "뭐",
                 "뭘",
             }
@@ -1108,6 +1160,8 @@ class ChatService:
                 )
             )
         ]
+        if tokens and len(tokens[-1]) > 2 and tokens[-1].endswith(("을", "를")):
+            tokens[-1] = tokens[-1][:-1]
         return " ".join(tokens[:6]).strip()
 
     @staticmethod
@@ -1653,6 +1707,7 @@ class ChatService:
     @staticmethod
     def _clean_qwen_excerpt(excerpt: str) -> str:
         text = " ".join(excerpt.split())
+        text = repair_extracted_quantity_order(text)
         text = re.sub(r"\[자료유형\]\s*.*?\[내용\]\s*", "", text)
         text = re.sub(r"\[제목\]\s*", "", text)
         text = re.sub(r"\s*\|\s*", " ", text)

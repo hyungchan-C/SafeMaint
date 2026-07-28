@@ -182,15 +182,20 @@ class CatalogAnalyzer:
         } for path in candidate_paths)
         content.append({
             "type": "text",
+            # 기존 영문 프롬프트:
+            # Image 0 is a field photo. Images 1..N are catalog candidates in order.
+            # Reject unrelated images, select only the same visible object category,
+            # do not infer specifications, and return the prescribed JSON only.
             "text": (
-                "Image 0 is a field photo. Images 1..N are catalog candidates in order. "
-                "Reject maps, certificates, logos, covers, and unrelated objects. Select only candidates "
-                "that visibly show the same object category. Shape differences should lower relevance, not force rejection. "
-                "For each selected image, describe only the visible generic product category and 1-3 visible features. "
-                "Do not identify model, size, material grade, or unreadable markings. "
-                "Return JSON only: {\"matches\":[{\"index\":1,\"relevance\":0.0,"
-                "\"category\":\"generic product type\",\"features\":[\"visible feature\"]}]}. "
-                "Use relevance >= 0.55 when the object category agrees; use >= 0.80 only when shape also agrees."
+                "이미지 0은 현장 사진이고, 이미지 1부터 N까지는 순서대로 카탈로그 후보입니다. "
+                "지도, 인증서, 로고, 표지와 관련 없는 물체는 제외하세요. 눈으로 확인되는 물체 "
+                "범주가 같은 후보만 선택하세요. 형태 차이는 관련도를 낮추는 요소이지만 자동 탈락 "
+                "사유는 아닙니다. 선택한 각 이미지에 대해 눈으로 확인되는 일반 제품 범주와 특징 "
+                "1~3개만 작성하세요. 모델, 크기, 재질 등급 또는 읽을 수 없는 각인을 식별하지 마세요. "
+                "키 이름은 변경하지 말고 다음 JSON만 반환하세요: "
+                "{\"matches\":[{\"index\":1,\"relevance\":0.0,"
+                "\"category\":\"일반 제품 유형\",\"features\":[\"눈으로 확인되는 특징\"]}]}. "
+                "물체 범주가 같으면 relevance를 0.55 이상으로, 형태까지 같을 때만 0.80 이상으로 지정하세요."
             ),
         })
         messages = [{"role": "user", "content": content}]

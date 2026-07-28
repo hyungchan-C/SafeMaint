@@ -12,7 +12,8 @@ class FakeProvider:
     def generate_json(
         self, *, model, instructions, user_input, schema, max_output_tokens
     ):
-        assert "do not decide risk level" in instructions
+        assert "위험 수준을 결정" in instructions
+        assert "질문:" in user_input
         assert "bearing" in user_input
         assert max_output_tokens > 0
         self.models.append(model)
@@ -27,7 +28,8 @@ class FakeProvider:
     def generate_text(
         self, *, model, instructions, user_input, max_output_tokens
     ) -> str:
-        assert "only the numbered evidence" in instructions
+        assert "번호가 붙은 근거만" in instructions
+        assert "근거 및 작업 맥락:" in user_input
         assert "[1]" in user_input
         assert max_output_tokens > 0
         self.models.append(model)

@@ -45,6 +45,7 @@ docker-compose.override.yml
 /local_assets/
 /tmp/
 /backups/
+/artifacts/
 *.backup
 *.dump
 *.gguf

@@ -532,7 +532,10 @@ def test_chat_service_can_skip_qwen_intent_classification() -> None:
 
     assert response.generation_mode == "qwen"
     assert response.answer != "Fast Qwen answer [1]"
-    assert response.answer.endswith("안전관리자와 확인하세요.")
+    assert isinstance(response.structured_answer, MaintenanceAnswerDetails)
+    assert response.structured_answer.summary.core_warning.endswith(
+        "안전관리자와 확인하세요."
+    )
 
 
 def test_low_confidence_qwen_intent_returns_clarification_before_retrieval() -> None:
@@ -1053,10 +1056,55 @@ def test_maintenance_qwen_structure_and_checklist_are_source_validated() -> None
     assert response.structured_answer.answer_type == "maintenance_guide"
     assert len(response.structured_answer.hazards) == 1
     assert len(response.structured_answer.stop_conditions) == 1
-    assert [item.content for item in response.checklist_items] == [
-        "모델별 설치 기준 확인하기",
-        "설치 위치 확인하기"
-    ]
+    checklist_contents = [item.content for item in response.checklist_items]
+    assert "모델별 설치 기준 확인하기" in checklist_contents
+    assert "라이트커튼의 용도와 설치 전 확인사항 확인하기" in checklist_contents
+    assert "설치 위치 확인하기" not in checklist_contents
+    assert len(checklist_contents) <= 5
+    assert all(item.evidence_chunk_ids == ["chunk-1"] for item in response.checklist_items)
+
+
+def test_maintenance_summary_prioritizes_verified_manual_steps() -> None:
+    response = ChatResponse(
+        answer="기존 일반 안전요약",
+        answer_type="maintenance_guide",
+        structured_answer=MaintenanceAnswerDetails(
+            summary=MaintenanceSummary(
+                status="안전관리자 확인 필요",
+                risk_level="판단 불가",
+                risk_basis=[],
+                core_warning="교체 후 안전 기능을 검증하세요.",
+            ),
+            pre_checks=[
+                EvidenceBackedItem(
+                    content="오동작 위험을 확인합니다.",
+                    evidence_chunk_ids=["chunk-1"],
+                )
+            ],
+            manual_steps=[
+                EvidenceBackedItem(
+                    content="전원을 차단합니다.",
+                    evidence_chunk_ids=["chunk-1"],
+                ),
+                EvidenceBackedItem(
+                    content="교체한 수광기에 저장된 설정을 전송합니다.",
+                    evidence_chunk_ids=["chunk-1"],
+                ),
+            ],
+        ),
+        retrieval_mode="hybrid",
+    )
+
+    answer = ChatService._short_grounded_answer(
+        ChatRequest(question="라이트커튼을 교체해야 해. 어떻게 해야 할까?"),
+        response,
+    )
+
+    assert answer.startswith("매뉴얼에서 확인된 라이트커튼 교체 절차입니다.")
+    assert "1. 전원을 차단합니다." in answer
+    assert "2. 교체한 수광기에 저장된 설정을 전송합니다." in answer
+    assert "오동작 위험을 확인합니다." not in answer
+    assert "교체 후 안전 기능을 검증하세요." not in answer
 
 
 def test_qwen_empty_component_sections_are_backfilled_from_verified_candidates() -> None:
@@ -1117,7 +1165,8 @@ def test_qwen_empty_component_sections_are_backfilled_from_verified_candidates()
     assert response.answer_type == "component_info"
     assert isinstance(response.structured_answer, ComponentAnswerDetails)
     assert response.structured_answer.one_line_description.startswith("라이트 커튼은")
-    assert "광전자식 방호장치" in response.answer
+    assert "안전장치" in response.answer
+    assert "검출 영역 차단" in response.answer
     assert response.structured_answer.main_roles
     assert response.structured_answer.precautions
 
@@ -1189,8 +1238,8 @@ def test_qwen_receives_compact_sources_to_avoid_colab_ngrok_timeout() -> None:
 
     assert response.generation_mode == "qwen"
     assert response.answer != "Qwen compact answer [1]"
-    assert "프레스 내부를 청소 전에는" in response.answer
-    assert "예상 핵심 위험은 끼임입니다" in response.answer
+    assert "프레스 내부 청소 전에는" in response.answer
+    assert "예상 핵심 위험" in response.answer
     assert len(response.sources) == 3
 
 

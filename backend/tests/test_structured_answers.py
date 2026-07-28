@@ -15,13 +15,773 @@ from app.schemas.chat import (
     MaintenanceSummary,
 )
 from app.services.structured_answers import (
+    _component_usage_phrase,
+    _clean_source_excerpt,
+    _document_entity_phrase,
+    _manual_step_phrase,
+    _pre_check_phrase,
+    _polite_document_sentence,
+    _question_subject_phrase,
     enriched_structured_answer,
     finalize_document_answer,
+    finalize_maintenance_answer,
+    repair_extracted_quantity_order,
     source_based_checklist_items,
     source_based_fallback,
     validated_checklist_items,
     validated_structured_answer,
 )
+
+
+def test_displaced_duration_and_repetition_tokens_are_repaired() -> None:
+    malformed = (
+        "정상 운전을 하기 전에 판넬의 스위치를 정회전과 역회전 "
+        "초 이상 을 회 이상 (5~6 ) 3 반복하여 이물질이 끼어있는지 확인한다."
+    )
+
+    repaired = repair_extracted_quantity_order(malformed)
+
+    assert "정회전과 역회전(5~6초 이상)을 3회 이상 반복" in repaired
+    assert "초 이상 을 회 이상" not in repaired
+
+
+def test_inspection_scope_exemption_is_not_used_as_pre_work_check() -> None:
+    scope_text = (
+        "컨베이어 안전검사 적용범위. 다만 다음 각 목의 어느 하나에 해당하는 "
+        "것 또는 구간은 제외한다. 점검문을 열면 컨베이어 시스템이 정지하는 경우 "
+        "점검문을 열어도 내부에 철망 감응형 방호장치 등이 설치되어 있는 경우, "
+        "자 산업용 로봇 셀 내에 설치된 것으로 사람의 접근이 불가능한 구간."
+    )
+
+    assert _pre_check_phrase(scope_text) == ""
+
+
+@pytest.mark.parametrize(
+    "scope_fragment",
+    [
+        "점검문을 열면 컨베이어 시스템이 정지하는 경우",
+        "점검문을 열어도 내부에 철망 감응형 방호장치 등이 설치되어 있는 경우, 자 산업",
+    ],
+)
+def test_truncated_inspection_scope_fragment_is_not_a_pre_work_check(
+    scope_fragment: str,
+) -> None:
+    assert _pre_check_phrase(scope_fragment) == ""
+
+
+@pytest.mark.parametrize(
+    ("raw_text", "expected"),
+    [
+        (
+            "청소 및 점검 수리 등 작업을 완료한 해당 작업자가 태그를 제거하고 전원",
+            "작업 완료 후 담당 작업자만 잠금·표지를 제거하는지 확인합니다.",
+        ),
+        (
+            "시건한 스위치에는 청소 또는 점검 수리 작업 중 조작금지 태그를 (Switch) '",
+            "전원 차단 스위치에 조작금지 표지가 부착되어 있는지 확인합니다.",
+        ),
+    ],
+)
+def test_loto_table_fragments_become_complete_pre_work_checks(
+    raw_text: str,
+    expected: str,
+) -> None:
+    assert _pre_check_phrase(raw_text) == expected
+
+
+def test_truncated_power_switch_state_is_completed_for_each_section() -> None:
+    raw_text = "청소 및 점검 수리 등 작업 시 반드시 전원차단 스위치를 상태로"
+
+    assert _pre_check_phrase(raw_text) == (
+        "청소·점검·수리 전 전원 차단 스위치가 차단 위치인지 확인합니다."
+    )
+    assert _manual_step_phrase(raw_text) == (
+        "청소·점검·수리 전 전원 차단 스위치를 차단 위치로 전환합니다."
+    )
+
+
+def test_finalizer_normalizes_qwen_truncated_manual_step() -> None:
+    raw_text = "청소 및 점검 수리 등 작업 시 반드시 전원차단 스위치를 상태로"
+    answer = MaintenanceAnswerDetails(
+        summary=MaintenanceSummary(
+            status="안전관리자 확인 필요",
+            risk_level="판단 불가",
+            risk_basis=[],
+            core_warning="작업 전 확인 필요",
+        ),
+        manual_steps=[
+            EvidenceBackedItem(
+                content=raw_text,
+                evidence_chunk_ids=["manual-1"],
+            )
+        ],
+        evidence_chunk_ids=["manual-1"],
+    )
+
+    finalized = finalize_maintenance_answer(
+        answer,
+        sources=[],
+        question="컨베이어 벨트를 교체해야 해.",
+    )
+
+    assert isinstance(finalized, MaintenanceAnswerDetails)
+    assert [item.content for item in finalized.manual_steps] == [
+        "청소·점검·수리 전 전원 차단 스위치를 차단 위치로 전환합니다."
+    ]
+
+
+def test_enrichment_keeps_incident_references_missing_from_qwen_answer() -> None:
+    qwen = MaintenanceAnswerDetails(
+        summary=MaintenanceSummary(
+            status="안전관리자 확인 필요",
+            risk_level="보통",
+            risk_basis=[],
+            core_warning="작업 전 확인 필요",
+        ),
+        related_regulations_and_incidents=[
+            EvidenceBackedItem(
+                content="컨베이어 안전 가이드",
+                evidence_chunk_ids=["guide-1"],
+            )
+        ],
+        evidence_chunk_ids=["guide-1"],
+    )
+    fallback = MaintenanceAnswerDetails(
+        summary=MaintenanceSummary(
+            status="안전관리자 확인 필요",
+            risk_level="보통",
+            risk_basis=[],
+            core_warning="작업 전 확인 필요",
+        ),
+        related_regulations_and_incidents=[
+            EvidenceBackedItem(
+                content="컨베이어 협착 사고사례",
+                evidence_chunk_ids=["incident-1"],
+            )
+        ],
+        evidence_chunk_ids=["incident-1"],
+    )
+
+    enriched = enriched_structured_answer(
+        qwen,
+        fallback,
+        expected_type="maintenance_guide",
+    )
+
+    assert isinstance(enriched, MaintenanceAnswerDetails)
+    assert [
+        item.evidence_chunk_ids
+        for item in enriched.related_regulations_and_incidents
+    ] == [["guide-1"], ["incident-1"]]
+    assert enriched.evidence_chunk_ids == ["guide-1", "incident-1"]
+
+
+def test_enrichment_keeps_manual_steps_missing_from_short_qwen_answer() -> None:
+    qwen = MaintenanceAnswerDetails(
+        summary=MaintenanceSummary(
+            status="안전관리자 확인 필요",
+            risk_level="판단 불가",
+            risk_basis=[],
+            core_warning="작업 전 확인 필요",
+        ),
+        manual_steps=[
+            EvidenceBackedItem(
+                content="비상정지장치를 정기 점검합니다.",
+                evidence_chunk_ids=["manual-1"],
+            )
+        ],
+        evidence_chunk_ids=["manual-1"],
+    )
+    fallback = MaintenanceAnswerDetails(
+        summary=qwen.summary,
+        manual_steps=[
+            EvidenceBackedItem(
+                content="청소 및 점검 수리 등 작업 시 반드시 전원차단 스위치를 상태로",
+                evidence_chunk_ids=["manual-1"],
+            ),
+            EvidenceBackedItem(
+                content="정상 운전 전에 정회전과 역회전을 반복하여 이물질 여부를 확인합니다.",
+                evidence_chunk_ids=["manual-2"],
+            ),
+        ],
+        evidence_chunk_ids=["manual-1", "manual-2"],
+    )
+
+    enriched = enriched_structured_answer(
+        qwen,
+        fallback,
+        expected_type="maintenance_guide",
+    )
+    finalized = finalize_maintenance_answer(
+        enriched,
+        sources=[],
+        question="컨베이어 벨트를 교체해야 해.",
+    )
+
+    assert isinstance(finalized, MaintenanceAnswerDetails)
+    assert [item.content for item in finalized.manual_steps] == [
+        "비상정지장치를 정기 점검합니다.",
+        "청소·점검·수리 전 전원 차단 스위치를 차단 위치로 전환합니다.",
+        "정상 운전 전에 정회전과 역회전을 반복하여 이물질 여부를 확인합니다.",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source_text", "expected_terms", "excluded_terms"),
+    [
+        (
+            "카메라 렌즈의 오염과 손상 여부를 확인하십시오.",
+            ("카메라", "렌즈", "오염"),
+            ("베어링", "벨트"),
+        ),
+        (
+            "베어링 설치 전 축과 하우징의 손상 및 치수를 점검하십시오.",
+            ("베어링", "축", "하우징"),
+            ("렌즈", "벨트"),
+        ),
+        (
+            "컨베이어 벨트의 장력과 풀리 정렬 상태를 확인하십시오.",
+            ("벨트", "장력", "풀리"),
+            ("렌즈", "베어링"),
+        ),
+        (
+            "배관 연결부의 압력과 누설 여부를 점검하십시오.",
+            ("압력", "누설"),
+            ("광축", "벨트"),
+        ),
+    ],
+)
+def test_pre_checks_preserve_product_specific_manual_terms(
+    source_text: str,
+    expected_terms: tuple[str, ...],
+    excluded_terms: tuple[str, ...],
+) -> None:
+    phrase = _pre_check_phrase(source_text)
+
+    assert all(term in phrase for term in expected_terms)
+    assert all(term not in phrase for term in excluded_terms)
+    assert phrase.endswith(("확인합니다", "점검합니다"))
+
+
+def test_post_install_product_instruction_is_not_used_as_a_pre_check() -> None:
+    assert (
+        _pre_check_phrase(
+            "설치 후 베어링의 이상음과 과열 여부를 확인하십시오."
+        )
+        == ""
+    )
+
+
+def test_document_summary_does_not_return_unverified_information() -> None:
+    source = ChatSource(
+        document_id="doc-summary",
+        chunk_id="summary-1",
+        title="장비 설치 매뉴얼",
+        source_type="equipment_manual",
+        excerpt="장비의 설치 조건과 점검 절차를 설명합니다.",
+        similarity=0.9,
+    )
+
+    details = source_based_fallback(
+        "document_qa",
+        [source],
+        question="선택한 매뉴얼을 요약해줘.",
+    )
+
+    assert isinstance(details, DocumentAnswerDetails)
+    assert details.unverified_information == []
+
+
+def test_document_model_name_ignores_manual_filename_prefix() -> None:
+    source = ChatSource(
+        document_id="sfl-manual",
+        chunk_id="sfl-summary",
+        title="SFL 라이트 커튼 매뉴얼",
+        original_filename="MSO-SFL_A_U1-V3.1-KO_20250912_W.pdf",
+        source_type="equipment_manual",
+        excerpt="SFL 시리즈의 설치 및 배선 조건을 설명합니다.",
+        similarity=0.9,
+        document_profile={"model_names": ["MSO-SFL"]},
+    )
+
+    details = source_based_fallback(
+        "document_qa",
+        [source],
+        question="라이트 커튼 매뉴얼을 요약해줘.",
+    )
+
+    assert isinstance(details, DocumentAnswerDetails)
+    assert details.overview.model_name == "SFL 시리즈"
+
+
+def test_document_model_name_uses_series_before_locale_code() -> None:
+    source = ChatSource(
+        document_id="vg-manual",
+        chunk_id="vg-summary",
+        title="VG 비전 센서 제품 매뉴얼",
+        original_filename="VG_KO_TCD210213AF_20241113_MANUAL_W.pdf",
+        source_type="equipment_manual",
+        excerpt="VG Series 비전 센서의 주요 특징과 설치 조건을 설명합니다.",
+        similarity=0.9,
+        document_profile={"model_names": ["미지정 모델"]},
+    )
+
+    details = source_based_fallback(
+        "document_qa",
+        [source],
+        question="VG 센서 매뉴얼을 요약해줘.",
+    )
+
+    assert isinstance(details, DocumentAnswerDetails)
+    assert details.overview.model_name == "VG 시리즈"
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        ("차단하여 광학 성능 향상 렌즈 커버", "렌즈 커버"),
+        ("FTP 서버로 데이터 저장 비전센서", "비전센서"),
+        ("원자력 제어 장치", ""),
+        ("연소장치", ""),
+        ("안전장치", ""),
+        ("방범/방재장치", ""),
+        ("반드시 2중으로 안전장치", ""),
+        ("SELV 전원 장치", "안전 초저전압(SELV) 전원 공급 장치"),
+        ("오동작을 방지하기 위해 전원 I/O 케이블", "전원·I/O 케이블"),
+        ("1-KO_20250912_W 라이트 커튼", "라이트 커튼"),
+        ("광축", ""),
+        ("기종 형태 L 라이트 커튼", "라이트 커튼"),
+        ("미지정 제조사 미분류 설비", ""),
+        ("조명 일체형 비전 센서", "조명 일체형 비전 센서"),
+    ],
+)
+def test_document_profile_entities_are_clear_product_names(
+    raw_value: str,
+    expected: str,
+) -> None:
+    assert _document_entity_phrase(raw_value, known=True) == expected
+
+
+def test_document_summary_filters_profile_descriptions_and_excluded_applications() -> None:
+    source = ChatSource(
+        document_id="vision-manual",
+        chunk_id="vision-summary",
+        title="VG 비전 센서 매뉴얼",
+        source_type="component_manual",
+        excerpt="비전 센서의 렌즈 커버와 데이터 저장 기능을 설명합니다.",
+        similarity=0.9,
+        document_profile={
+            "product_names": ["조명 일체형 비전 센서"],
+            "equipment": ["미지정 제조사 미분류 설비", "산업용 로봇"],
+            "components": [
+                "차단하여 광학 성능 향상 렌즈 커버",
+                "FTP 서버로 데이터 저장 비전센서",
+                "원자력 제어 장치",
+                "연소장치",
+                "안전장치",
+                "방범/방재장치",
+                "반드시 2중으로 안전장치",
+                "SELV 전원 장치",
+                "오동작을 방지하기 위해 전원 I/O 케이블",
+                "1-KO_20250912_W 라이트 커튼",
+                "광축",
+                "기종 형태 L 라이트 커튼",
+                "산업용 로봇 방호장치",
+                "브라켓",
+                "케이블",
+                "SFL-LC 케이블",
+            ],
+        },
+    )
+
+    details = source_based_fallback(
+        "document_qa",
+        [source],
+        question="VG 비전 센서 매뉴얼을 요약해줘.",
+    )
+
+    assert isinstance(details, DocumentAnswerDetails)
+    assert details.related_equipment == ["산업용 로봇"]
+    assert details.related_components == [
+        "렌즈 커버",
+        "비전센서",
+        "안전 초저전압(SELV) 전원 공급 장치",
+        "라이트 커튼",
+        "브라켓",
+        "케이블",
+        "조명 일체형 비전 센서",
+    ]
+
+
+def test_pre_check_removes_ocr_list_number_and_rewrites_requirement_as_check() -> None:
+    phrase = _pre_check_phrase(
+        "1 기계의 위험 영역에서 SFL(A) 설치 위치까지의 거리는 "
+        "계산된 안전거리와 같거나 그 이상으로 구성되어 있다"
+    )
+
+    assert not phrase.startswith("1 ")
+    assert "안전거리" in phrase
+    assert phrase.endswith("인지 확인합니다")
+
+
+def test_pre_check_rewrites_installed_condition_as_check_action() -> None:
+    phrase = _pre_check_phrase(
+        "6 설치된 투광기와 수광기의 외형 구조를 확인하였을 때 "
+        "흠집 또는 파손이 없는 상태로 구성되어 있다"
+    )
+
+    assert not phrase.startswith("6 ")
+    assert "흠집 또는 파손" in phrase
+    assert phrase.endswith("없는지 확인합니다")
+
+
+def test_manufacturer_specific_prechecks_keep_each_manual_wording() -> None:
+    manufacturer_a = ChatSource(
+        document_id="bearing-maker-a",
+        chunk_id="maker-a-fit",
+        title="A사 베어링 설치 매뉴얼",
+        source_type="component_manual",
+        excerpt="베어링 설치 전에 축 지름 50 mm와 공차 h6 충족 여부를 확인하십시오.",
+        similarity=0.9,
+    )
+    manufacturer_b = ChatSource(
+        document_id="bearing-maker-b",
+        chunk_id="maker-b-fit",
+        title="B사 베어링 설치 매뉴얼",
+        source_type="component_manual",
+        excerpt="조립 전에 하우징 내경의 긁힘과 타원 변형 상태를 점검하십시오.",
+        similarity=0.9,
+    )
+
+    answer_a = source_based_fallback(
+        "maintenance_guide",
+        [manufacturer_a],
+        question="A사 베어링 설치 전 필수사항을 알려줘.",
+    )
+    answer_b = source_based_fallback(
+        "maintenance_guide",
+        [manufacturer_b],
+        question="B사 베어링 설치 전 필수사항을 알려줘.",
+    )
+
+    assert isinstance(answer_a, MaintenanceAnswerDetails)
+    assert isinstance(answer_b, MaintenanceAnswerDetails)
+    assert [item.content for item in answer_a.pre_checks] == [
+        "베어링 설치 전에 축 지름 50 mm와 공차 h6 충족 여부를 확인합니다"
+    ]
+    assert [item.content for item in answer_b.pre_checks] == [
+        "조립 전에 하우징 내경의 긁힘과 타원 변형 상태를 점검합니다"
+    ]
+    assert answer_a.pre_checks != answer_b.pre_checks
+
+
+@pytest.mark.parametrize(
+    ("source_text", "expected"),
+    [
+        (
+            "제품과 기계의 위험부 사이에는 반드시 안전 거리를 확보하십시오.",
+            "제품과 기계의 위험부 사이에는 반드시 안전 거리를 확보하십시오.",
+        ),
+        (
+            "제품 설치 시 투광기와 수광기의 상단 및 하단 광축 표시등을 정확히 일치시키십시오.",
+            "제품 설치 시 투광기와 수광기의 상단 및 하단 광축 표시등을 정확히 일치시키십시오.",
+        ),
+        (
+            "제품을 여러 세트로 사용하는 경우 상호 간섭이 발생하지 않도록 배치하거나 차광판을 사용하십시오.",
+            "제품을 여러 세트로 사용하는 경우 상호 간섭이 발생하지 않도록 배치하거나 차광판을 사용하십시오.",
+        ),
+        (
+            "강한 외란광 또는 광택면의 반사광이 수광기로 직접 입사되지 않는 장소에 설치하십시오.",
+            "강한 외란광 또는 광택면의 반사광이 수광기로 직접 입사되지 않는 장소에 설치하십시오.",
+        ),
+    ],
+)
+def test_light_curtain_manual_steps_keep_device_specific_details(
+    source_text: str,
+    expected: str,
+) -> None:
+    assert _manual_step_phrase(source_text) == expected
+
+
+def test_light_curtain_fallback_keeps_multiple_installation_details() -> None:
+    excerpts = [
+        "제품과 기계의 위험부 사이에는 반드시 안전 거리를 확보하십시오.",
+        "제품 설치 시 투광기와 수광기의 상단 및 하단 광축 표시등을 정확히 일치시키십시오.",
+        "제품을 여러 세트로 사용하는 경우 상호 간섭이 발생하지 않도록 배치하거나 차광판을 사용하십시오.",
+        "강한 외란광 또는 광택면의 반사광이 수광기로 직접 입사되지 않는 장소에 설치하십시오.",
+        "설치 후 검출 영역을 차단했을 때 제어출력이 정지되는지 확인하십시오.",
+    ]
+    sources = [
+        ChatSource(
+            document_id="doc-light",
+            chunk_id=f"light-install-{index}",
+            title="라이트커튼 매뉴얼",
+            source_type="equipment_manual",
+            section="설치 주의사항",
+            excerpt=excerpt,
+            similarity=0.9,
+        )
+        for index, excerpt in enumerate(excerpts)
+    ]
+
+    details = source_based_fallback(
+        "maintenance_guide",
+        sources,
+        question="라이트커튼 설치 시 주의사항을 알려줘.",
+    )
+
+    assert isinstance(details, MaintenanceAnswerDetails)
+    assert len(details.manual_steps) == 5
+    assert any("안전 거리" in item.content for item in details.manual_steps)
+    assert any("광축 표시등" in item.content for item in details.manual_steps)
+    assert any("상호 간섭" in item.content for item in details.manual_steps)
+    assert any(
+        "외란광" in item.content and "반사광" in item.content
+        for item in details.manual_steps
+    )
+    assert {
+        chunk_id
+        for item in details.manual_steps
+        for chunk_id in item.evidence_chunk_ids
+    } == {f"light-install-{index}" for index in range(5)}
+    checklist = source_based_checklist_items(
+        "maintenance_guide",
+        sources,
+        question="라이트커튼 설치 시 주의사항을 알려줘.",
+    )
+    assert 3 <= len(checklist) <= 5
+    checklist_text = " ".join(item.content for item in checklist)
+    assert "정렬" in checklist_text
+    assert "간섭" in checklist_text
+    assert "안전거리" in checklist_text
+    assert "정상 반응" in checklist_text
+    assert all(item.evidence_chunk_ids for item in checklist)
+
+
+def test_bearing_tbm_uses_bearing_specific_items_and_stays_within_five() -> None:
+    excerpts = [
+        "베어링 설치 전 축과 하우징의 손상 및 치수를 확인하십시오.",
+        "지정된 윤활제를 정량 주입하십시오.",
+        "베어링과 축의 정렬 상태를 확인하십시오.",
+        "조립 후 베어링의 이상음과 과열 여부를 점검하십시오.",
+        "회전부가 움직이지 않도록 전원을 차단하십시오.",
+        "작업 책임자에게 작업 내용을 보고하십시오.",
+    ]
+    sources = [
+        ChatSource(
+            document_id="doc-bearing",
+            chunk_id=f"bearing-{index}",
+            title="베어링 설치 매뉴얼",
+            source_type="equipment_manual",
+            section="설치 점검",
+            excerpt=excerpt,
+            similarity=0.9,
+        )
+        for index, excerpt in enumerate(excerpts)
+    ]
+
+    checklist = source_based_checklist_items(
+        "maintenance_guide",
+        sources,
+        question="베어링 설치 시 확인사항을 알려줘.",
+    )
+
+    assert len(checklist) == 5
+    contents = [item.content for item in checklist]
+    assert any("오염·손상" in content for content in contents)
+    assert any("윤활" in content for content in contents)
+    assert any("정렬" in content for content in contents)
+    assert any("전원" in content and "차단" in content for content in contents)
+    assert all("광축" not in content for content in contents)
+    assert all(item.evidence_chunk_ids for item in checklist)
+
+
+def test_light_curtain_pre_checks_prioritize_three_installation_essentials() -> None:
+    excerpts = [
+        "제품과 기계의 위험부 사이에는 반드시 안전 거리를 확보하십시오.",
+        (
+            "기계의 위험부에 접근하기 위해서는 반드시 인체가 검출 영역을 통과하는 "
+            "구조로 설치하고 우회가 가능하면 별도의 가드를 설치하십시오."
+        ),
+        "제품 설치 시 투광기와 수광기의 상단 및 하단 광축 표시등을 정확히 일치시키십시오.",
+        "제품을 여러 세트로 사용하는 경우 상호 간섭이 발생하지 않도록 배치하거나 차광판을 사용하십시오.",
+        "강한 외란광 또는 광택면의 반사광이 수광기로 직접 입사되지 않는 장소에 설치하십시오.",
+    ]
+    sources = [
+        ChatSource(
+            document_id="doc-light",
+            chunk_id=f"light-precheck-{index}",
+            title="라이트커튼 매뉴얼",
+            source_type="equipment_manual",
+            section="설치 주의사항",
+            excerpt=excerpt,
+            similarity=0.9,
+        )
+        for index, excerpt in enumerate(excerpts)
+    ]
+
+    details = source_based_fallback(
+        "maintenance_guide",
+        sources,
+        question="라이트커튼 설치 시 작업 전 필수사항을 알려줘.",
+    )
+
+    assert isinstance(details, MaintenanceAnswerDetails)
+    assert [item.evidence_chunk_ids for item in details.pre_checks] == [
+        ["light-precheck-0"],
+        ["light-precheck-2"],
+        ["light-precheck-4"],
+    ]
+    assert [item.content for item in details.pre_checks] == [
+        excerpts[0].rstrip("."),
+        excerpts[2].rstrip("."),
+        excerpts[4].rstrip("."),
+    ]
+
+
+def test_enrichment_prefers_specific_manual_pre_checks_over_generic_model_text() -> None:
+    fallback = MaintenanceAnswerDetails(
+        summary=MaintenanceSummary(
+            status="안전관리자 확인 필요",
+            risk_level="판단 불가",
+            risk_basis=[],
+            core_warning="안전거리 확인 필요",
+        ),
+        pre_checks=[
+            EvidenceBackedItem(
+                content="기계 위험부와 라이트커튼 사이의 안전거리 확보 여부 확인",
+                evidence_chunk_ids=["light-1"],
+            )
+        ],
+        evidence_chunk_ids=["light-1"],
+    )
+    model_answer = MaintenanceAnswerDetails(
+        summary=fallback.summary,
+        pre_checks=[
+            EvidenceBackedItem(
+                content="방호장치 설치 위치와 고정 상태 확인",
+                evidence_chunk_ids=["light-1"],
+            )
+        ],
+        evidence_chunk_ids=["light-1"],
+    )
+
+    enriched = enriched_structured_answer(
+        model_answer,
+        fallback,
+        expected_type="maintenance_guide",
+    )
+
+    assert isinstance(enriched, MaintenanceAnswerDetails)
+    assert enriched.pre_checks == fallback.pre_checks
+
+
+def test_enrichment_does_not_use_model_prechecks_without_manual_evidence() -> None:
+    summary = MaintenanceSummary(
+        status="안전관리자 확인 필요",
+        risk_level="판단 불가",
+        risk_basis=[],
+        core_warning="근거 확인 필요",
+    )
+    fallback = MaintenanceAnswerDetails(summary=summary, pre_checks=[])
+    model_answer = MaintenanceAnswerDetails(
+        summary=summary,
+        pre_checks=[
+            EvidenceBackedItem(
+                content="장착 위치와 고정 상태 확인",
+                evidence_chunk_ids=["manual-1"],
+            )
+        ],
+    )
+
+    enriched = enriched_structured_answer(
+        model_answer,
+        fallback,
+        expected_type="maintenance_guide",
+    )
+
+    assert isinstance(enriched, MaintenanceAnswerDetails)
+    assert enriched.pre_checks == []
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("비전에 대해 알려줄래?", "비전"),
+        ("비전에 대해 설명해 주세요.", "비전"),
+        ("라이트커튼을 알려주세요.", "라이트커튼"),
+    ],
+)
+def test_question_subject_excludes_request_phrases(
+    question: str,
+    expected: str,
+) -> None:
+    assert _question_subject_phrase(question) == expected
+
+
+def test_component_summary_does_not_echo_the_question_as_its_subject() -> None:
+    source = ChatSource(
+        document_id="doc-vision",
+        chunk_id="vision-role",
+        title="비전 센서 사용자 매뉴얼",
+        source_type="equipment_manual",
+        excerpt="비전 센서는 기능 설정 및 상태 모니터링을 지원합니다.",
+        similarity=0.9,
+    )
+
+    details = source_based_fallback(
+        "component_info",
+        [source],
+        question="비전에 대해 알려줄래?",
+    )
+
+    assert isinstance(details, ComponentAnswerDetails)
+    assert details.one_line_description.startswith("비전은")
+    assert "대해" not in details.one_line_description
+    assert "알려줄래" not in details.one_line_description
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "강한 자기력 및 고주파 노이즈가 발생하는 기기 근처에서는 사용하지 마십시오.",
+        "광 간섭이 발생하는 장소에는 설치하지 마십시오.",
+        "전자기 노이즈가 강한 위치는 피하십시오.",
+    ],
+)
+def test_component_usage_rejects_interference_avoidance_conditions(text: str) -> None:
+    assert _component_usage_phrase(text) == ""
+
+
+def test_component_usage_keeps_positive_mounting_location() -> None:
+    assert (
+        _component_usage_phrase("브라켓에 단단히 장착하여 사용합니다.")
+        == "고정·체결이 필요한 장착 위치"
+    )
+
+
+def test_component_fallback_moves_noise_avoidance_to_precautions() -> None:
+    source = ChatSource(
+        document_id="doc-vision",
+        chunk_id="vision-warning",
+        title="비전 센서 매뉴얼",
+        source_type="equipment_manual",
+        section="취급상의 주의",
+        excerpt="강한 자기력 및 고주파 노이즈가 발생하는 기기 근처에서는 사용하지 마십시오.",
+        similarity=0.9,
+    )
+
+    details = source_based_fallback(
+        "component_info",
+        [source],
+        question="비전에 대해 요약해줄래?",
+    )
+
+    assert isinstance(details, ComponentAnswerDetails)
+    assert details.usage_locations == []
+    assert [item.content for item in details.precautions] == [
+        "강한 자기장·고주파 노이즈 발생 기기 근처에서 사용하지 않기"
+    ]
 
 
 def _source(chunk_id: str, source_type: str) -> ChatSource:
@@ -52,7 +812,7 @@ def test_component_fallback_never_contains_maintenance_steps() -> None:
     assert "manual_steps" not in details.model_dump()
 
 
-def test_public_maintenance_fallback_builds_precheck_based_tbm() -> None:
+def test_public_maintenance_fallback_does_not_fill_manual_prechecks() -> None:
     source = ChatSource(
         document_id="doc-public",
         chunk_id="public-1",
@@ -72,7 +832,7 @@ def test_public_maintenance_fallback_builds_precheck_based_tbm() -> None:
 
     assert details is not None
     assert details.answer_type == "maintenance_guide"
-    assert details.pre_checks
+    assert details.pre_checks == []
     assert details.hazards
     assert details.manual_steps == []
     assert details.related_regulations_and_incidents
@@ -85,7 +845,7 @@ def test_public_maintenance_fallback_builds_precheck_based_tbm() -> None:
     assert details.related_regulations_and_incidents[0].content.startswith("[안전 가이드]")
 
 
-def test_maintenance_fallback_prioritizes_actionable_prechecks_for_other_work() -> None:
+def test_public_guides_do_not_become_manufacturer_prechecks() -> None:
     def conveyor_source(chunk_id: str, excerpt: str) -> ChatSource:
         return ChatSource(
             document_id=f"doc-{chunk_id}",
@@ -128,16 +888,9 @@ def test_maintenance_fallback_prioritizes_actionable_prechecks_for_other_work() 
     )
 
     assert isinstance(details, MaintenanceAnswerDetails)
-    assert [item.content for item in details.pre_checks] == [
-        "운전 정지 및 재가동 방지 조치 확인",
-        "전원 차단/잠금 상태 확인",
-        "비상정지장치 접근·작동 상태 확인",
-    ]
-    assert {item.content for item in checklist} == {
-        "운전 정지 후 재가동 방지 조치 확인하기",
-        "전원 차단 후 잠금·표지 부착 상태 확인하기",
-        "비상정지장치 접근·작동 상태 점검하기",
-    }
+    assert details.pre_checks == []
+    assert checklist
+    assert all(item.evidence_chunk_ids for item in checklist)
     assert details.precautions
     assert all(
         item.content.endswith(("하기", "않기", "금지"))
@@ -180,11 +933,14 @@ def test_maintenance_sections_have_distinct_styles_for_light_curtain() -> None:
     stop_conditions = [item.content for item in details.stop_conditions]
     checklist_items = [item.content for item in checklist]
 
-    assert "모델별 안전거리 기준 확인" in pre_checks
-    assert all(item.endswith("하기") for item in checklist_items)
+    assert "광전자식 방호장치는 안전거리를 유지하여 설치해야 한다" in pre_checks
+    assert all(
+        item.endswith(("하기", "맞추기", "않기"))
+        for item in checklist_items
+    )
     assert any(item.endswith("않기") for item in precautions)
     assert all("중지" in item for item in stop_conditions)
-    assert "모델별 안전거리 기준 확인" not in stop_conditions
+    assert "광전자식 방호장치는 안전거리를 유지하여 설치해야 한다" not in stop_conditions
     assert set(pre_checks).isdisjoint(checklist_items)
     assert set(pre_checks).isdisjoint(precautions)
     assert set(pre_checks).isdisjoint(stop_conditions)
@@ -240,6 +996,114 @@ def test_public_incident_fallback_does_not_convert_incident_text_into_procedure(
     assert checklist == []
 
 
+def test_public_incident_removes_trailing_ocr_page_number() -> None:
+    source = ChatSource(
+        document_id="incident-conveyor",
+        chunk_id="incident-conveyor-number",
+        title="컨베이어 이송 중 협착사고",
+        source_type="public_incident",
+        document_scope="public",
+        excerpt=(
+            "비상정지 스위치가 운전실에만 설치되어 작업자가 긴급상황 발생 시 "
+            "전원을 차단할 수 없는 상태였음.4입니다."
+        ),
+        similarity=0.9,
+    )
+
+    details = source_based_fallback(
+        "maintenance_guide",
+        [source],
+        question="컨베이어 벨트를 교체해야 해.",
+    )
+
+    assert isinstance(details, MaintenanceAnswerDetails)
+    dumped = json.dumps(details.model_dump(mode="json"), ensure_ascii=False)
+    assert "4입니다" not in dumped
+    cleaned = _clean_source_excerpt(source.excerpt)
+    assert cleaned.endswith("상태였음.")
+    assert _polite_document_sentence(cleaned) == (
+        "비상정지 스위치가 운전실에만 설치되어 작업자가 긴급상황 발생 시 "
+        "전원을 차단할 수 없는 상태였습니다."
+    )
+
+
+def test_unrelated_public_references_are_omitted_from_maintenance_answer() -> None:
+    sources = [
+        ChatSource(
+            document_id="guide-light",
+            chunk_id="guide-light",
+            title="광전자식 방호장치 교체 안전 가이드",
+            source_type="public_guide",
+            document_scope="public",
+            excerpt="광전자식 방호장치 교체 전 전원을 차단한다.",
+            similarity=0.8,
+        ),
+        ChatSource(
+            document_id="law-crane",
+            chunk_id="law-crane",
+            title="이동식 크레인 안전 기준",
+            source_type="public_law",
+            document_scope="public",
+            excerpt="크레인 와이어로프와 훅의 상태를 점검한다.",
+            similarity=0.9,
+        ),
+        ChatSource(
+            document_id="incident-press",
+            chunk_id="incident-press",
+            title="프레스 금형 교체 사고사례",
+            source_type="public_incident",
+            document_scope="public",
+            excerpt="프레스 금형 교체 중 협착 사고가 발생했다.",
+            similarity=0.9,
+        ),
+    ]
+
+    details = source_based_fallback(
+        "maintenance_guide",
+        sources,
+        question="라이트커튼을 교체하려면 어떻게 해야 해?",
+    )
+
+    assert isinstance(details, MaintenanceAnswerDetails)
+    assert [
+        item.evidence_chunk_ids
+        for item in details.related_regulations_and_incidents
+    ] == [["guide-light"]]
+
+
+def test_conveyor_belt_question_keeps_reversed_conveyor_incident_title() -> None:
+    incident = ChatSource(
+        document_id="incident-conveyor",
+        chunk_id="incident-conveyor",
+        title="벨트컨베이어에 협착",
+        source_type="public_incident",
+        document_scope="public",
+        excerpt="벨트컨베이어 정비 작업 중 운전을 정지하지 않아 협착 사고가 발생했다.",
+        similarity=0.9,
+    )
+    unrelated_subtype = ChatSource(
+        document_id="incident-screw-conveyor",
+        chunk_id="incident-screw-conveyor",
+        title="스크류컨베이어 정비 중 끼임",
+        source_type="public_incident",
+        document_scope="public",
+        excerpt="스크류컨베이어 정비 작업 중 끼임 사고가 발생했다.",
+        similarity=0.95,
+    )
+
+    details = source_based_fallback(
+        "maintenance_guide",
+        [incident, unrelated_subtype],
+        question="컨베이어 벨트를 교체해야 해.",
+    )
+
+    assert isinstance(details, MaintenanceAnswerDetails)
+    assert [
+        item.evidence_chunk_ids
+        for item in details.related_regulations_and_incidents
+    ] == [["incident-conveyor"]]
+
+
 def test_maintenance_fallback_does_not_invent_press_for_light_curtain_source() -> None:
     source = ChatSource(
         document_id="doc-light",
@@ -288,10 +1152,11 @@ def test_document_fallback_populates_related_fields_from_evidence() -> None:
     assert details.overview.document_type == "PDF / 장비 매뉴얼"
     assert details.main_contents
     assert details.main_contents[0].evidence_chunk_ids == ["light-1"]
-    assert "광전자식 방호장치입니다." in details.main_contents[0].content
+    assert details.unverified_information == []
+    assert "설치·장착·배선" in details.main_contents[0].content
     assert details.related_equipment == []
     assert "라이트 커튼" in details.related_components
-    assert "PC 설정 툴" in details.related_components
+    assert "설정 툴" in details.related_components
     assert all(
         "확인" not in component and "점검" not in component
         for component in details.related_components
@@ -607,7 +1472,7 @@ def test_component_items_are_rewritten_as_precaution_phrases() -> None:
 
     assert validated is not None
     assert [item.content for item in validated.precautions] == [
-        "광축 정렬을 임의로 변경하지 않기",
+        "검출부 정렬을 임의로 변경하지 않기",
         "정상 동작 시험 없이 사용하지 않기",
     ]
 

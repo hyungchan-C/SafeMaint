@@ -277,7 +277,6 @@ export default function AnswerTabs({
       source.source_type === "equipment_manual"
       || source.source_type === "component_manual"
     ));
-
     tabs = [
       {
         id: "summary",
@@ -297,6 +296,11 @@ export default function AnswerTabs({
             {structuredAnswer.summary.risk_basis.length > 0 && (
               <AnswerSection title="위험 판단 근거">
                 {evidenceList(structuredAnswer.summary.risk_basis)}
+              </AnswerSection>
+            )}
+            {structuredAnswer.additional_information_needed.length > 0 && (
+              <AnswerSection title="추가 확인이 필요한 내용" tone="muted">
+                <TextList items={structuredAnswer.additional_information_needed} />
               </AnswerSection>
             )}
             {warning && <p className="answer-tab-warning">⚠ {warning}</p>}
@@ -340,9 +344,6 @@ export default function AnswerTabs({
             <AnswerSection title="즉시 작업을 중지해야 하는 조건" tone="danger">
               {evidenceList(structuredAnswer.stop_conditions)}
             </AnswerSection>
-            <AnswerSection title="추가 확인이 필요한 내용" tone="muted">
-              <TextList items={structuredAnswer.additional_information_needed} />
-            </AnswerSection>
             {structuredAnswer.conflicts.length > 0 && (
               <AnswerSection title="근거 간 차이" tone="warning">
                 {evidenceList(structuredAnswer.conflicts)}
@@ -360,15 +361,21 @@ export default function AnswerTabs({
         label: "근거",
         content: (
           <div className="answer-tab-stack">
-            <AnswerSection title="관련 법령">
-              {evidenceList(lawItems)}
-            </AnswerSection>
-            <AnswerSection title="안전 가이드·회사 기준">
-              {evidenceList(guideItems)}
-            </AnswerSection>
-            <AnswerSection title="사고사례">
-              {evidenceList(incidentItems)}
-            </AnswerSection>
+            {lawItems.length > 0 && (
+              <AnswerSection title="관련 법령">
+                {evidenceList(lawItems)}
+              </AnswerSection>
+            )}
+            {guideItems.length > 0 && (
+              <AnswerSection title="안전 가이드·회사 기준">
+                {evidenceList(guideItems)}
+              </AnswerSection>
+            )}
+            {incidentItems.length > 0 && (
+              <AnswerSection title="사고사례">
+                {evidenceList(incidentItems)}
+              </AnswerSection>
+            )}
             <AnswerSection title="매뉴얼 근거">
               <SourceReferenceList
                 sources={manualSources}
@@ -377,9 +384,17 @@ export default function AnswerTabs({
                 onSelectSource={selectSource}
               />
             </AnswerSection>
-            {sources.length > 0
-              ? sourceCards
-              : <p className="answer-tab-empty">표시할 검색 출처가 없습니다.</p>}
+            <AnswerSection title="검색 근거">
+              {sources.length > 0 ? (
+                <ChatSources
+                  sources={sources}
+                  onOpenDocument={onOpenDocument}
+                  idPrefix={instanceId}
+                  hideHeading
+                />
+              )
+                : <p className="answer-tab-empty">표시할 검색 출처가 없습니다.</p>}
+            </AnswerSection>
           </div>
         ),
       },
@@ -392,9 +407,6 @@ export default function AnswerTabs({
         content: (
           <div className="answer-tab-stack">
             <NaturalAnswer answer={answerText} />
-            <p className="answer-component-description">
-              {structuredAnswer.one_line_description}
-            </p>
             <AnswerSection title="주요 역할">
               {evidenceList(structuredAnswer.main_roles)}
             </AnswerSection>
@@ -419,9 +431,11 @@ export default function AnswerTabs({
             <AnswerSection title="사용 시 주의사항" tone="warning">
               {evidenceList(structuredAnswer.precautions)}
             </AnswerSection>
-            <AnswerSection title="추가 확인이 필요한 내용" tone="muted">
-              <TextList items={structuredAnswer.additional_information_needed} />
-            </AnswerSection>
+            {structuredAnswer.additional_information_needed.length > 0 && (
+              <AnswerSection title="추가 확인이 필요한 내용" tone="muted">
+                <TextList items={structuredAnswer.additional_information_needed} />
+              </AnswerSection>
+            )}
           </div>
         ),
       },
@@ -444,6 +458,10 @@ export default function AnswerTabs({
       },
     ];
   } else {
+    const relatedItems = Array.from(new Set([
+      ...structuredAnswer.related_equipment,
+      ...structuredAnswer.related_components,
+    ]));
     const overview = [
       ["파일명", structuredAnswer.overview.filename],
       ["문서 종류", structuredAnswer.overview.document_type],
@@ -473,6 +491,11 @@ export default function AnswerTabs({
                 </dl>
               ) : <p className="answer-tab-empty">확인된 문서 메타데이터가 없습니다.</p>}
             </section>
+            {structuredAnswer.unverified_information.length > 0 && (
+              <AnswerSection title="확인하지 못한 내용" tone="muted">
+                <TextList items={structuredAnswer.unverified_information} />
+              </AnswerSection>
+            )}
             {warning && <p className="answer-tab-warning">⚠ {warning}</p>}
           </div>
         ),
@@ -483,16 +506,10 @@ export default function AnswerTabs({
         content: (
           <div className="answer-tab-stack">
             <AnswerSection title="관련 장비·부품">
-              <TextList items={[
-                ...structuredAnswer.related_equipment,
-                ...structuredAnswer.related_components,
-              ]} />
+              <TextList items={relatedItems} />
             </AnswerSection>
             <AnswerSection title="문서에서 확인 가능한 작업">
               <TextList items={structuredAnswer.supported_tasks} />
-            </AnswerSection>
-            <AnswerSection title="확인하지 못한 내용" tone="muted">
-              <TextList items={structuredAnswer.unverified_information} />
             </AnswerSection>
             {structuredAnswer.conflicts.length > 0 && (
               <AnswerSection title="근거 간 차이" tone="warning">

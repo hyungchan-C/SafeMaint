@@ -574,6 +574,20 @@ def upload_document(
                 detail="기존 문서와 문서 유형·출처·접근 등급이 일치하지 않습니다.",
             )
 
+        # Soft-deleted documents retain their external_id for audit history.
+        # Reactivate that logical document before queuing a replacement version;
+        # otherwise upload returns 201 but progress/list endpoints hide it as 404
+        # and the worker refuses to claim its processing job.
+        if document.lifecycle_status == "deleted" or document.deleted_at is not None:
+            document.lifecycle_status = "pending"
+            document.deleted_at = None
+            document.title = doc_name
+            document.metadata_json = {
+                "manufacturer": manufacturer,
+                "model_number": model_name,
+                "product_type": product_type,
+            }
+
         next_version_number = (
             db.scalar(
                 select(func.max(DocumentVersion.version_number)).where(
