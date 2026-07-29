@@ -9,8 +9,11 @@ from uuid import UUID, uuid4
 
 import httpx
 from openai import OpenAIError
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.db.models import DocumentChunk
+from app.repositories.document_chunks import DocumentChunkRepository
 from app.schemas.chat import (
     AccidentClassification,
     AnswerType,
@@ -32,6 +35,11 @@ from app.services.document_types import (
     PUBLIC_REFERENCE_DOCUMENT_TYPES,
     canonical_document_type,
 )
+from app.services.pdf_outline import (
+    OutlineChapter,
+    chapter_title_for_page,
+    document_outline_chapters,
+)
 from app.services.qwen import QwenAnswerFailure, QwenClient
 from app.services.question_intent import classify_question_intent
 from app.services.structured_answers import (
@@ -44,6 +52,7 @@ from app.services.structured_answers import (
     finalize_maintenance_answer,
     no_evidence_answer,
     no_evidence_details,
+    repair_extracted_quantity_order,
     source_based_checklist_items,
     source_based_fallback,
     validated_structured_answer,
@@ -192,7 +201,30 @@ QWEN_MAINTENANCE_ACTION_SIGNAL_TERMS = (
     "replace",
     "repair",
 )
-QWEN_DOMAIN_PHRASE_GROUPS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = ()
+# 질문의 핵심 설비명과 검색 문서의 표현이 다른 경우를 위한 검색 동의어다.
+# 답변 문구를 고정하는 규칙이 아니라, 유사한 일반명 때문에 전혀 다른 설비
+# (예: 라이트 커튼 ↔ 건축 커튼월)가 Qwen 근거로 전달되는 것을 막는 필터다.
+QWEN_DOMAIN_PHRASE_GROUPS: tuple[
+    tuple[tuple[str, ...], tuple[str, ...]], ...
+] = (
+    (
+        (
+            "라이트커튼",
+            "라이트 커튼",
+            "light curtain",
+            "광전자식 방호장치",
+            "광전자식방호장치",
+        ),
+        (
+            "커튼월",
+            "curtain wall",
+            "벨트컨베이어",
+            "벨트콘베이어",
+            "컨베이어",
+            "conveyor",
+        ),
+    ),
+)
 GENERIC_QWEN_FALLBACK_ANSWERS = frozenset(
     {
         "검색된 근거를 기준으로 작업 전 확인할 핵심 사항을 요약했습니다.",
@@ -205,6 +237,84 @@ GENERIC_QWEN_FALLBACK_ANSWERS = frozenset(
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _chat_source_from_chunk(
+    chunk: DocumentChunk,
+    *,
+    outline_chapter_title: str | None = None,
+) -> ChatSource:
+    """Adapt a raw DB chunk into the shape the PDF page-matching helpers expect.
+
+    Used only for the "search the whole document" pass in
+    finalize_maintenance_answer (see _full_document_sources below) — this is
+    never part of the retrieval result used to generate the natural-language
+    answer, so score fields that don't apply here (similarity etc.) are left
+    at 0.
+
+    outline_chapter_title, when given, is the PDF's own bookmark title for the
+    chapter this chunk's page falls under (see app.services.pdf_outline) — the
+    chunk's own section_path only ever kept the leaf subsection heading, so
+    without this a card-meaning search can never match a signal word that only
+    appears in the parent chapter title.
+    """
+
+    document = chunk.document
+    version = chunk.document_version
+    leaf_section = " > ".join(chunk.section_path) if chunk.section_path else None
+    section = (
+        f"{outline_chapter_title} > {leaf_section}"
+        if outline_chapter_title and leaf_section
+        else outline_chapter_title or leaf_section
+    )
+    return ChatSource(
+        document_id=str(chunk.document_id),
+        document_version_id=(
+            str(chunk.document_version_id) if chunk.document_version_id else None
+        ),
+        chunk_id=str(chunk.id),
+        title=document.title if document else "",
+        source_type=document.source_type if document else "",
+        original_filename=version.original_filename if version else None,
+        document_version=version.version_number if version else None,
+        section=section,
+        excerpt=chunk.content,
+        page=chunk.page_number,
+        page_start=chunk.page_start,
+        page_end=chunk.page_end,
+        similarity=0.0,
+    )
+
+
+def _with_page_reference_sources(
+    sources: list[ChatSource],
+    structured_answer: StructuredAnswer | None,
+    full_document_sources: list[ChatSource] | None,
+) -> list[ChatSource]:
+    """Make sure PDF-page-card chunk ids resolve to a real source in the response.
+
+    rating_performance_page_source_ids can point at chunks found by scanning the
+    whole document (full_document_sources), which never went through retrieval
+    and so are never in `sources`. The frontend looks up each id in `sources` to
+    get a filename/page to render — without this, those ids resolve to nothing
+    and the card renders empty even though the backend found the right pages.
+    """
+
+    if not full_document_sources:
+        return sources
+    page_ids = getattr(structured_answer, "rating_performance_page_source_ids", None)
+    if not page_ids:
+        return sources
+    known_ids = {source.chunk_id for source in sources}
+    by_id = {source.chunk_id: source for source in full_document_sources}
+    extra = [
+        by_id[page_id]
+        for page_id in page_ids
+        if page_id not in known_ids and page_id in by_id
+    ]
+    if not extra:
+        return sources
+    return [*sources, *extra]
 
 
 class ChatService:
@@ -273,6 +383,7 @@ class ChatService:
         request: ChatRequest,
         access_scope: RetrievalAccessScope | None = None,
         request_id: str | None = None,
+        db: Session | None = None,
     ) -> ChatResponse:
         started_at = perf_counter()
         resolved_request_id = request_id or str(uuid4())
@@ -393,6 +504,8 @@ class ChatService:
             retrieval_response,
             answer_type=answer_type,
         )
+        full_document_sources: list[ChatSource] | None = None
+        qwen_excluded_source_ids: frozenset[str] = frozenset()
         if not retrieval_response.sources:
             retrieval_response = self._no_evidence_response(
                 retrieval_response,
@@ -414,16 +527,38 @@ class ChatService:
                 sources=retrieval_response.sources,
                 question=analyzed_request.question,
             )
+            full_document_sources = await self._full_document_sources(
+                retrieval_response.sources,
+                answer_type,
+                db,
+            )
             structured_answer = finalize_maintenance_answer(
                 structured_answer,
                 sources=retrieval_response.sources,
                 question=analyzed_request.question,
                 analysis=analyzed_request.analysis,
+                full_document_sources=full_document_sources,
+            )
+            narrow_source_ids = {
+                source.chunk_id for source in retrieval_response.sources
+            }
+            qwen_excluded_source_ids = frozenset(
+                page_id
+                for page_id in getattr(
+                    structured_answer, "rating_performance_page_source_ids", None
+                )
+                or ()
+                if page_id not in narrow_source_ids
             )
             retrieval_response = retrieval_response.model_copy(
                 update={
                     "answer_type": answer_type,
                     "structured_answer": structured_answer,
+                    "sources": _with_page_reference_sources(
+                        retrieval_response.sources,
+                        structured_answer,
+                        full_document_sources,
+                    ),
                     "checklist_items": (
                         checklist_items_from_pre_checks(structured_answer)
                         if answer_type == "maintenance_guide"
@@ -457,6 +592,9 @@ class ChatService:
                 analyzed_request,
                 retrieval_response,
                 request_id=resolved_request_id,
+                db=db,
+                full_document_sources=full_document_sources,
+                qwen_excluded_source_ids=qwen_excluded_source_ids,
             )
             response = self._with_display_source_excerpts(
                 response,
@@ -615,12 +753,76 @@ class ChatService:
         )
         return response
 
+    async def _full_document_sources(
+        self,
+        sources: list[ChatSource],
+        answer_type: AnswerType | None,
+        db: Session | None,
+    ) -> list[ChatSource] | None:
+        """Every chunk of the manual(s) this maintenance answer's evidence came from.
+
+        The "정격/성능" PDF-page card must find pages that genuinely cover
+        ratings/performance, not just whatever happened to be in this
+        question's retrieval result (`sources` is only the RAG top-k, a
+        handful of chunks out of a document that can run to hundreds of
+        pages). When a DB session is available, this fetches every chunk of
+        the referenced manual document(s) directly so structured_answers can
+        search the whole document instead. Returns None when there is
+        nothing to scan or no DB session was provided — callers then fall
+        back to searching only `sources`, exactly as before.
+        """
+
+        if db is None or answer_type != "maintenance_guide":
+            return None
+        candidates = [
+            source
+            for source in sources
+            if canonical_document_type(source.source_type) in MANUAL_DOCUMENT_TYPES
+        ]
+        version_ids: set[UUID] = set()
+        for source in candidates:
+            if not source.document_version_id:
+                continue
+            try:
+                version_ids.add(UUID(source.document_version_id))
+            except ValueError:
+                continue
+        if not version_ids:
+            return None
+        chunks = await asyncio.to_thread(
+            DocumentChunkRepository(db).list_for_document_versions, version_ids
+        )
+        if not chunks:
+            return None
+        outline_by_version: dict[UUID, list[OutlineChapter]] = {}
+        for chunk in chunks:
+            version_id = chunk.document_version_id
+            version = chunk.document_version
+            if version_id is None or version_id in outline_by_version or version is None:
+                continue
+            outline_by_version[version_id] = await asyncio.to_thread(
+                document_outline_chapters, version.storage_path
+            )
+        return [
+            _chat_source_from_chunk(
+                chunk,
+                outline_chapter_title=chapter_title_for_page(
+                    outline_by_version.get(chunk.document_version_id, []),
+                    chunk.page_number,
+                ),
+            )
+            for chunk in chunks
+        ]
+
     async def _answer_with_qwen(
         self,
         request: ChatRequest,
         retrieval_response: ChatResponse,
         *,
         request_id: str | None = None,
+        db: Session | None = None,
+        full_document_sources: list[ChatSource] | None = None,
+        qwen_excluded_source_ids: frozenset[str] = frozenset(),
     ) -> ChatResponse:
         if not retrieval_response.sources or self.qwen_client is None:
             return retrieval_response
@@ -638,7 +840,9 @@ class ChatService:
                     )
                 }
             )
-        qwen_response = self._qwen_context_response(request, retrieval_response)
+        qwen_response = self._qwen_context_response(
+            request, retrieval_response, excluded_source_ids=qwen_excluded_source_ids
+        )
         qwen_started_at = perf_counter()
         qwen_answer = await self.qwen_client.answer(request, qwen_response)
         if qwen_answer is None:
@@ -671,6 +875,7 @@ class ChatService:
                 qwen_response,
                 qwen_started_at,
                 fallback_reason="generic_fallback_answer",
+                fallback_detail=qwen_answer.fallback_reason,
             )
             return self._with_qwen_fallback(
                 request,
@@ -725,11 +930,22 @@ class ChatService:
             sources=retrieval_response.sources,
             question=request.question,
         )
+        if full_document_sources is None:
+            # answer() already computes this for the template path when sources
+            # are non-empty and passes it through — recomputing here would be an
+            # identical, redundant DB scan (same document_version_ids either way).
+            # Only fall back to computing it when called without that context.
+            full_document_sources = await self._full_document_sources(
+                retrieval_response.sources,
+                retrieval_response.answer_type,
+                db,
+            )
         structured_answer = finalize_maintenance_answer(
             structured_answer,
             sources=retrieval_response.sources,
             question=request.question,
             analysis=request.analysis,
+            full_document_sources=full_document_sources,
         )
         checklist_items = (
             checklist_items_from_pre_checks(structured_answer)
@@ -776,6 +992,11 @@ class ChatService:
                 "generation_mode": "qwen",
                 "model": qwen_answer.model or "qwen",
                 "structured_answer": structured_answer,
+                "sources": _with_page_reference_sources(
+                    retrieval_response.sources,
+                    structured_answer,
+                    full_document_sources,
+                ),
                 "checklist_items": checklist_items,
             }
         )
@@ -804,6 +1025,7 @@ class ChatService:
         started_at: float,
         *,
         fallback_reason: str | None,
+        fallback_detail: str | None = None,
         removed_item_count: int = 0,
     ) -> None:
         logger.info(
@@ -820,6 +1042,11 @@ class ChatService:
                     "validation_removed_item_count": removed_item_count,
                     "fallback": fallback_reason is not None,
                     "fallback_reason": fallback_reason,
+                    # The specific reason qwen_service fell back to a canned answer
+                    # (e.g. "maintenance compact answer has no card items.") — that
+                    # service usually runs on a remote Colab host, so without this
+                    # its own diagnostic print is invisible here.
+                    "fallback_detail": fallback_detail,
                 },
                 ensure_ascii=False,
             ),
@@ -876,6 +1103,9 @@ class ChatService:
             return "검색된 근거를 기준으로 부품의 역할과 주의사항을 요약했습니다."
         if answer_type == "maintenance_guide":
             task_label = ChatService._question_task_label(request.question)
+            manual_step_labels = ChatService._structured_manual_step_labels(
+                response.structured_answer
+            )
             pre_check_labels = ChatService._structured_pre_check_labels(
                 response.structured_answer
             )
@@ -886,6 +1116,13 @@ class ChatService:
                 response.structured_answer
             )
             target = task_label or "작업"
+            if manual_step_labels:
+                numbered_steps = " ".join(
+                    f"{index}. {step}"
+                    for index, step in enumerate(manual_step_labels[:3], start=1)
+                )
+                answer = f"매뉴얼에서 확인된 {target} 절차입니다. {numbered_steps}"
+                return answer
             if pre_check_labels:
                 joined = ", ".join(pre_check_labels[:3])
                 answer = (
@@ -999,6 +1236,19 @@ class ChatService:
         return labels
 
     @staticmethod
+    def _structured_manual_step_labels(value: StructuredAnswer | None) -> list[str]:
+        if getattr(value, "answer_type", None) != "maintenance_guide":
+            return []
+        labels: list[str] = []
+        for item in getattr(value, "manual_steps", []) or []:
+            content = " ".join(str(getattr(item, "content", "")).split())
+            if content and content not in labels:
+                labels.append(content)
+            if len(labels) >= 3:
+                break
+        return labels
+
+    @staticmethod
     def _structured_stop_condition_labels(value: StructuredAnswer | None) -> list[str]:
         if getattr(value, "answer_type", None) != "maintenance_guide":
             return []
@@ -1081,6 +1331,11 @@ class ChatService:
                 "확인해야",
                 "주의사항",
                 "알려줘",
+                "어떻게",
+                "해야",
+                "해야해",
+                "해야할까",
+                "할까",
                 "뭐",
                 "뭘",
             }
@@ -1108,6 +1363,8 @@ class ChatService:
                 )
             )
         ]
+        if tokens and len(tokens[-1]) > 2 and tokens[-1].endswith(("을", "를")):
+            tokens[-1] = tokens[-1][:-1]
         return " ".join(tokens[:6]).strip()
 
     @staticmethod
@@ -1220,11 +1477,24 @@ class ChatService:
     def _qwen_context_response(
         request: ChatRequest,
         response: ChatResponse,
+        *,
+        excluded_source_ids: frozenset[str] = frozenset(),
     ) -> ChatResponse:
         answer_type = response.answer_type or "no_evidence"
         limit = QWEN_SOURCE_LIMIT_BY_TYPE.get(answer_type, 1)
         if limit <= 0:
             return response.model_copy(update={"sources": []})
+        # rating_performance_page_source_ids pages are found by scanning the whole
+        # manual for the 정격/성능 card (see _full_document_sources / _card_meaning_pages)
+        # independently of what the user actually asked. When one of those pages
+        # isn't part of the real retrieval result, it's only relevant to the card
+        # UI, not to Qwen's answer — including it here fed unrelated spec-table
+        # pages into the generation prompt and made Qwen's JSON output unreliable.
+        candidate_sources = [
+            source
+            for source in response.sources
+            if source.chunk_id not in excluded_source_ids
+        ]
         max_sentences = 2 if answer_type == "maintenance_guide" else 3
         if answer_type == "maintenance_guide":
             candidate_source_ids = ChatService._structured_evidence_ids(
@@ -1233,12 +1503,12 @@ class ChatService:
             )
             selected_sources = ChatService._select_maintenance_qwen_sources(
                 request.question,
-                response.sources,
+                candidate_sources,
                 limit=limit,
                 priority_source_ids=candidate_source_ids,
             )
         else:
-            selected_sources = response.sources[:limit]
+            selected_sources = candidate_sources[:limit]
         return response.model_copy(
             update={
                 "sources": [
@@ -1653,6 +1923,7 @@ class ChatService:
     @staticmethod
     def _clean_qwen_excerpt(excerpt: str) -> str:
         text = " ".join(excerpt.split())
+        text = repair_extracted_quantity_order(text)
         text = re.sub(r"\[자료유형\]\s*.*?\[내용\]\s*", "", text)
         text = re.sub(r"\[제목\]\s*", "", text)
         text = re.sub(r"\s*\|\s*", " ", text)

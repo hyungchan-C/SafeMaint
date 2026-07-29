@@ -54,10 +54,12 @@ export default function ChatSources({
   sources,
   onOpenDocument,
   idPrefix = "",
+  hideHeading = false,
 }: {
   sources: ChatSource[];
   onOpenDocument: (source: ChatSource) => void;
   idPrefix?: string;
+  hideHeading?: boolean;
 }) {
   if (!sources.length) return null;
   const visible = sources.slice(0, 2);
@@ -65,7 +67,9 @@ export default function ChatSources({
 
   return (
     <section className="chat-source-list" aria-label={`검색 근거 ${sources.length}건`}>
-      <div className="chat-source-list-heading"><strong>검색 근거</strong><span>{sources.length}건</span></div>
+      {!hideHeading && (
+        <div className="chat-source-list-heading"><strong>검색 근거</strong><span>{sources.length}건</span></div>
+      )}
       {visible.map((source, index) => <SourceCard key={source.chunk_id} source={source} number={index + 1} onOpenDocument={onOpenDocument} idPrefix={idPrefix} />)}
       {hidden.length > 0 && (
         <details className="additional-sources">

@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from typing import Any
 from uuid import UUID
@@ -171,6 +172,24 @@ SAFETY_CONTROL_ACTION_TERMS = frozenset(
         "잠금",
         "isolate",
         "lock",
+    }
+)
+INCIDENT_MAINTENANCE_ACTION_TERMS = frozenset(
+    {
+        "교체",
+        "청소",
+        "세척",
+        "점검",
+        "검사",
+        "정비",
+        "보수",
+        "해체",
+        "분리",
+        "replace",
+        "clean",
+        "inspect",
+        "check",
+        "maintain",
     }
 )
 KOREAN_TOKEN_SUFFIXES = (
@@ -411,6 +430,10 @@ def _strip_korean_suffix(token: str) -> str:
 
 
 def _term_matches(term: str, text: str) -> bool:
+    # Older public safety material frequently uses the spelling "콘베이어".
+    # Treat it as the same topic as the modern spelling "컨베이어".
+    term = term.replace("콘베이어", "컨베이어")
+    text = text.replace("콘베이어", "컨베이어")
     if re.fullmatch(r"[a-z]{1,3}", term):
         if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text):
             return True
@@ -443,6 +466,23 @@ def action_terms(value: str) -> tuple[str, ...]:
                 terms.append(action)
                 break
     return tuple(dict.fromkeys(terms))
+
+
+def _incident_maintenance_actions_compatible(
+    query_actions: Sequence[str],
+    row_actions: Sequence[str],
+) -> bool:
+    """Treat maintenance work variants as related only for accident evidence.
+
+    Accident datasets commonly describe a replacement accident as maintenance,
+    inspection, cleaning, or repair work.  Requiring the exact verb hides useful
+    cases even when the equipment topic matches.
+    """
+
+    return bool(
+        set(query_actions).intersection(INCIDENT_MAINTENANCE_ACTION_TERMS)
+        and set(row_actions).intersection(INCIDENT_MAINTENANCE_ACTION_TERMS)
+    )
 
 
 def _generic_query_expansion_terms(value: str) -> tuple[str, ...]:
@@ -503,7 +543,6 @@ def maintenance_query_expansions(value: str) -> tuple[str, ...]:
     terms: list[str] = []
     for action in action_terms(value):
         terms.extend(MAINTENANCE_ACTION_QUERY_EXPANSIONS.get(action, ()))
-    terms.extend(_generic_query_expansion_terms(value))
     return tuple(dict.fromkeys(terms))
 
 
@@ -519,23 +558,53 @@ def topic_terms(value: str) -> tuple[str, ...]:
 
 
 def _compact_for_phrase(value: str) -> str:
-    return re.sub(r"[\s_-]+", "", value.casefold())
+    return re.sub(
+        r"[\s_-]+",
+        "",
+        value.casefold().replace("콘베이어", "컨베이어"),
+    )
+
+
+DOMAIN_PHRASE_GROUPS: tuple[dict[str, tuple[str, ...]], ...] = (
+    {
+        "triggers": ("라이트커튼", "라이트 커튼", "light curtain"),
+        "aliases": ("라이트커튼", "광전자식 방호장치", "ESPE"),
+        "matches": ("라이트커튼", "라이트 커튼", "광전자식 방호장치", "espe"),
+        "negatives": ("커튼월", "커튼 월", "curtain wall"),
+    },
+)
 
 
 def domain_phrase_group_indexes(value: str) -> tuple[int, ...]:
-    return ()
+    compact = _compact_for_phrase(value)
+    return tuple(
+        index
+        for index, group in enumerate(DOMAIN_PHRASE_GROUPS)
+        if any(_compact_for_phrase(trigger) in compact for trigger in group["triggers"])
+    )
 
 
 def domain_phrase_query_terms(value: str) -> tuple[str, ...]:
-    return _generic_query_expansion_terms(value)
+    terms: list[str] = []
+    for index in domain_phrase_group_indexes(value):
+        terms.extend(DOMAIN_PHRASE_GROUPS[index]["aliases"])
+    return tuple(dict.fromkeys(terms))
 
 
 def _domain_phrase_matches(indexes: Sequence[int], text: str) -> bool:
-    return False
+    compact = _compact_for_phrase(text)
+    return any(
+        any(_compact_for_phrase(term) in compact for term in DOMAIN_PHRASE_GROUPS[index]["matches"])
+        for index in indexes
+    )
 
 
 def _domain_phrase_negative_matches(indexes: Sequence[int], text: str) -> bool:
-    return False
+    compact = _compact_for_phrase(text)
+    return any(
+        any(_compact_for_phrase(term) in compact for term in DOMAIN_PHRASE_GROUPS[index]["negatives"])
+        for index in indexes
+    )
 
 
 def _topic_phrase_terms(value: str) -> tuple[str, ...]:
@@ -547,6 +616,35 @@ def _topic_phrase_matches(terms: Sequence[str], text: str) -> bool:
         return False
     compact_phrase = "".join(_compact_for_phrase(term) for term in terms)
     return bool(compact_phrase) and compact_phrase in _compact_for_phrase(text)
+
+
+def _conveyor_incident_topic_matches(
+    terms: Sequence[str],
+    text: str,
+    *,
+    source_type: str,
+) -> bool:
+    """Keep conveyor incidents relevant to a belt-conveyor maintenance query.
+
+    Public incident titles commonly say only "콘베이어" even when the selected
+    equipment/manual uses "컨베이어 벨트". Requiring the separate word "벨트"
+    discarded those otherwise relevant accident cases.
+    """
+
+    if source_type != "public_incident":
+        return False
+    normalized_terms = tuple(
+        term.replace("콘베이어", "컨베이어") for term in terms
+    )
+    if not any("컨베이어" in term for term in normalized_terms):
+        return False
+    normalized_text = text.replace("콘베이어", "컨베이어")
+    if (
+        "스크류컨베이어" in normalized_text
+        and not any("스크류컨베이어" in term for term in normalized_terms)
+    ):
+        return False
+    return "컨베이어" in normalized_text
 
 
 def _topic_match_threshold(term_count: int) -> int:
@@ -1473,6 +1571,60 @@ class PgvectorRetriever:
                 row["similarity"] = max(nearest_scores)
         return adjacent_rows
 
+    def _fetch_supplemental_rows(
+        self,
+        source_types: tuple[str, ...],
+        *,
+        request: InternalChatRequest,
+        vector: np.ndarray,
+        search_query: str,
+    ) -> list[dict[str, Any]]:
+        """Run one maintenance_guide supplemental bucket query on its own connection.
+
+        Called concurrently (one call per bucket) from a thread pool, so each
+        call needs its own connection — a single psycopg connection cannot
+        run multiple queries at once. The candidate_query/parameters here are
+        byte-for-byte the same as the sequential version; only the connection
+        and thread differ, so the rows returned are identical either way.
+        """
+
+        clause, scope_parameters = scope_sql(
+            normalize_source_types(source_types),
+            None,
+        )
+        parameters = (
+            vector,
+            search_query,
+            request.access_scope.allow_company,
+            request.access_scope.allow_private,
+            request.access_scope.all_sites,
+            request.access_scope.site_ids,
+            True,
+            [],
+            request.access_scope.requester_user_id,
+            request.access_scope.requester_user_id,
+            True,
+            [],
+            True,
+            True,
+            [],
+            True,
+            *scope_parameters,
+            self.settings.model_name,
+            int(vector.shape[0]),
+            self.settings.min_similarity,
+            max(20, self.settings.candidate_k),
+        )
+        with psycopg.connect(
+            psycopg_database_url(self.settings.database_url),
+            connect_timeout=5,
+            row_factory=dict_row,
+        ) as connection:
+            register_vector(connection)
+            with connection.cursor() as cursor:
+                cursor.execute(self._candidate_query(clause), parameters)
+                return list(cursor.fetchall())
+
     def search(
         self,
         request: InternalChatRequest,
@@ -1585,47 +1737,33 @@ class PgvectorRetriever:
                 rows = list(cursor.fetchall())
                 if intent == "maintenance_guide":
                     existing_chunk_ids = {str(row["chunk_id"]) for row in rows}
-                    for supplemental_source_types in (
+                    supplemental_buckets = (
                         ("company_policy",),
                         ("public_law", "public_guide", "public_media"),
                         ("public_incident",),
-                    ):
-                        supplemental_clause, supplemental_scope_parameters = scope_sql(
-                            normalize_source_types(supplemental_source_types),
-                            None,
-                        )
-                        supplemental_parameters = (
-                            vector,
-                            search_query,
-                            request.access_scope.allow_company,
-                            request.access_scope.allow_private,
-                            request.access_scope.all_sites,
-                            request.access_scope.site_ids,
-                            True,
-                            [],
-                            request.access_scope.requester_user_id,
-                            request.access_scope.requester_user_id,
-                            True,
-                            [],
-                            True,
-                            True,
-                            [],
-                            True,
-                            *supplemental_scope_parameters,
-                            self.settings.model_name,
-                            int(vector.shape[0]),
-                            self.settings.min_similarity,
-                            max(20, self.settings.candidate_k),
-                        )
-                        cursor.execute(
-                            self._candidate_query(supplemental_clause),
-                            supplemental_parameters,
-                        )
-                        for row in cursor.fetchall():
-                            chunk_id = str(row["chunk_id"])
-                            if chunk_id not in existing_chunk_ids:
-                                rows.append(row)
-                                existing_chunk_ids.add(chunk_id)
+                    )
+                    # Each bucket is an independent query (own connection), run
+                    # concurrently instead of one after another. Results are still
+                    # merged in this same fixed bucket order below (not the order
+                    # queries happen to finish in), so which rows end up in `rows`
+                    # — and in what order — is identical to the sequential version.
+                    with ThreadPoolExecutor(max_workers=len(supplemental_buckets)) as pool:
+                        futures = [
+                            pool.submit(
+                                self._fetch_supplemental_rows,
+                                bucket,
+                                request=request,
+                                vector=vector,
+                                search_query=search_query,
+                            )
+                            for bucket in supplemental_buckets
+                        ]
+                        for future in futures:
+                            for row in future.result():
+                                chunk_id = str(row["chunk_id"])
+                                if chunk_id not in existing_chunk_ids:
+                                    rows.append(row)
+                                    existing_chunk_ids.add(chunk_id)
                 if intent == "document_qa":
                     adjacent_rows = self._load_adjacent_rows(cursor, rows)
                     existing_chunk_ids = {
@@ -1777,6 +1915,11 @@ class PgvectorRetriever:
                 selected_topic_phrase_terms,
                 combined,
             )
+            conveyor_incident_topic_match = _conveyor_incident_topic_matches(
+                active_topic_terms,
+                combined,
+                source_type=source_type,
+            )
             topic_phrase_partial_collision = bool(
                 selected_documents_match_topic_phrase
                 and selected_topic_phrase_terms
@@ -1821,6 +1964,7 @@ class PgvectorRetriever:
                 and not is_selected_document
                 and document_scope == "public"
                 and not topic_phrase_match
+                and not conveyor_incident_topic_match
                 and not occurrence_match
                 and not (maintenance_safety_match and not topic_phrase_partial_collision)
             ):
@@ -1831,6 +1975,7 @@ class PgvectorRetriever:
             has_topic_match = (
                 not active_topic_terms
                 or topic_match_count >= _topic_match_threshold(len(active_topic_terms))
+                or conveyor_incident_topic_match
             )
             if (
                 not has_topic_match
@@ -1893,6 +2038,14 @@ class PgvectorRetriever:
                     query_action_terms
                     and row_action_terms
                     and not set(query_action_terms).intersection(row_action_terms)
+                    and not (
+                        source_type == "public_incident"
+                        and has_topic_match
+                        and _incident_maintenance_actions_compatible(
+                            query_action_terms,
+                            row_action_terms,
+                        )
+                    )
                     and not (
                         maintenance_safety_match
                         and set(row_action_terms).issubset(SAFETY_CONTROL_ACTION_TERMS)

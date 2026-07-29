@@ -196,6 +196,7 @@ class AnswerResponse(BaseModel):
     checklist_items: list[ChatChecklistItem] = Field(default_factory=list)
     used_source_ids: list[str] = Field(default_factory=list)
     model: str
+    fallback_reason: str | None = None
 
 
 class DocumentProfileRequest(BaseModel):

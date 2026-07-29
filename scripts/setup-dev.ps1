@@ -16,6 +16,28 @@ $repoRoot = Get-SafeMaintRepoRoot
 # not turn its harmless orphan warning into a terminating PowerShell error.
 $env:COMPOSE_IGNORE_ORPHANS = "true"
 
+function Initialize-SafeMaintRapidOcrModels {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$ComposeArguments
+    )
+
+    $rapidOcrModelPath = "/models/docling/RapidOcr/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx"
+    & docker @ComposeArguments run --rm --no-deps worker python -c `
+        "from pathlib import Path; raise SystemExit(0 if Path('$rapidOcrModelPath').is_file() else 1)"
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "      RapidOCR 모델 준비 완료"
+        return
+    }
+
+    Write-Host "      이미지형 PDF 처리를 위한 RapidOCR 모델을 준비합니다."
+    & docker @ComposeArguments run --rm --no-deps worker `
+        python -m docling.cli.models download rapidocr -o /models/docling
+    if ($LASTEXITCODE -ne 0) {
+        throw "RapidOCR 모델 다운로드에 실패했습니다. 네트워크를 확인한 뒤 다시 실행해 주세요."
+    }
+}
+
 function Import-SafeMaintPublicRagPackageIfNeeded {
     param(
         [Parameter(Mandatory = $true)]
@@ -155,6 +177,7 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "docker compose build 실행에 실패했습니다."
         }
+        Initialize-SafeMaintRapidOcrModels -ComposeArguments $composeArguments
         & docker @composeArguments up -d --no-build
         if ($LASTEXITCODE -ne 0) {
             throw "docker compose up 실행에 실패했습니다."

@@ -3,10 +3,10 @@ import { describe, expect, it } from "vitest";
 
 import AnswerTabs from "@/components/AnswerTabs";
 import type {
+  ChatSource,
   ComponentAnswerDetails,
   DocumentAnswerDetails,
   MaintenanceAnswerDetails,
-  ChatSource,
 } from "@/types/chat";
 
 
@@ -87,6 +87,7 @@ const maintenanceAnswer: MaintenanceAnswerDetails = {
   manual_steps: [
     { content: "광축 정렬 상태를 확인합니다.", evidence_chunk_ids: ["manual-chunk"] },
   ],
+  rating_performance_page_source_ids: ["manual-chunk"],
   precautions: [
     { content: "정렬 상태 유지", evidence_chunk_ids: ["manual-chunk"] },
   ],
@@ -140,6 +141,7 @@ describe("AnswerTabs", () => {
     expect(within(tablist).getByRole("tab", { name: "안전·중지" }))
       .toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("안전거리 기준을 확인하지 못한 경우")).toBeInTheDocument();
+    expect(screen.getByText("추가 확인이 필요한 내용")).toBeInTheDocument();
   });
 
   it("renders component information as four purpose-specific tabs", () => {
@@ -200,13 +202,21 @@ describe("AnswerTabs", () => {
 
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "문서 개요",
-      "관련 항목",
+      "PDF 확인",
       "출처",
     ]);
-    expect(screen.getByText("SFL-A")).toBeInTheDocument();
+    expect(screen.getByText("Safe Factory")).toBeInTheDocument();
+    expect(screen.queryByText("모델명")).not.toBeInTheDocument();
+    expect(screen.queryByText("SFL-A")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("tab", { name: "관련 항목" }));
-    expect(screen.getByText("라이트커튼")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "PDF 확인" }));
+    const pdfCheckPanel = screen.getByRole("tabpanel");
+    expect(within(pdfCheckPanel).getByText("SFL-라이트커튼-설치매뉴얼.pdf")).toBeInTheDocument();
+    expect(within(pdfCheckPanel).getByRole("button", { name: "원문 전체 보기" }))
+      .toBeInTheDocument();
+    expect(within(pdfCheckPanel).queryByText("라이트커튼")).not.toBeInTheDocument();
+    expect(within(pdfCheckPanel).queryByText("설치")).not.toBeInTheDocument();
+    expect(screen.getByText("확인하지 못한 내용")).toBeInTheDocument();
     expect(screen.getByText("체결 토크")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "출처" }));
@@ -224,6 +234,28 @@ describe("AnswerTabs", () => {
 
     expect(screen.getByRole("tab", { name: "근거" }))
       .toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText("SFL-라이트커튼-설치매뉴얼.pdf")).toBeInTheDocument();
+    const evidencePanel = screen.getByRole("tabpanel");
+    expect(within(evidencePanel).getByText("SFL-라이트커튼-설치매뉴얼.pdf")).toBeInTheDocument();
+  });
+
+  it("does not render empty grouped headings and retains returned sources", () => {
+    renderTabs(
+      {
+        ...maintenanceAnswer,
+        related_regulations_and_incidents: [],
+        additional_information_needed: [],
+      },
+      [manualSource, lawSource, incidentSource],
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "안전·중지" }));
+    expect(screen.queryByText("추가 확인이 필요한 내용")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "근거" }));
+    expect(screen.queryByText("관련 법령")).not.toBeInTheDocument();
+    expect(screen.queryByText("안전 가이드·회사 기준")).not.toBeInTheDocument();
+    expect(screen.queryByText("사고사례")).not.toBeInTheDocument();
+    expect(screen.getByText("산업안전보건기준.pdf")).toBeInTheDocument();
+    expect(screen.getByText("프레스_사고사례.pdf")).toBeInTheDocument();
   });
 });

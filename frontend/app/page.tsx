@@ -22,7 +22,6 @@ import type {
   ChatMessage,
   ChatResponse,
   ChatSource,
-  EvidenceBackedItem,
   StructuredAnswer,
 } from "@/types/chat";
 import type {
@@ -182,47 +181,26 @@ function removeStorage(key: string) {
   }
 }
 
-// Qwen이 만들어 주는 평문 answer는 화면(StructuredChatAnswer)에 표시되는 정제된 구조화
-// 답변과 별개로 생성돼서, 근거 원문을 그대로 옮겨 놓은 것처럼 읽힐 때가 있다. TTS가
-// "화면에 보이는 것과 다른 것"을 읽는 문제를 막기 위해, structuredAnswer가 있으면 그
-// 화면 렌더링과 같은 내용으로 읽을 텍스트를 직접 구성하고, 없을 때만 answer 원문을 쓴다.
+// 화면의 AnswerTabs("AI 핵심 답변" 섹션)와 ChatAnswerContent("AI 답변" 섹션)는 항상
+// message.text(백엔드가 만든 평문 answer)를 그대로 보여준다. TTS도 화면에 보이는 것과
+// 동일한 내용을 읽어야 하므로 같은 message.text를 쓴다. 다만 유지보수 답변만 재생 시작 시
+// 작업 승인이 아니라는 고정 안내를 먼저 말한다.
+const MAINTENANCE_TTS_DISCLAIMER =
+  "이 안내는 작업 승인이 아닙니다. 안전관리자의 최종 확인 전에는 작업을 시작하지 마세요.";
+
 function buildSpeechText(message: { text: string; structuredAnswer?: StructuredAnswer | null }): string {
   const answer = message.structuredAnswer;
-  if (!answer) return message.text;
 
-  const contents = (items: EvidenceBackedItem[] | undefined) => (items ?? []).map((item) => item.content);
-
-  switch (answer.answer_type) {
-    case "clarification_required":
-      return [answer.question, ...answer.options].filter(Boolean).join(". ");
-    case "no_evidence":
-      return [answer.message, answer.work_safety_notice].filter(Boolean).join(" ");
-    case "document_qa":
-      return [
-        ...contents(answer.main_contents),
-        ...answer.related_equipment,
-        ...answer.related_components,
-        ...answer.supported_tasks,
-      ].filter(Boolean).join(". ");
-    case "component_info":
-      return [
-        answer.one_line_description,
-        ...contents(answer.main_roles),
-        ...contents(answer.usage_locations),
-        ...contents(answer.precautions),
-      ].filter(Boolean).join(". ");
-    case "maintenance_guide":
-      return [
-        `${answer.summary.status}. 위험도 ${answer.summary.risk_level}.`,
-        answer.summary.core_warning,
-        ...contents(answer.pre_checks),
-        ...answer.hazards.map((hazard) => `${hazard.name}: ${hazard.content}`),
-        ...contents(answer.manual_steps),
-        ...contents(answer.stop_conditions),
-      ].filter(Boolean).join(". ");
-    default:
-      return message.text;
+  if (answer?.answer_type === "clarification_required") {
+    return [answer.question, ...answer.options].filter(Boolean).join(". ");
   }
+  if (answer?.answer_type === "no_evidence") {
+    return [answer.message, answer.work_safety_notice].filter(Boolean).join(" ");
+  }
+  if (answer?.answer_type === "maintenance_guide") {
+    return [MAINTENANCE_TTS_DISCLAIMER, message.text].filter(Boolean).join(" ");
+  }
+  return message.text;
 }
 
 async function apiErrorMessage(response: Response, fallback: string): Promise<string> {

@@ -14,6 +14,38 @@ from pypdf.errors import PdfReadError
 from vision_service.schemas import CatalogCandidate, CatalogIndexResponse
 
 
+_CATEGORY_PAGE_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("볼트", ("볼트", "나사", "스크류", "육각", "소켓", "bolt", "screw")),
+    ("나사", ("볼트", "나사", "스크류", "육각", "소켓", "bolt", "screw")),
+    ("너트", ("너트", "nut")),
+    ("와셔", ("와셔", "washer")),
+    ("베어링", ("베어링", "bearing")),
+    ("기어", ("기어", "gear")),
+    ("센서", ("센서", "sensor")),
+    ("카메라", ("카메라", "camera", "cmos", "ccd")),
+    ("커넥터", ("커넥터", "connector", "단자", "소켓")),
+    ("밸브", ("밸브", "valve")),
+    ("usb", ("usb", "메모리", "memory")),
+)
+
+
+def _category_page_bonus(visual_category: str, page_text: str) -> float:
+    """Use catalog text only as a small tie-breaker for visually similar pages.
+
+    Circular or metallic objects often receive very similar image embeddings.
+    A local shape label such as ``볼트`` must not prove a model identity, but it
+    can keep an unrelated camera/manual page from crowding a bolt catalog out
+    of the short candidate list.
+    """
+
+    category = visual_category.casefold()
+    text = page_text.casefold()
+    for marker, terms in _CATEGORY_PAGE_TERMS:
+        if marker in category:
+            return 0.08 if any(term in text for term in terms) else 0.0
+    return 0.0
+
+
 @dataclass(frozen=True, slots=True)
 class CatalogMatchSignals:
     candidates: list[CatalogCandidate]
@@ -362,7 +394,7 @@ class CatalogImageMatcher:
         queries = self.embedder.encode_many(self._query_views(query_image))
         visual_category, visual_features = self.embedder.classify(queries)
         has_visible_text = self.embedder.has_visible_text(queries)
-        scored: list[CatalogCandidate] = []
+        scored: list[tuple[float, CatalogCandidate]] = []
         for catalog_id in catalog_ids:
             manifest_path = self.root / catalog_id / "manifest.json"
             if not manifest_path.exists():
@@ -403,7 +435,7 @@ class CatalogImageMatcher:
                 if similarity < self.threshold:
                     continue
                 confidence = "높음" if similarity >= 0.90 else "보통" if similarity >= 0.82 else "낮음"
-                scored.append(CatalogCandidate(
+                candidate = CatalogCandidate(
                     catalog_id=catalog_id, filename=filename,
                     page=int(entry["page"]), image_index=int(entry["image_index"]),
                     similarity=round(similarity, 4), confidence=confidence,
@@ -411,10 +443,15 @@ class CatalogImageMatcher:
                     visual_category=visual_category,
                     visual_features=visual_features,
                     page_excerpt=str(entry.get("page_text") or "") or None,
-                ))
+                )
+                ranking_score = similarity + _category_page_bonus(
+                    visual_category,
+                    candidate.page_excerpt or "",
+                )
+                scored.append((ranking_score, candidate))
         candidates: list[CatalogCandidate] = []
         seen_pages: set[tuple[str, int]] = set()
-        for candidate in sorted(scored, key=lambda item: item.similarity, reverse=True):
+        for _, candidate in sorted(scored, key=lambda item: item[0], reverse=True):
             page_key = (candidate.catalog_id, candidate.page)
             if page_key in seen_pages:
                 continue

@@ -173,6 +173,10 @@ def test_qwen_malformed_json_returns_legacy_fallback_without_exception(monkeypat
     assert response.answer == "JSON이 아닌 일반 답변"
     assert response.answer_type == "maintenance_guide"
     assert response.structured_answer is None
+    # This service usually runs on a remote host, so without carrying the
+    # specific validation failure reason in the response, the backend has no
+    # way to see why a fallback happened (its own stdout print is invisible).
+    assert response.fallback_reason == "No JSON object was found in the model output."
 
 
 def test_qwen_compact_mode_uses_single_generation(monkeypatch) -> None:

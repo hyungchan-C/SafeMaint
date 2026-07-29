@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
@@ -301,6 +302,101 @@ def _needs_ocr(pdf_path: str, empty_page_ratio: float = 0.5) -> bool:
     return total_pages > 0 and (empty_page_count / total_pages) > empty_page_ratio
 
 
+def _embedded_text_has_broken_font_mapping(pdf_path: str) -> bool:
+    """Check the inexpensive embedded-text layer before starting Docling."""
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(pdf_path)
+    try:
+        text = " ".join(page.get_text() for page in doc)
+    finally:
+        doc.close()
+    return _looks_like_broken_font_mapping([{
+        "section_path": [],
+        "blocks": [{"type": "text", "text": text}],
+    }])
+
+
+def _uses_docling_incompatible_legacy_korean_fonts(pdf_path: str) -> bool:
+    """Recognize legacy Korean CID fonts known to lose their mapping in Docling."""
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(pdf_path)
+    try:
+        font_names = {
+            str(font[3]).casefold()
+            for page in doc
+            for font in page.get_fonts(full=True)
+            if len(font) > 3
+        }
+    finally:
+        doc.close()
+    return any(
+        name.startswith(("ygo", "smagok", "smagose"))
+        for name in font_names
+    )
+
+
+def _looks_like_broken_font_mapping(sections: list[dict[str, Any]]) -> bool:
+    """Detect PDFs whose embedded Korean text was decoded into unrelated scripts."""
+    text_parts: list[str] = []
+    for section in sections:
+        text_parts.extend(str(value) for value in section.get("section_path", []) if value)
+        for block in section.get("blocks", []):
+            text_parts.append(str(block.get("text") or ""))
+            text_parts.append(str(block.get("header") or ""))
+            text_parts.extend(str(row) for row in block.get("rows", []) if row)
+
+    text = " ".join(text_parts)
+    visible_chars = [char for char in text if not char.isspace()]
+    replacement_count = text.count("\ufffd")
+    if (
+        replacement_count >= 50
+        and visible_chars
+        and replacement_count / len(visible_chars) >= 0.05
+    ):
+        return True
+
+    letters = [char for char in text if char.isalpha()]
+    if len(letters) < 100:
+        return False
+
+    suspicious_script_counts: dict[str, int] = {}
+    suspicious_total = 0
+    hangul_total = 0
+    script_names = (
+        "BENGALI",
+        "DEVANAGARI",
+        "GUJARATI",
+        "GURMUKHI",
+        "KANNADA",
+        "MALAYALAM",
+        "ORIYA",
+        "SINHALA",
+        "TAMIL",
+        "TELUGU",
+    )
+    for char in letters:
+        name = unicodedata.name(char, "")
+        if "HANGUL" in name:
+            hangul_total += 1
+            continue
+        script = next((prefix for prefix in script_names if prefix in name), None)
+        if script:
+            suspicious_total += 1
+            suspicious_script_counts[script] = suspicious_script_counts.get(script, 0) + 1
+
+    represented_scripts = sum(
+        1 for count in suspicious_script_counts.values() if count >= 5
+    )
+    return (
+        suspicious_total >= 50
+        and suspicious_total / len(letters) >= 0.15
+        and represented_scripts >= 3
+        and hangul_total / len(letters) < 0.05
+    )
+
+
 def _build_converter(
     do_ocr: bool,
     runtime: DoclingRuntimeSettings,
@@ -315,6 +411,8 @@ def _build_converter(
 
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = do_ocr
+    if do_ocr and hasattr(pipeline_options.ocr_options, "force_full_page_ocr"):
+        pipeline_options.ocr_options.force_full_page_ocr = True
     artifacts_path = _validate_artifacts_path(runtime)
     if artifacts_path is not None:
         pipeline_options.artifacts_path = artifacts_path
@@ -378,6 +476,8 @@ def _push_header(stack: list[tuple[int, str]], level: int, text: str) -> list[st
 def extract_sections_with_docling(
     pdf_path: str,
     runtime: DoclingRuntimeSettings,
+    *,
+    force_ocr: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     """
     docling으로 문서를 파싱해 SECTION_HEADER/TITLE 라벨을 기준으로 섹션을 묶는다.
@@ -385,9 +485,14 @@ def extract_sections_with_docling(
     header/rows를 분리해서 보관한다 (문장 중간이 아니라 표 중간에서 잘리는 것을 막기 위함).
     section_path는 제목 레벨을 스택으로 추적해 상위 제목까지 포함한 경로로 남긴다.
     """
-    from docling_core.types.doc import TableItem
-
-    do_ocr = _needs_ocr(pdf_path)
+    do_ocr = (
+        force_ocr
+        or _needs_ocr(pdf_path)
+        or (
+            Path(pdf_path).is_file()
+            and _embedded_text_has_broken_font_mapping(pdf_path)
+        )
+    )
     if do_ocr:
         logger.info(
             "Docling OCR enabled filename=%s",
@@ -401,6 +506,16 @@ def extract_sections_with_docling(
     if runtime.max_pages is not None:
         conversion_limits["max_num_pages"] = runtime.max_pages
     doc = converter.convert(pdf_path, **conversion_limits).document
+
+    # Import only when the converted document actually contains items.  This
+    # keeps converter-limit tests and lightweight deployments independent from
+    # docling_core while the production Docling image still uses TableItem for
+    # real table extraction.
+    items = list(doc.iterate_items())
+    if items:
+        from docling_core.types.doc import TableItem
+    else:
+        TableItem = ()  # type: ignore[assignment,misc]
 
     sections = []
     header_stack: list[tuple[int, str]] = []
@@ -419,7 +534,7 @@ def extract_sections_with_docling(
                 "blocks": buf_blocks,
             })
 
-    for item, level in doc.iterate_items():
+    for item, level in items:
         label = str(getattr(item, "label", "") or "")
         if label in _SKIP_LABELS:
             continue
@@ -450,6 +565,11 @@ def extract_sections_with_docling(
         buf_pages.append(page_no or current_start_page)
 
     flush()
+    if not do_ocr and _looks_like_broken_font_mapping(sections):
+        raise DoclingConversionError(
+            "Docling returned a broken embedded-font mapping; "
+            "use the PyMuPDF text-layer fallback."
+        )
     return sections, do_ocr
 
 
@@ -586,6 +706,28 @@ def extract_sections(
         )
 
     document_id, version_id, filename = _log_context_values(pdf_path, log_context)
+    if _uses_docling_incompatible_legacy_korean_fonts(pdf_path):
+        fallback_reason = (
+            "Legacy Korean CID font is incompatible with Docling text mapping"
+        )
+        logger.warning(
+            "PDF extraction fallback document_id=%s document_version_id=%s "
+            "filename=%s extractor=pymupdf reason=%s",
+            document_id,
+            version_id,
+            filename,
+            fallback_reason,
+        )
+        return SectionExtractionResult(
+            sections=extract_sections_with_pymupdf(pdf_path),
+            processing_metadata=_processing_metadata(
+                extractor="pymupdf",
+                extractor_version=_installed_version("PyMuPDF"),
+                fallback_used=True,
+                fallback_reason=fallback_reason,
+                ocr_used=False,
+            ),
+        )
     try:
         docling_version = validate_docling_runtime(runtime)
     except DoclingDeploymentError as exc:

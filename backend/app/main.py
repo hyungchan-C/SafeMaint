@@ -11,6 +11,10 @@ from app.api.routes.health import router as health_router
 from app.core.config import settings
 from app.services.speech import speech_service
 
+# 별도 설정이 없으면 루트 로거가 기본값(WARNING)에 머물러서, chat.py의
+# logger.info("chat_qwen ...") 같은 진단 로그가 핸들러까지 가지도 못하고 조용히
+# 걸러진다. INFO로 올려서 docker compose logs backend에 실제로 찍히게 한다.
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
