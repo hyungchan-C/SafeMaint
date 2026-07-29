@@ -19,6 +19,7 @@ class NearbyEquipmentItem(BaseModel):
     distance_m: float
     hazards: list[HazardItem]
     checklist: list[str]
+    required_ppe: list[str]
 
 
 class GpsCheckResponse(BaseModel):
