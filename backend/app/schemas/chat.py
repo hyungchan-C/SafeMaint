@@ -159,6 +159,9 @@ class MaintenanceAnswerDetails(BaseModel):
     pre_checks: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
     hazards: list[MaintenanceHazard] = Field(default_factory=list, max_length=3)
     manual_steps: list[EvidenceBackedItem] = Field(default_factory=list, max_length=30)
+    rating_performance_page_source_ids: list[str] = Field(
+        default_factory=list, max_length=10
+    )
     precautions: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
     stop_conditions: list[EvidenceBackedItem] = Field(default_factory=list, max_length=20)
     related_regulations_and_incidents: list[EvidenceBackedItem] = Field(

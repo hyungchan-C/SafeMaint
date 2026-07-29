@@ -1607,6 +1607,7 @@ def finalize_maintenance_answer(
     sources: list[ChatSource],
     question: str,
     analysis: QueryAnalysis | None = None,
+    full_document_sources: list[ChatSource] | None = None,
 ) -> StructuredAnswer | None:
     if not isinstance(value, MaintenanceAnswerDetails):
         return value
@@ -1619,6 +1620,22 @@ def finalize_maintenance_answer(
             limit=8,
         )
     labels = _risk_labels_for_summary(analysis, hazards, sources=sources)
+    manual_steps = _normalize_maintenance_items(
+        value.manual_steps,
+        formatter=_manual_step_phrase,
+        dedupe_semantic_keys=False,
+        limit=8,
+    )
+    # "작업 안내" 탭의 이 카드는 "정격/성능" 카드다 — manual_steps 문구와는 무관하게,
+    # 가능하면 그 매뉴얼 문서 전체(full_document_sources)에서 정격/성능을 다루는 챕터를
+    # 독립적으로 찾는다. manual_steps 텍스트 자체(다른 답변에서도 쓰임)는 그대로 둔다.
+    search_pool = full_document_sources if full_document_sources else sources
+    # "정격"/"성능" 단어를 대체할 다른 스펙 용어로 유추하지 않고, 제목에 그 글자가 실제로
+    # 있는 페이지만 찾는다(본문 폴백 없음 — 무관한 페이지가 뜨느니 빈 채로 두는 게 낫다).
+    rating_performance_page_source_ids = _card_meaning_pages(
+        search_pool,
+        RATING_PERFORMANCE_SECTION_SIGNALS,
+    )
     return value.model_copy(
         update={
             "summary": value.summary.model_copy(
@@ -1634,12 +1651,8 @@ def finalize_maintenance_answer(
                 limit=3,
             ),
             "hazards": hazards,
-            "manual_steps": _normalize_maintenance_items(
-                value.manual_steps,
-                formatter=_manual_step_phrase,
-                dedupe_semantic_keys=False,
-                limit=8,
-            ),
+            "manual_steps": manual_steps,
+            "rating_performance_page_source_ids": rating_performance_page_source_ids,
             "precautions": _dedupe_maintenance_items(value.precautions, limit=8),
             "stop_conditions": _dedupe_maintenance_items(
                 value.stop_conditions,
@@ -4847,6 +4860,48 @@ def _relevance_terms(text: str) -> set[str]:
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword.casefold() in text for keyword in keywords)
+
+
+PRECAUTION_SECTION_MARKERS = ("주의", "경고", "위험")
+CARD_PAGE_MATCH_LIMIT = 3
+
+# "정격"/"성능"을 대체하거나 유추한 다른 스펙 용어는 쓰지 않는다 — 이 두 글자가 실제로
+# 있는 페이지만 찾는다(사양/규격/제원은 의미가 겹쳐 보여도 다른 단어이므로 제외).
+RATING_PERFORMANCE_SECTION_SIGNALS = ("정격", "성능")
+
+
+def _card_meaning_pages(
+    sources: list[ChatSource],
+    section_signals: tuple[str, ...],
+    *,
+    limit: int = CARD_PAGE_MATCH_LIMIT,
+) -> list[str]:
+    """Pages whose section title literally contains every word in section_signals.
+
+    This deliberately never looks at the specific answer text the card would
+    otherwise show (that text can itself be mis-selected — e.g. a precaution
+    sentence picked up as if it were a work-procedure step — so matching a
+    PDF page against it would just reproduce the same mistake with a page
+    number attached). It also never falls back to a body-text or partial
+    (any-one-word) match: a section title that only happens to contain one of
+    the words in an unrelated context (e.g. a blanking-settings note that
+    mentions "성능" once) is not the same as a page that is actually about
+    the card's meaning, and showing it anyway is worse than showing nothing.
+    If no section title contains every signal word, this returns an empty
+    list rather than guessing from a weaker, partial match.
+    """
+
+    best_by_key: dict[tuple[str, str], ChatSource] = {}
+    for source in sources:
+        section = source.section or ""
+        if _contains_any(section, PRECAUTION_SECTION_MARKERS):
+            continue
+        if not all(word in section for word in section_signals):
+            continue
+        key = (source.document_id, section or f"page-{source.page_start}")
+        best_by_key.setdefault(key, source)
+    ranked = sorted(best_by_key.values(), key=lambda source: source.page_start or 0)
+    return [source.chunk_id for source in ranked[:limit] if source.chunk_id]
 
 
 def repair_extracted_quantity_order(text: str) -> str:

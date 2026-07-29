@@ -68,6 +68,7 @@ export interface MaintenanceAnswerDetails {
   pre_checks: EvidenceBackedItem[];
   hazards: Array<EvidenceBackedItem & { name: string }>;
   manual_steps: EvidenceBackedItem[];
+  rating_performance_page_source_ids: string[];
   precautions: EvidenceBackedItem[];
   stop_conditions: EvidenceBackedItem[];
   related_regulations_and_incidents: EvidenceBackedItem[];

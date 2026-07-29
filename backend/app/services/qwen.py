@@ -29,6 +29,7 @@ class QwenGeneratedAnswer:
     structured_answer: StructuredAnswer | None = None
     checklist_items: tuple[ChatChecklistItem, ...] = ()
     used_source_ids: tuple[str, ...] = ()
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,12 +268,16 @@ class QwenClient:
             used_source_ids = tuple(
                 self._source_ids_from_citations(answer, retrieval_response.sources)
             )
+        fallback_reason = body.get("fallback_reason")
         return QwenGeneratedAnswer(
             answer=answer,
             model=model,
             structured_answer=structured_answer,
             checklist_items=tuple(checklist_items),
             used_source_ids=used_source_ids,
+            fallback_reason=(
+                str(fallback_reason).strip() if fallback_reason else None
+            ),
         )
 
     @classmethod

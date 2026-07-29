@@ -92,6 +92,7 @@ describe("StructuredChatAnswer", () => {
       pre_checks: [],
       hazards: [{ name: "오검출", content: "검출 성능 저하", evidence_chunk_ids: ["chunk-1"] }],
       manual_steps: [{ content: "설치 위치 확인", evidence_chunk_ids: ["chunk-1"] }],
+      rating_performance_page_source_ids: ["chunk-1"],
       precautions: [],
       stop_conditions: [{ content: "모델 확인 불가", evidence_chunk_ids: ["chunk-1"] }],
       related_regulations_and_incidents: [],
