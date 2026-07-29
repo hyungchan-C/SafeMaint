@@ -34,7 +34,14 @@ export default function SignupPage() {
   }
 
   return <main className="auth-shell"><section className="auth-card signup-card">
-    <span className="eyebrow">SafeMaint AI 계정</span><h1>회원가입</h1><p>현장 안전관리 서비스에서 사용할 사원 정보를 입력해 주세요.</p>
+    <img
+      className="auth-brand-logo signup-brand-logo"
+      src="/brand/safemaint-logo-horizontal-color.svg"
+      alt="SafeMaint AI"
+      width="320"
+      height="56"
+    />
+    <span className="eyebrow">현장 안전 작업 계정</span><h1>회원가입</h1><p>현장 안전관리 서비스에서 사용할 사원 정보를 입력해 주세요.</p>
     <form className="auth-form signup-form" onSubmit={submit}><div className="signup-grid">
       <label>이름 <span className="required-mark">필수</span><input value={form.name} onChange={(e) => update("name", e.target.value)} maxLength={100} autoComplete="name" required /></label>
       <label>사원번호(ID) <span className="required-mark">필수 · 최대 30자</span><input value={form.employee_number} onChange={(e) => update("employee_number", e.target.value)} maxLength={30} autoComplete="username" required /></label>

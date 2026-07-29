@@ -25,6 +25,37 @@ type Props = {
   onRefreshDocuments?: () => void;
 };
 
+type DocumentListFilter =
+  | "all"
+  | "selected"
+  | "active"
+  | "processing"
+  | "review_required"
+  | "failed";
+
+type DocumentListItem =
+  | {
+      kind: "progress";
+      key: string;
+      filename: string;
+      progress: FileProcessingProgress;
+    }
+  | {
+      kind: "document";
+      key: string;
+      filename: string;
+      document: UserDocumentSummary;
+    }
+  | {
+      kind: "legacy";
+      key: string;
+      filename: string;
+      index: number;
+    };
+
+const COLLAPSED_DOCUMENT_COUNT = 3;
+const DOCUMENT_PAGE_SIZE = 10;
+
 function documentAvailability(document: UserDocumentSummary): string {
   if (document.status === "active") return "RAG 검색 가능";
   if (document.status === "review_required") return "관리자 승인 필요";
@@ -96,6 +127,10 @@ export default function ManualManager({
   onRefreshDocuments,
 }: Props) {
   const [confirmingDelete, setConfirmingDelete] = useState<{ documentId: string; filename: string } | null>(null);
+  const [documentQuery, setDocumentQuery] = useState("");
+  const [documentFilter, setDocumentFilter] = useState<DocumentListFilter>("all");
+  const [isDocumentListExpanded, setIsDocumentListExpanded] = useState(false);
+  const [visibleDocumentCount, setVisibleDocumentCount] = useState(DOCUMENT_PAGE_SIZE);
   const progressByDocument = new Map(
     processingProgress
       .filter((progress) => progress.document_id)
@@ -105,6 +140,81 @@ export default function ManualManager({
   const provisionalProgress = processingProgress.filter(
     (progress) => !progress.document_id || !documentIds.has(progress.document_id),
   );
+  const selectedDocumentIdSet = new Set(selectedDocumentIds);
+  const orderedDocuments = [...documents].sort((left, right) => {
+    const selectedOrder = Number(selectedDocumentIdSet.has(right.document_id))
+      - Number(selectedDocumentIdSet.has(left.document_id));
+    if (selectedOrder !== 0) return selectedOrder;
+    return Date.parse(right.created_at) - Date.parse(left.created_at);
+  });
+  const documentListItems: DocumentListItem[] = [
+    ...provisionalProgress.map((progress) => ({
+      kind: "progress" as const,
+      key: `progress-${progress.client_key}`,
+      filename: progress.filename,
+      progress,
+    })),
+    ...orderedDocuments.map((currentDocument) => ({
+      kind: "document" as const,
+      key: `document-${currentDocument.document_version_id}`,
+      filename: currentDocument.original_filename,
+      document: currentDocument,
+    })),
+    ...(documents.length === 0
+      ? manuals.map((filename, index) => ({
+          kind: "legacy" as const,
+          key: `legacy-${filename}-${index}`,
+          filename,
+          index,
+        }))
+      : []),
+  ];
+  const normalizedDocumentQuery = documentQuery.trim().toLocaleLowerCase("ko-KR");
+  const filteredDocumentItems = documentListItems.filter((item) => {
+    if (
+      normalizedDocumentQuery
+      && !item.filename.toLocaleLowerCase("ko-KR").includes(normalizedDocumentQuery)
+    ) {
+      return false;
+    }
+
+    if (documentFilter === "all") return true;
+    if (documentFilter === "selected") {
+      return item.kind === "legacy"
+        || (item.kind === "document" && selectedDocumentIdSet.has(item.document.document_id));
+    }
+    if (documentFilter === "active") {
+      return item.kind === "document" && item.document.status === "active";
+    }
+    if (documentFilter === "processing") {
+      return item.kind === "progress"
+        || (
+          item.kind === "document"
+          && ["pending", "processing", "ocr_required"].includes(item.document.status)
+        );
+    }
+    if (documentFilter === "review_required") {
+      return item.kind === "document" && item.document.status === "review_required";
+    }
+    return (
+      (item.kind === "progress" && item.progress.status === "failed")
+      || (item.kind === "document" && item.document.status === "failed")
+    );
+  });
+  const displayedDocumentItems = filteredDocumentItems.slice(
+    0,
+    isDocumentListExpanded ? visibleDocumentCount : COLLAPSED_DOCUMENT_COUNT,
+  );
+  const selectedDocumentNames = documents.length > 0
+    ? orderedDocuments
+        .filter((currentDocument) => selectedDocumentIdSet.has(currentDocument.document_id))
+        .map((currentDocument) => currentDocument.original_filename)
+    : manuals;
+  const previewDocumentNames = documentListItems
+    .slice(0, COLLAPSED_DOCUMENT_COUNT)
+    .map((item) => item.filename);
+  const hasMoreDocuments = visibleDocumentCount < filteredDocumentItems.length;
+  const shouldShowDocumentDetails = isDocumentListExpanded || documentListItems.length <= 1;
 
   return (
     <section className="panel manual-manager" aria-labelledby="manual-manager-title">
@@ -136,72 +246,189 @@ export default function ManualManager({
         )}
       </div>
 
-      <div className="document-selection-list">
-        {provisionalProgress.map((progress) => (
-          <article
-            className={`document-selection-card status-${progress.status}`}
-            key={progress.client_key}
-          >
-            <div className="document-selection-heading">
-              <InterfaceIcon name="document" />
-              <span>
-                <strong title={progress.filename}>{progress.filename}</strong>
-                <small>업로드 및 처리 준비</small>
-              </span>
-              <span className={`document-status status-${progress.status}`}>
-                {progress.status === "failed" ? "업로드 실패" : "업로드 중"}
-              </span>
+      <section
+        className={isDocumentListExpanded ? "document-browser expanded" : "document-browser"}
+        aria-labelledby="document-browser-title"
+      >
+        <div className="document-browser-summary">
+          <div>
+            <strong id="document-browser-title">등록 문서</strong>
+            <span>{documentListItems.length}개 · 검색 범위 {selectedDocumentNames.length}개</span>
+          </div>
+          {documentListItems.length > 1 && (
+            <button
+              type="button"
+              className="document-list-toggle"
+              aria-expanded={isDocumentListExpanded}
+              aria-controls="registered-document-list"
+              onClick={() => {
+                setIsDocumentListExpanded((current) => !current);
+                setVisibleDocumentCount(DOCUMENT_PAGE_SIZE);
+              }}
+            >
+              {isDocumentListExpanded ? "− 목록 접기" : "＋ 목록 펼치기"}
+            </button>
+          )}
+        </div>
+
+        <div className="selected-document-summary" aria-label="최근 등록한 문서">
+          <strong>등록 파일 미리보기</strong>
+          {previewDocumentNames.length > 0 ? (
+            <div>
+              {previewDocumentNames.map((filename) => (
+                <span title={filename} key={filename}>{filename}</span>
+              ))}
+              {documentListItems.length > COLLAPSED_DOCUMENT_COUNT && (
+                <span>외 {documentListItems.length - COLLAPSED_DOCUMENT_COUNT}개</span>
+              )}
             </div>
-            <ProgressDetails progress={progress} />
-          </article>
-        ))}
-        {documents.length > 0
-          ? documents.map((document) => {
-              const isSelected = selectedDocumentIds.includes(document.document_id);
-              const progress = progressByDocument.get(document.document_id);
+          ) : (
+            <small>등록된 문서가 없습니다.</small>
+          )}
+        </div>
+
+        {documentListItems.length > 0 && (
+          <div className="document-list-controls">
+            <label>
+              <span>파일 찾기</span>
+              <input
+                type="search"
+                value={documentQuery}
+                placeholder="파일명 입력"
+                onChange={(event) => {
+                  setDocumentQuery(event.target.value);
+                  setIsDocumentListExpanded(true);
+                  setVisibleDocumentCount(DOCUMENT_PAGE_SIZE);
+                }}
+              />
+            </label>
+            <label>
+              <span>상태</span>
+              <select
+                value={documentFilter}
+                onChange={(event) => {
+                  setDocumentFilter(event.target.value as DocumentListFilter);
+                  setIsDocumentListExpanded(true);
+                  setVisibleDocumentCount(DOCUMENT_PAGE_SIZE);
+                }}
+              >
+                <option value="all">전체</option>
+                <option value="selected">선택됨</option>
+                <option value="active">RAG 가능</option>
+                <option value="processing">처리 중</option>
+                <option value="review_required">승인 대기</option>
+                <option value="failed">실패</option>
+              </select>
+            </label>
+          </div>
+        )}
+
+        {shouldShowDocumentDetails && (
+          <div
+            className="document-selection-list"
+            id="registered-document-list"
+            role="region"
+            aria-label={`등록 문서 목록 ${filteredDocumentItems.length}개`}
+          >
+          {displayedDocumentItems.map((item) => {
+            if (item.kind === "progress") {
+              const { progress } = item;
               return (
-                <article className={`document-selection-card status-${document.status} ${isSelected ? "selected" : ""}`} key={document.document_version_id}>
+                <article
+                  className={`document-selection-card status-${progress.status}`}
+                  key={item.key}
+                >
                   <div className="document-selection-heading">
                     <InterfaceIcon name="document" />
-                    <span><strong>{document.original_filename}</strong><small>버전 {document.version_number}</small></span>
-                    <span className={`document-status status-${document.status}`}>{documentAvailability(document)}</span>
+                    <span>
+                      <strong title={progress.filename}>{progress.filename}</strong>
+                      <small>업로드 및 처리 준비</small>
+                    </span>
+                    <span className={`document-status status-${progress.status}`}>
+                      {progress.status === "failed" ? "업로드 실패" : "업로드 중"}
+                    </span>
                   </div>
-                  <div className="document-selection-meta">
-                    <span>{DOCUMENT_STATUS_LABELS[document.status]}</span>
-                    {document.fallback_used && <span className="fallback-label">PyMuPDF 대체 처리</span>}
-                  </div>
-                  {document.processing_warning && <p className="document-chip-warning">{document.processing_warning}</p>}
-                  {document.failure_reason && <p className="document-chip-warning" role="alert">{document.failure_reason}</p>}
-                  {progress && <ProgressDetails progress={progress} />}
-                  <div className="document-selection-actions">
-                    <button type="button" className={isSelected ? "document-select-button selected" : "document-select-button"} aria-pressed={isSelected} onClick={() => onToggleDocument(document.document_id)}>
-                      {isSelected ? "검색 범위에 포함됨" : "검색 범위에 추가"}
-                    </button>
-                    {onReindexDocument && (
-                      <button type="button" className="document-reindex-button" onClick={() => onReindexDocument(document.document_id, document.original_filename)}>
-                        비전 재인덱싱
-                      </button>
-                    )}
-                    {onDeleteDocument && (
-                      <button
-                        type="button"
-                        className="document-delete-button"
-                        onClick={() => setConfirmingDelete({ documentId: document.document_id, filename: document.original_filename })}
-                      >
-                        삭제
-                      </button>
-                    )}
-                  </div>
+                  <ProgressDetails progress={progress} />
                 </article>
               );
-            })
-          : manuals.map((name, index) => (
-              <span className="legacy-document-chip" key={`${name}-${index}`}><InterfaceIcon name="document" />{name}<button type="button" aria-label={`${name} 선택 해제`} onClick={() => onRemoveLegacyManual(index)}>×</button></span>
-            ))}
-        {documents.length === 0 && manuals.length === 0 && provisionalProgress.length === 0 && (
-          <div className="resource-empty"><InterfaceIcon name="document" /><strong>선택된 문서가 없습니다.</strong><span>매뉴얼 없이도 공용 안전자료로 질문할 수 있습니다.</span></div>
+            }
+
+            if (item.kind === "legacy") {
+              return (
+                <span className="legacy-document-chip" key={item.key}>
+                  <InterfaceIcon name="document" />
+                  {item.filename}
+                  <button type="button" aria-label={`${item.filename} 선택 해제`} onClick={() => onRemoveLegacyManual(item.index)}>×</button>
+                </span>
+              );
+            }
+
+            const currentDocument = item.document;
+            const isSelected = selectedDocumentIdSet.has(currentDocument.document_id);
+            const progress = progressByDocument.get(currentDocument.document_id);
+            return (
+              <article className={`document-selection-card status-${currentDocument.status} ${isSelected ? "selected" : ""}`} key={item.key}>
+                <div className="document-selection-heading">
+                  <InterfaceIcon name="document" />
+                  <span><strong>{currentDocument.original_filename}</strong><small>버전 {currentDocument.version_number}</small></span>
+                  <span className={`document-status status-${currentDocument.status}`}>{documentAvailability(currentDocument)}</span>
+                </div>
+                <div className="document-selection-meta">
+                  <span>{DOCUMENT_STATUS_LABELS[currentDocument.status]}</span>
+                  {currentDocument.fallback_used && <span className="fallback-label">PyMuPDF 대체 처리</span>}
+                </div>
+                {currentDocument.processing_warning && <p className="document-chip-warning">{currentDocument.processing_warning}</p>}
+                {currentDocument.failure_reason && <p className="document-chip-warning" role="alert">{currentDocument.failure_reason}</p>}
+                {progress && <ProgressDetails progress={progress} />}
+                <div className="document-selection-actions">
+                  <button type="button" className={isSelected ? "document-select-button selected" : "document-select-button"} aria-pressed={isSelected} onClick={() => onToggleDocument(currentDocument.document_id)}>
+                    {isSelected ? "검색 범위에 포함됨" : "검색 범위에 추가"}
+                  </button>
+                  {(onReindexDocument || onDeleteDocument) && (
+                    <details className="document-manage-menu">
+                      <summary aria-label={`${currentDocument.original_filename} 관리 메뉴`}>관리</summary>
+                      <div>
+                        {onReindexDocument && (
+                          <button type="button" className="document-reindex-button" onClick={() => onReindexDocument(currentDocument.document_id, currentDocument.original_filename)}>
+                            비전 재인덱싱
+                          </button>
+                        )}
+                        {onDeleteDocument && (
+                          <button
+                            type="button"
+                            className="document-delete-button"
+                            onClick={() => setConfirmingDelete({ documentId: currentDocument.document_id, filename: currentDocument.original_filename })}
+                          >
+                            삭제
+                          </button>
+                        )}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+
+          {documentListItems.length === 0 && (
+            <div className="resource-empty"><InterfaceIcon name="document" /><strong>선택된 문서가 없습니다.</strong><span>매뉴얼 없이도 공용 안전자료로 질문할 수 있습니다.</span></div>
+          )}
+          {documentListItems.length > 0 && filteredDocumentItems.length === 0 && (
+            <div className="resource-empty"><InterfaceIcon name="document" /><strong>조건에 맞는 문서가 없습니다.</strong><span>파일명이나 상태 조건을 변경해 주세요.</span></div>
+          )}
+          </div>
         )}
-      </div>
+
+        {isDocumentListExpanded && hasMoreDocuments && (
+          <button
+            type="button"
+            className="document-load-more"
+            onClick={() => setVisibleDocumentCount((current) => current + DOCUMENT_PAGE_SIZE)}
+          >
+            ＋ {Math.min(DOCUMENT_PAGE_SIZE, filteredDocumentItems.length - visibleDocumentCount)}개 더 보기
+          </button>
+        )}
+      </section>
 
       {confirmingDelete && (
         <div className="document-confirm-backdrop" role="presentation">
