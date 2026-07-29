@@ -252,19 +252,6 @@ a {
   gap: 10px;
 }
 
-.section-number {
-  align-items: center;
-  background: var(--orange);
-  border-radius: 7px;
-  color: var(--ink);
-  display: inline-flex;
-  font-size: 11px;
-  font-weight: 800;
-  height: 27px;
-  justify-content: center;
-  width: 31px;
-}
-
 .panel h2 {
   color: var(--navy);
   font-size: 19px;
