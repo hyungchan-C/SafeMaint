@@ -16,6 +16,7 @@ import DocumentViewerModal, { type DocumentViewerTarget } from "@/components/Doc
 import InterfaceIcon from "@/components/InterfaceIcon";
 import ManualManager from "@/components/ManualManager";
 import NotificationCenter from "@/components/NotificationCenter";
+import RoiEditor from "@/components/RoiEditor";
 import { ChatChecklist } from "@/components/StructuredChatAnswer";
 import TbmChecklist from "@/components/TbmChecklist";
 import WorkspaceHeader from "@/components/WorkspaceHeader";
@@ -700,6 +701,8 @@ function WorkspaceScreen({
   const recordedChunksRef = useRef<Blob[]>([]);
   const visionRequestIdRef = useRef(0);
   const sitePhotoFileRef = useRef<File | null>(null);
+  const sitePhotoAnalysisFileRef = useRef<File | null>(null);
+  const [roiFile, setRoiFile] = useState<File | null>(null);
   const [error, setError] = useState("");
   const [workspaceRestored, setWorkspaceRestored] = useState(false);
   const myDocumentsInitializedRef = useRef(false);
@@ -1787,12 +1790,26 @@ function WorkspaceScreen({
     }
   }
 
+  function handlePhotoSelected(file: File | undefined) {
+    if (!file) return;
+    setRoiFile(file);
+  }
+
+  function handleRoiConfirm(croppedFile: File) {
+    const originalFile = roiFile;
+    if (!originalFile) return;
+    setRoiFile(null);
+    void analyzePhoto(croppedFile, selectedDocumentIds, originalFile);
+  }
+
   async function analyzePhoto(
     file: File | undefined,
     documentIds: string[] = selectedDocumentIds,
+    originalFile?: File,
   ) {
     if (!file) return;
-    sitePhotoFileRef.current = file;
+    sitePhotoFileRef.current = originalFile ?? sitePhotoFileRef.current ?? file;
+    sitePhotoAnalysisFileRef.current = file;
     const analysisStartedAt = performance.now();
     setIsVisionLoading(true);
     const token = getAccessToken();
@@ -1801,7 +1818,7 @@ function WorkspaceScreen({
       onLogout();
       return;
     }
-    setSitePhotoName(file.name);
+    setSitePhotoName((originalFile ?? file).name);
     setVisionStatus("로컬 이미지 분석 중...");
     setVisionElapsedMs(null);
     setVisionSummary("");
@@ -2267,6 +2284,7 @@ function WorkspaceScreen({
 
   return (
     <main className={`prototype-shell ${fontClass}`}>
+      {roiFile && <RoiEditor file={roiFile} onCancel={() => setRoiFile(null)} onConfirm={handleRoiConfirm} />}
       <WorkspaceHeader
         displayName={displayName}
         locationStatus={locationStatus}
@@ -2590,7 +2608,7 @@ function WorkspaceScreen({
                 : null}
               isVisionLoading={isVisionLoading}
               onAddManuals={(files) => void addManuals(files)}
-              onAddPhoto={(file) => void analyzePhoto(file)}
+          onAddPhoto={handlePhotoSelected}
               onReindexDocument={(documentId, filename) => void reindexManual(documentId, filename)}
               onDeleteDocument={(documentId, filename) => void deleteManual(documentId, filename)}
               onToggleDocument={(documentId) => {
@@ -2600,8 +2618,9 @@ function WorkspaceScreen({
                 setSelectedDocumentIds(nextDocumentIds);
                 setCatalogCandidates([]);
                 setVisionSummary("");
-                if (sitePhotoFileRef.current) {
-                  void analyzePhoto(sitePhotoFileRef.current, nextDocumentIds);
+        const analysisFile = sitePhotoAnalysisFileRef.current ?? sitePhotoFileRef.current;
+        if (analysisFile) {
+          void analyzePhoto(analysisFile, nextDocumentIds, sitePhotoFileRef.current ?? undefined);
                 }
               }}
               onRemoveLegacyManual={(index) => {
@@ -2680,7 +2699,7 @@ function WorkspaceScreen({
           </div>
           <form className="chat-input-row" onSubmit={sendChat}>
             <button type="button" className="icon-action" aria-label={isRecording ? "녹음 중지" : "음성 입력"} onClick={toggleVoiceInput} disabled={isTranscribing}><InterfaceIcon name={isRecording ? "stop" : "microphone"} /><span>음성</span></button>
-            <label className="icon-action file-icon" aria-label="사진 첨부"><InterfaceIcon name="image" /><span>사진</span><input type="file" accept="image/*" onChange={(event) => void analyzePhoto(event.target.files?.[0])} /></label>
+              <label className="icon-action file-icon" aria-label="사진 첨부"><InterfaceIcon name="image" /><span>사진</span><input type="file" accept="image/*" onChange={(event) => handlePhotoSelected(event.target.files?.[0])} /></label>
             <label className="icon-action file-icon" aria-label="문서 첨부"><InterfaceIcon name="paperclip" /><span>문서</span><input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
             <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={isVisionLoading ? "사진 분석이 끝나면 질문을 보낼 수 있습니다." : "예: 이건 뭐야? 어디에 쓰이는 거야?"} disabled={isChatLoading} />
             <button type="submit" disabled={isChatLoading || isVisionLoading || !question.trim()}>{isVisionLoading ? "사진 분석 중..." : isChatLoading ? "답변 생성 중..." : "전송"}</button>
