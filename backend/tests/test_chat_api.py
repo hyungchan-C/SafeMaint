@@ -282,7 +282,9 @@ def test_chat_service_does_not_call_openai_without_retrieved_evidence() -> None:
 
 def test_chat_api_uses_injected_service() -> None:
     class FakeChatService:
-        async def answer(self, request: ChatRequest, access_scope=None) -> ChatResponse:
+        async def answer(
+            self, request: ChatRequest, access_scope=None, db=None
+        ) -> ChatResponse:
             assert request.question == "컨베이어 청소법"
             return ChatResponse(
                 answer="전원을 차단하고 LOTO를 적용하세요.",
@@ -1062,6 +1064,96 @@ def test_maintenance_qwen_structure_and_checklist_are_source_validated() -> None
     assert "설치 위치 확인하기" not in checklist_contents
     assert len(checklist_contents) <= 5
     assert all(item.evidence_chunk_ids == ["chunk-1"] for item in response.checklist_items)
+
+
+def test_full_document_sources_is_scanned_once_when_qwen_succeeds() -> None:
+    # _full_document_sources does a DB scan of the whole manual. answer()'s
+    # template path and the Qwen path both need its result, but for the same
+    # request they always resolve to the same document_version_ids — so the
+    # Qwen path should reuse the value computed once, not scan again.
+    call_count = 0
+
+    async def counting_full_document_sources(sources, answer_type, db):
+        nonlocal call_count
+        call_count += 1
+        return [
+            ChatSource(
+                document_id="doc-1",
+                document_version_id="version-1",
+                chunk_id="full-doc-chunk",
+                title="라이트커튼 매뉴얼",
+                source_type="equipment_manual",
+                section="2. 정격 및 성능",
+                excerpt="응답시간, 소비전류 등 정격값을 명시합니다.",
+                page=19,
+                page_start=19,
+                similarity=0.0,
+            )
+        ]
+
+    class StructuredQwenClient:
+        async def classify(self, request: ChatRequest) -> QueryAnalysis:
+            return QueryAnalysis(
+                question_intent="maintenance_guide",
+                intent_confidence=0.98,
+            )
+
+        async def answer(
+            self,
+            request: ChatRequest,
+            retrieval_response: ChatResponse,
+        ) -> QwenGeneratedAnswer:
+            details = MaintenanceAnswerDetails(
+                summary=MaintenanceSummary(
+                    status="안전관리자 확인 필요",
+                    risk_level="높음",
+                    core_warning="설치 전 제조사 기준을 확인하세요.",
+                ),
+                manual_steps=[
+                    EvidenceBackedItem(
+                        content="매뉴얼의 설치 위치 기준을 적용합니다.",
+                        evidence_chunk_ids=["chunk-1"],
+                    )
+                ],
+                evidence_chunk_ids=["chunk-1"],
+            )
+            return QwenGeneratedAnswer(
+                answer="구조화된 유지보수 안내",
+                model="qwen-test",
+                structured_answer=details,
+                used_source_ids=("chunk-1",),
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answer": "검색 기본 답변",
+                "sources": [_grounded_source()],
+                "retrieval_mode": "hybrid",
+            },
+        )
+
+    service = ChatService(
+        service_url="http://rag.test",
+        transport=httpx.MockTransport(handler),
+        openai_enabled=False,
+        qwen_client=StructuredQwenClient(),  # type: ignore[arg-type]
+        qwen_enabled=True,
+        qwen_allow_company_context=True,
+    )
+    service._full_document_sources = counting_full_document_sources  # type: ignore[method-assign]
+
+    response = asyncio.run(
+        service.answer(
+            ChatRequest(question="라이트커튼 설치시 주의사항을 알려줘."),
+            db=object(),  # type: ignore[arg-type]
+        )
+    )
+
+    assert response.answer_type == "maintenance_guide"
+    assert response.generation_mode == "qwen"
+    assert call_count == 1
 
 
 def test_maintenance_summary_prioritizes_verified_manual_steps() -> None:

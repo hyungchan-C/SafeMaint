@@ -1345,6 +1345,16 @@ a {
 .document-viewer-header strong { color: var(--navy); overflow-wrap: anywhere; }
 .document-viewer-header button { background: none; border: 1px solid #c4d2d8; border-radius: 8px; cursor: pointer; font-weight: 700; padding: 6px 12px; }
 .document-viewer-frame { border: 1px solid var(--line); border-radius: 10px; flex: 1; width: 100%; }
+
+.pdf-source-page-list { display: grid; gap: 12px; list-style: none; margin: 0; padding: 0; }
+.pdf-source-page-card { background: #fff; border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 8px; padding: 11px 12px; }
+.pdf-source-page-heading { display: grid; gap: 2px; }
+.pdf-source-page-heading strong { color: var(--navy); font-size: 12px; overflow-wrap: anywhere; }
+.pdf-source-page-heading span { color: var(--muted); font-size: 11px; }
+.pdf-source-page-evidence-link { color: var(--teal); font-size: 11px; font-weight: 800; text-decoration: underline; text-underline-offset: 2px; width: fit-content; }
+.pdf-source-page-open { background: none; border: 1px solid var(--teal); border-radius: 999px; color: var(--teal); cursor: pointer; font-size: 12px; font-weight: 700; padding: 4px 10px; width: fit-content; }
+.pdf-source-page-open:hover { background: var(--teal-soft); }
+
 .additional-sources { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
 .additional-sources > summary { background: var(--surface-subtle); color: var(--navy); cursor: pointer; font-size: 11px; font-weight: 800; list-style-position: inside; padding: 10px 11px; }
 .additional-sources > div { display: grid; gap: 8px; padding: 9px; }

@@ -87,6 +87,7 @@ const maintenanceAnswer: MaintenanceAnswerDetails = {
   manual_steps: [
     { content: "광축 정렬 상태를 확인합니다.", evidence_chunk_ids: ["manual-chunk"] },
   ],
+  rating_performance_page_source_ids: ["manual-chunk"],
   precautions: [
     { content: "정렬 상태 유지", evidence_chunk_ids: ["manual-chunk"] },
   ],
@@ -201,13 +202,20 @@ describe("AnswerTabs", () => {
 
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "문서 개요",
-      "관련 항목",
+      "PDF 확인",
       "출처",
     ]);
-    expect(screen.getByText("SFL-A")).toBeInTheDocument();
+    expect(screen.getByText("Safe Factory")).toBeInTheDocument();
+    expect(screen.queryByText("모델명")).not.toBeInTheDocument();
+    expect(screen.queryByText("SFL-A")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("tab", { name: "관련 항목" }));
-    expect(screen.getByText("라이트커튼")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "PDF 확인" }));
+    const pdfCheckPanel = screen.getByRole("tabpanel");
+    expect(within(pdfCheckPanel).getByText("SFL-라이트커튼-설치매뉴얼.pdf")).toBeInTheDocument();
+    expect(within(pdfCheckPanel).getByRole("button", { name: "원문 전체 보기" }))
+      .toBeInTheDocument();
+    expect(within(pdfCheckPanel).queryByText("라이트커튼")).not.toBeInTheDocument();
+    expect(within(pdfCheckPanel).queryByText("설치")).not.toBeInTheDocument();
     expect(screen.getByText("확인하지 못한 내용")).toBeInTheDocument();
     expect(screen.getByText("체결 토크")).toBeInTheDocument();
 
@@ -226,7 +234,8 @@ describe("AnswerTabs", () => {
 
     expect(screen.getByRole("tab", { name: "근거" }))
       .toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText("SFL-라이트커튼-설치매뉴얼.pdf")).toBeInTheDocument();
+    const evidencePanel = screen.getByRole("tabpanel");
+    expect(within(evidencePanel).getByText("SFL-라이트커튼-설치매뉴얼.pdf")).toBeInTheDocument();
   });
 
   it("does not render empty grouped headings and retains returned sources", () => {

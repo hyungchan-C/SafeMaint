@@ -236,7 +236,7 @@ class QwenEngine:
                 flush=True,
             )
 
-        return self._fallback_answer(request, generated)
+        return self._fallback_answer(request, generated, validation_error=validation_error)
 
     def _document_profile_sync(
         self,
@@ -1242,6 +1242,8 @@ class QwenEngine:
         self,
         request: AnswerRequest,
         generated: str,
+        *,
+        validation_error: str | None = None,
     ) -> AnswerResponse:
         answer_text = self._clean_answer_text(generated)
         if self._extract_json(generated) is not None or answer_text.startswith("{"):
@@ -1270,6 +1272,11 @@ class QwenEngine:
             ),
             "used_source_ids": used_source_ids,
             "model": self.settings.base_model,
+            # Surfaced to the backend so it can log the specific reason locally —
+            # this service usually runs on a remote Colab host, so its own stdout
+            # (see the qwen_compact_answer_validation_failed print above) isn't
+            # visible from the backend's side at all.
+            "fallback_reason": validation_error[:300] if validation_error else None,
         }
         return AnswerResponse.model_validate(payload)
 

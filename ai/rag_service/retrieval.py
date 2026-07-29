@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from typing import Any
 from uuid import UUID
@@ -1570,6 +1571,60 @@ class PgvectorRetriever:
                 row["similarity"] = max(nearest_scores)
         return adjacent_rows
 
+    def _fetch_supplemental_rows(
+        self,
+        source_types: tuple[str, ...],
+        *,
+        request: InternalChatRequest,
+        vector: np.ndarray,
+        search_query: str,
+    ) -> list[dict[str, Any]]:
+        """Run one maintenance_guide supplemental bucket query on its own connection.
+
+        Called concurrently (one call per bucket) from a thread pool, so each
+        call needs its own connection — a single psycopg connection cannot
+        run multiple queries at once. The candidate_query/parameters here are
+        byte-for-byte the same as the sequential version; only the connection
+        and thread differ, so the rows returned are identical either way.
+        """
+
+        clause, scope_parameters = scope_sql(
+            normalize_source_types(source_types),
+            None,
+        )
+        parameters = (
+            vector,
+            search_query,
+            request.access_scope.allow_company,
+            request.access_scope.allow_private,
+            request.access_scope.all_sites,
+            request.access_scope.site_ids,
+            True,
+            [],
+            request.access_scope.requester_user_id,
+            request.access_scope.requester_user_id,
+            True,
+            [],
+            True,
+            True,
+            [],
+            True,
+            *scope_parameters,
+            self.settings.model_name,
+            int(vector.shape[0]),
+            self.settings.min_similarity,
+            max(20, self.settings.candidate_k),
+        )
+        with psycopg.connect(
+            psycopg_database_url(self.settings.database_url),
+            connect_timeout=5,
+            row_factory=dict_row,
+        ) as connection:
+            register_vector(connection)
+            with connection.cursor() as cursor:
+                cursor.execute(self._candidate_query(clause), parameters)
+                return list(cursor.fetchall())
+
     def search(
         self,
         request: InternalChatRequest,
@@ -1682,47 +1737,33 @@ class PgvectorRetriever:
                 rows = list(cursor.fetchall())
                 if intent == "maintenance_guide":
                     existing_chunk_ids = {str(row["chunk_id"]) for row in rows}
-                    for supplemental_source_types in (
+                    supplemental_buckets = (
                         ("company_policy",),
                         ("public_law", "public_guide", "public_media"),
                         ("public_incident",),
-                    ):
-                        supplemental_clause, supplemental_scope_parameters = scope_sql(
-                            normalize_source_types(supplemental_source_types),
-                            None,
-                        )
-                        supplemental_parameters = (
-                            vector,
-                            search_query,
-                            request.access_scope.allow_company,
-                            request.access_scope.allow_private,
-                            request.access_scope.all_sites,
-                            request.access_scope.site_ids,
-                            True,
-                            [],
-                            request.access_scope.requester_user_id,
-                            request.access_scope.requester_user_id,
-                            True,
-                            [],
-                            True,
-                            True,
-                            [],
-                            True,
-                            *supplemental_scope_parameters,
-                            self.settings.model_name,
-                            int(vector.shape[0]),
-                            self.settings.min_similarity,
-                            max(20, self.settings.candidate_k),
-                        )
-                        cursor.execute(
-                            self._candidate_query(supplemental_clause),
-                            supplemental_parameters,
-                        )
-                        for row in cursor.fetchall():
-                            chunk_id = str(row["chunk_id"])
-                            if chunk_id not in existing_chunk_ids:
-                                rows.append(row)
-                                existing_chunk_ids.add(chunk_id)
+                    )
+                    # Each bucket is an independent query (own connection), run
+                    # concurrently instead of one after another. Results are still
+                    # merged in this same fixed bucket order below (not the order
+                    # queries happen to finish in), so which rows end up in `rows`
+                    # — and in what order — is identical to the sequential version.
+                    with ThreadPoolExecutor(max_workers=len(supplemental_buckets)) as pool:
+                        futures = [
+                            pool.submit(
+                                self._fetch_supplemental_rows,
+                                bucket,
+                                request=request,
+                                vector=vector,
+                                search_query=search_query,
+                            )
+                            for bucket in supplemental_buckets
+                        ]
+                        for future in futures:
+                            for row in future.result():
+                                chunk_id = str(row["chunk_id"])
+                                if chunk_id not in existing_chunk_ids:
+                                    rows.append(row)
+                                    existing_chunk_ids.add(chunk_id)
                 if intent == "document_qa":
                     adjacent_rows = self._load_adjacent_rows(cursor, rows)
                     existing_chunk_ids = {

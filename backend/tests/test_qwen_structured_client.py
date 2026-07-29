@@ -49,6 +49,51 @@ def test_qwen_client_sends_ngrok_skip_warning_header() -> None:
     assert result.answer == "근거 답변 [1]"
 
 
+def test_qwen_client_parses_fallback_reason() -> None:
+    # qwen_service usually runs on a remote host, so the specific reason it fell
+    # back to a canned answer only reaches us if it's carried in the response
+    # body — this checks QwenClient actually reads that field through.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answer": "검색된 근거를 기준으로 작업 전 확인할 핵심 사항을 요약했습니다.",
+                "model": "qwen-test",
+                "used_source_ids": ["chunk-1"],
+                "fallback_reason": "maintenance compact answer has no card items.",
+            },
+        )
+
+    retrieval_response = ChatResponse(
+        answer="검색 답변",
+        answer_type="maintenance_guide",
+        sources=[
+            ChatSource(
+                document_id="doc-1",
+                chunk_id="chunk-1",
+                title="검증 근거",
+                source_type="equipment_manual",
+                excerpt="검증된 내용",
+                similarity=0.8,
+            )
+        ],
+        retrieval_mode="hybrid",
+    )
+
+    result = asyncio.run(
+        QwenClient(
+            service_url="http://qwen.test",
+            transport=httpx.MockTransport(handler),
+        ).answer(
+            ChatRequest(question="라이트커튼 점검 절차 알려줘"),
+            retrieval_response,
+        )
+    )
+
+    assert result is not None
+    assert result.fallback_reason == "maintenance compact answer has no card items."
+
+
 def test_invalid_qwen_structured_json_keeps_legacy_answer() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

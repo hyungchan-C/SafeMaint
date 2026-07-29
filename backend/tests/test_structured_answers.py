@@ -15,6 +15,7 @@ from app.schemas.chat import (
     MaintenanceSummary,
 )
 from app.services.structured_answers import (
+    _card_meaning_pages,
     _component_usage_phrase,
     _clean_source_excerpt,
     _document_entity_phrase,
@@ -30,6 +31,7 @@ from app.services.structured_answers import (
     source_based_fallback,
     validated_checklist_items,
     validated_structured_answer,
+    RATING_PERFORMANCE_SECTION_SIGNALS,
 )
 
 
@@ -224,6 +226,136 @@ def test_enrichment_keeps_manual_steps_missing_from_short_qwen_answer() -> None:
         "청소·점검·수리 전 전원 차단 스위치를 차단 위치로 전환합니다.",
         "정상 운전 전에 정회전과 역회전을 반복하여 이물질 여부를 확인합니다.",
     ]
+
+
+def test_card_meaning_pages_finds_the_rating_performance_section() -> None:
+    # "작업 안내" 탭의 이 카드는 어떤 문장이 만들어졌는지와 무관하게, 카드의 고정된
+    # 의미(정격/성능 신호어)로 문서 전체에서 찾는다.
+    unrelated_page = ChatSource(
+        document_id="doc-x",
+        chunk_id="unrelated-1",
+        title="설비 매뉴얼",
+        source_type="equipment_manual",
+        section="1. 개요",
+        excerpt="본 설비의 개요를 설명합니다.",
+        similarity=0.5,
+    )
+    rating_page = ChatSource(
+        document_id="doc-x",
+        chunk_id="rating-1",
+        title="설비 매뉴얼",
+        source_type="equipment_manual",
+        section="2. 정격 및 성능",
+        excerpt="응답시간, 소비전류, 중량 등 정격값을 명시합니다.",
+        similarity=0.5,
+    )
+
+    pages = _card_meaning_pages([unrelated_page, rating_page], RATING_PERFORMANCE_SECTION_SIGNALS)
+
+    assert pages == ["rating-1"]
+
+
+def test_card_meaning_pages_excludes_precaution_sections_for_rating_performance() -> None:
+    precaution_page = ChatSource(
+        document_id="doc-x",
+        chunk_id="precaution-1",
+        title="설비 매뉴얼",
+        source_type="equipment_manual",
+        section="안전을 위한 주의사항",
+        # 신호어(정격/성능)가 들어있어도 섹션 자체가 주의사항이면 제외되어야 함.
+        excerpt="정격 성능을 초과하여 사용하지 마십시오.",
+        similarity=0.5,
+    )
+    rating_page = ChatSource(
+        document_id="doc-x",
+        chunk_id="rating-1",
+        title="설비 매뉴얼",
+        source_type="equipment_manual",
+        section="2. 정격 및 성능",
+        excerpt="응답시간, 소비전류, 중량 등 정격값을 명시합니다.",
+        similarity=0.5,
+    )
+
+    pages = _card_meaning_pages([precaution_page, rating_page], RATING_PERFORMANCE_SECTION_SIGNALS)
+
+    assert pages == ["rating-1"]
+
+
+def test_card_meaning_pages_ignores_body_text_and_partial_title_matches() -> None:
+    # 실제 문서에서 관찰된 문제: 어떤 섹션 제목은 "정격"/"성능" 중 한 단어만(다른 맥락으로)
+    # 포함하기도 하고, 본문에는 있지만 제목엔 둘 다 없는 경우도 있다. 이런 부분적/본문
+    # 일치는 카드의 진짜 의미(정격 및 성능 챕터)가 아니므로 절대 채택하면 안 된다 —
+    # 무관한 페이지를 보여주느니 아예 빈 채로 두는 게 낫다(폴백 없음).
+    body_only_page = ChatSource(
+        document_id="doc-x",
+        chunk_id="body-1",
+        title="설비 매뉴얼",
+        source_type="equipment_manual",
+        section="2.6.1 손가락 검출",  # 제목엔 "정격"/"성능" 둘 다 없음
+        excerpt="본 제품의 정격 전압은 24V이며 성능 기준을 만족합니다.",
+        similarity=0.5,
+    )
+    partial_title_page = ChatSource(
+        document_id="doc-x",
+        chunk_id="partial-1",
+        title="설비 매뉴얼",
+        source_type="equipment_manual",
+        # "성능"만 있고 "정격"은 없음 — 정격/성능 챕터가 아니라 다른 맥락의 언급.
+        section="· 허용 광축 설정에 따른 검출 성능 변화",
+        excerpt="설정 항목별 변경 내용을 정리합니다.",
+        similarity=0.5,
+    )
+
+    pages = _card_meaning_pages(
+        [body_only_page, partial_title_page],
+        RATING_PERFORMANCE_SECTION_SIGNALS,
+    )
+
+    assert pages == []
+
+
+def test_finalize_maintenance_answer_fills_rating_performance_pages_independent_of_manual_steps() -> None:
+    narrow_source = ChatSource(
+        document_id="doc-x",
+        chunk_id="narrow-1",
+        title="설비 매뉴얼",
+        source_type="equipment_manual",
+        section="안전을 위한 주의사항",
+        excerpt="작업 전 위험구역 출입을 통제하십시오.",
+        similarity=0.9,
+    )
+    full_doc_rating_source = ChatSource(
+        document_id="doc-x",
+        chunk_id="full-doc-1",
+        title="설비 매뉴얼",
+        source_type="equipment_manual",
+        section="2. 정격 및 성능",
+        excerpt="응답시간, 소비전류, 중량 등 정격값을 명시합니다.",
+        similarity=0.0,
+    )
+    # manual_steps가 비어 있어도(이번 질문에선 절차 문장이 하나도 안 만들어졌어도)
+    # 정격/성능 카드는 독립적으로 채워져야 한다.
+    answer = MaintenanceAnswerDetails(
+        summary=MaintenanceSummary(
+            status="안전관리자 확인 필요",
+            risk_level="판단 불가",
+            risk_basis=[],
+            core_warning="작업 전 확인 필요",
+        ),
+        manual_steps=[],
+        evidence_chunk_ids=["narrow-1"],
+    )
+
+    finalized = finalize_maintenance_answer(
+        answer,
+        sources=[narrow_source],
+        question="설비 정격 알려줘",
+        full_document_sources=[narrow_source, full_doc_rating_source],
+    )
+
+    assert isinstance(finalized, MaintenanceAnswerDetails)
+    assert finalized.manual_steps == []
+    assert finalized.rating_performance_page_source_ids == ["full-doc-1"]
 
 
 @pytest.mark.parametrize(
