@@ -1,9 +1,17 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
-import DocumentReviewPanel from "@/components/DocumentReviewPanel";
 import ChatAnswerContent from "@/components/ChatAnswerContent";
+import DocumentReviewPanel from "@/components/DocumentReviewPanel";
 import DocumentViewerModal, { type DocumentViewerTarget } from "@/components/DocumentViewerModal";
 import InterfaceIcon from "@/components/InterfaceIcon";
 import ManualManager from "@/components/ManualManager";
@@ -34,6 +42,7 @@ import { getAccessToken, getApiBaseUrl } from "@/lib/api";
 
 type PageMode = "login" | "workspace" | "history";
 type FontSize = "small" | "medium" | "large";
+type MobileWorkspaceTab = "chat" | "evidence" | "safety" | "more";
 
 type LocalUser = {
   id: string;
@@ -93,6 +102,9 @@ const GPS_EQUIPMENT_RADIUS_M = 30;
 const GPS_MAP_MARKER_EDGE_PADDING_PX = 20;
 const DOCUMENT_PROGRESS_POLL_MS = 2000;
 const DOCUMENT_PROGRESS_MAX_RETRIES = 3;
+const MOBILE_WORKSPACE_TAB_ORDER: MobileWorkspaceTab[] = ["chat", "evidence", "safety", "more"];
+const MOBILE_SWIPE_MIN_DISTANCE_PX = 56;
+const MOBILE_SWIPE_DIRECTION_RATIO = 1.25;
 
 function metersOffsetFromCenter(center: { lat: number; lon: number }, lat: number, lon: number) {
   return {
@@ -182,16 +194,13 @@ function removeStorage(key: string) {
   }
 }
 
-// 화면의 AnswerTabs("AI 핵심 답변" 섹션)와 ChatAnswerContent("AI 답변" 섹션)는 항상
-// message.text(백엔드가 만든 평문 answer)를 그대로 보여준다. TTS도 화면에 보이는 것과
-// 동일한 내용을 읽어야 하므로 같은 message.text를 쓴다. 다만 유지보수 답변만 재생 시작 시
-// 작업 승인이 아니라는 고정 안내를 먼저 말한다.
+// 화면에 표시되는 답변 원문과 TTS가 읽는 내용이 어긋나지 않도록 같은 text를 사용한다.
+// 유지보수 안내만 작업 승인이 아니라는 고정 문구를 먼저 재생한다.
 const MAINTENANCE_TTS_DISCLAIMER =
   "이 안내는 작업 승인이 아닙니다. 안전관리자의 최종 확인 전에는 작업을 시작하지 마세요.";
 
 function buildSpeechText(message: { text: string; structuredAnswer?: StructuredAnswer | null }): string {
   const answer = message.structuredAnswer;
-
   if (answer?.answer_type === "clarification_required") {
     return [answer.question, ...answer.options].filter(Boolean).join(". ");
   }
@@ -345,8 +354,14 @@ function LoginScreen({ onLogin }: { onLogin: (user: LocalUser) => void }) {
   return (
     <main className="auth-shell">
       <section className="auth-card">
-        <div className="auth-icon">🦺</div>
-        <h1>SafeMaint AI</h1>
+        <img
+          className="auth-brand-logo"
+          src="/brand/safemaint-logo-horizontal-color.svg"
+          alt="SafeMaint AI"
+          width="320"
+          height="56"
+        />
+        <h1>현장 안전 작업 지원</h1>
         <p>제조설비 정비작업 안전관리 Assistant</p>
         <form onSubmit={submit} className="auth-form">
           <label>
@@ -614,6 +629,17 @@ function WorkspaceScreen({
   const [userDocuments, setUserDocuments] = useState<UserDocumentSummary[]>([]);
   const [processingProgress, setProcessingProgress] = useState<Record<string, FileProcessingProgress>>({});
   const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
+  const [isDocumentPanelOpen, setIsDocumentPanelOpen] = useState(false);
+  const [isStatusPanelOpen, setIsStatusPanelOpen] = useState(false);
+  const [isSafetyPanelOpen, setIsSafetyPanelOpen] = useState(false);
+  const [mobileWorkspaceTab, setMobileWorkspaceTab] = useState<MobileWorkspaceTab>("chat");
+  const mobileSwipeRef = useRef<{
+    active: boolean;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+  } | null>(null);
   const [manualStatus, setManualStatus] = useState("");
   const [sitePhotoName, setSitePhotoName] = useState("");
   const [visionSummary, setVisionSummary] = useState("");
@@ -649,7 +675,7 @@ function WorkspaceScreen({
   const latestRealPositionRef = useRef<{ latitude: number; longitude: number } | null>(null);
   const [hasRealFix, setHasRealFix] = useState(false);
   const calibratedRequestIdRef = useRef(0);
-  const [activeTab, setActiveTab] = useState<"summary" | "accidents" | "evidence" | "tbm">("summary");
+  const [activeTab, setActiveTab] = useState<"summary" | "accidents" | "evidence">("summary");
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const form = initialForm;
@@ -678,6 +704,19 @@ function WorkspaceScreen({
   const progressPollersRef = useRef<
     Map<string, { controller: AbortController; timer: number | null }>
   >(new Map());
+
+  useEffect(() => {
+    const desktopLayout = window.matchMedia("(min-width: 768px)");
+    const syncResponsivePanels = () => {
+      const shouldExpand = desktopLayout.matches;
+      setIsDocumentPanelOpen(shouldExpand);
+      setIsStatusPanelOpen(shouldExpand);
+      setIsSafetyPanelOpen(shouldExpand);
+    };
+    syncResponsivePanels();
+    desktopLayout.addEventListener("change", syncResponsivePanels);
+    return () => desktopLayout.removeEventListener("change", syncResponsivePanels);
+  }, []);
 
   const refreshMyDocuments = useCallback(async () => {
     const token = getAccessToken();
@@ -1044,6 +1083,7 @@ function WorkspaceScreen({
   }, []);
 
   const fontClass = useMemo(() => `font-${fontSize}`, [fontSize]);
+  const highestRisk = result?.hazards.some((hazard) => hazard.risk_level === "high") ? "high" : result?.hazards.some((hazard) => hazard.risk_level === "medium") ? "medium" : result ? "low" : "pending";
   const latestChecklistMessageIndex = messages.findLastIndex(
     (candidate) => candidate.role === "ai" && Boolean(candidate.checklistItems?.length),
   );
@@ -2162,6 +2202,56 @@ function WorkspaceScreen({
     }
   }
 
+  const selectMobileWorkspaceTab = useCallback((tab: MobileWorkspaceTab) => {
+    setMobileWorkspaceTab(tab);
+    if (tab === "evidence") setIsDocumentPanelOpen(true);
+    if (tab === "safety") setIsStatusPanelOpen(true);
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }, []);
+
+  function handleMobileSwipeStart(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!window.matchMedia("(max-width: 767px)").matches) return;
+    const target = event.target;
+    if (event.button !== 0 || !(target instanceof HTMLElement)) return;
+    const hasInteractiveTarget = Boolean(target.closest(
+      "a, button, input, label, select, summary, textarea, [contenteditable='true'], [role='tab']",
+    ));
+    mobileSwipeRef.current = {
+      active: !hasInteractiveTarget,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+    };
+  }
+
+  function handleMobileSwipeMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const swipe = mobileSwipeRef.current;
+    if (!swipe?.active) return;
+    swipe.lastX = event.clientX;
+    swipe.lastY = event.clientY;
+  }
+
+  function handleMobileSwipeEnd() {
+    const swipe = mobileSwipeRef.current;
+    mobileSwipeRef.current = null;
+    if (!swipe?.active) return;
+
+    const horizontalDistance = swipe.lastX - swipe.startX;
+    const verticalDistance = swipe.lastY - swipe.startY;
+    if (
+      Math.abs(horizontalDistance) < MOBILE_SWIPE_MIN_DISTANCE_PX
+      || Math.abs(horizontalDistance) <= Math.abs(verticalDistance) * MOBILE_SWIPE_DIRECTION_RATIO
+    ) return;
+
+    const currentIndex = MOBILE_WORKSPACE_TAB_ORDER.indexOf(mobileWorkspaceTab);
+    const nextIndex = horizontalDistance < 0 ? currentIndex + 1 : currentIndex - 1;
+    const nextTab = MOBILE_WORKSPACE_TAB_ORDER[nextIndex];
+    if (nextTab) selectMobileWorkspaceTab(nextTab);
+  }
+
   return (
     <main className={`prototype-shell ${fontClass}`}>
       <WorkspaceHeader
@@ -2192,19 +2282,39 @@ function WorkspaceScreen({
         onLogout={onLogout}
       />
 
-      <div className="workspace-content">
-        <section className="workflow-hero" aria-labelledby="workflow-title">
-          <div><span className="eyebrow">현장 작업 지원 워크스페이스</span><h1 id="workflow-title">매뉴얼을 선택하고, 근거가 있는 답변을 확인하세요.</h1><p>매뉴얼과 현장 사진을 바탕으로 부품 정보·작업 절차·TBM 항목을 바로 질문할 수 있습니다.</p></div>
-          <ol className="workflow-steps" aria-label="작업 진행 순서">
-            <li className={manuals.length ? "complete" : "active"}><span>1</span><strong>문서·사진</strong></li>
-            <li className={messages.length ? "complete" : manuals.length ? "active" : ""}><span>2</span><strong>AI 질문</strong></li>
-            <li className={result ? "complete" : messages.length ? "active" : ""}><span>3</span><strong>위험·TBM</strong></li>
-          </ol>
-        </section>
+      <div
+        className="workspace-content"
+        data-mobile-tab={mobileWorkspaceTab}
+        onPointerDown={handleMobileSwipeStart}
+        onPointerMove={handleMobileSwipeMove}
+        onPointerUp={handleMobileSwipeEnd}
+        onPointerCancel={() => {
+          mobileSwipeRef.current = null;
+        }}
+      >
+        <details
+          className="workflow-hero mobile-tab-panel mobile-tab-more"
+          id="mobile-workspace-panel-more"
+          role="tabpanel"
+          aria-labelledby="mobile-workspace-tab-more"
+        >
+          <summary>
+            <span><span className="eyebrow">SafeMaint 현장 안전 작업 콘솔</span><strong id="workflow-title">문서 선택 → AI 상담 → 현장 확인</strong></span>
+            <span className="workflow-toggle-label">사용 안내</span>
+          </summary>
+          <div className="workflow-hero-content" aria-labelledby="workflow-title">
+            <p>매뉴얼과 현장 사진을 바탕으로 부품 정보·작업 절차·TBM 항목을 질문하고, 표시된 근거를 직접 확인하세요.</p>
+            <ol className="workflow-steps" aria-label="작업 진행 순서">
+              <li className={manuals.length ? "complete" : "active"}><span>1</span><strong>문서·사진</strong></li>
+              <li className={messages.length ? "complete" : manuals.length ? "active" : ""}><span>2</span><strong>AI 질문</strong></li>
+              <li className={result ? "complete" : messages.length ? "active" : ""}><span>3</span><strong>위험·TBM</strong></li>
+            </ol>
+          </div>
+        </details>
 
       {error && <p className="workspace-error error-message" role="alert">{error}</p>}
 
-      <details className="assessment-drawer gps-drawer">
+      <details className="assessment-drawer gps-drawer mobile-tab-panel mobile-tab-more">
         <summary>
           <span className="gps-summary-title"><InterfaceIcon name="location" /><strong>가상 GPS 위치 도구</strong></span>
           <span className={isGpsChecking ? "status-pill active" : "status-pill"}>{locationStatus}</span>
@@ -2378,141 +2488,253 @@ function WorkspaceScreen({
       })()}
       </details>
 
-      <section className="field-overview-grid">
-        <article className="panel risk-overview-card">
-          {latestChecklistMessage ? (
-            <ChatChecklist
-              items={latestChecklistMessage.checklistItems ?? []}
-              savedAssessmentId={latestChecklistMessage.savedAssessmentId ?? null}
-              isSaving={savingChecklistIndex === latestChecklistMessageIndex}
-              onSave={(checkedIndices) => void saveChatChecklist(latestChecklistMessageIndex, latestChecklistMessage, checkedIndices)}
-            />
-          ) : (
-            <>
-              <span className="eyebrow">TBM 체크리스트</span>
-              <p className="muted-copy">매뉴얼 기반 작업 안내를 받으면 여기에 체크리스트가 표시됩니다.</p>
-            </>
-          )}
-        </article>
-        <article className="panel ppe-panel">
-          <div className="panel-heading compact-heading"><h2>필수 보호구</h2><span className="panel-tag">현장 확인</span></div>
-          <div className="ppe-checklist">
-            {ppeItems.map((item) => <label className={ppeChecks[item] ? "checked" : ""} key={item}>
-              <input type="checkbox" checked={Boolean(ppeChecks[item])} onChange={(event) => setPpeChecks((current) => ({ ...current, [item]: event.target.checked }))} />
-              <span className="ppe-check-icon" aria-hidden="true">✓</span><b>{item}</b><small>{ppeChecks[item] ? "착용 확인" : "확인 필요"}</small>
-            </label>)}
-          </div>
-          <p className="muted-copy">작업과 화학물질 특성에 따라 추가 보호구가 필요할 수 있습니다.</p>
-        </article>
-      </section>
-
-      <div className="workspace-primary-grid">
-        <ManualManager
-          manuals={manuals}
-          documents={userDocuments}
-          processingProgress={Object.values(processingProgress)}
-          selectedDocumentIds={selectedDocumentIds}
-          manualStatus={manualStatus}
-          sitePhotoName={sitePhotoName}
-          visionStatus={visionStatus}
-          visionElapsedLabel={visionElapsedMs !== null && visionStatus.startsWith("정밀 분석 완료")
-            ? formatElapsedTime(visionElapsedMs)
-            : null}
-          isVisionLoading={isVisionLoading}
-          onAddManuals={(files) => void addManuals(files)}
-          onAddPhoto={(file) => void analyzePhoto(file)}
-          onReindexDocument={(documentId, filename) => void reindexManual(documentId, filename)}
-          onDeleteDocument={(documentId, filename) => void deleteManual(documentId, filename)}
-          onToggleDocument={(documentId) => {
-            const nextDocumentIds = selectedDocumentIds.includes(documentId)
-              ? selectedDocumentIds.filter((id) => id !== documentId)
-              : [...selectedDocumentIds, documentId];
-            setSelectedDocumentIds(nextDocumentIds);
-            setCatalogCandidates([]);
-            setVisionSummary("");
-            if (sitePhotoFileRef.current) {
-              void analyzePhoto(sitePhotoFileRef.current, nextDocumentIds);
-            }
-          }}
-          onRemoveLegacyManual={(index) => {
-            setManuals((current) => current.filter((_, itemIndex) => itemIndex !== index));
-            setSelectedDocumentIds((current) => current.filter((_, itemIndex) => itemIndex !== index));
-            setCatalogCandidates([]);
-            setVisionSummary("");
-          }}
-          onRefreshDocuments={() => {
-            void refreshMyDocuments()
-              .catch(() => setManualStatus("문서 상태를 새로고치지 못했습니다."));
-          }}
-        />
-
-      <section className="chat-stage upgraded-chat" aria-labelledby="chat-title">
-        <div className="chat-heading"><div><span className="section-number">02</span><div><strong id="chat-title">SafeMaint AI 상담</strong><span>질문과 선택한 근거 문서를 바탕으로 답변합니다.</span></div></div><button type="button" onClick={() => setMessages([])}>대화 지우기</button></div>
-        <div className="chat-history">
-          {messages.length === 0 ? (
-            <div className="chat-empty"><span className="chat-empty-icon"><InterfaceIcon name="document" /></span><strong>무엇을 확인할까요?</strong><p>문서 내용, 부품 용도, 설치·점검 방법을 질문해 보세요.</p><small>예: “라이트커튼 설치 시 주의사항을 알려줘”</small></div>
-          ) : messages.map((message, index) => (
-            <div className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}>
-              <strong>{message.role === "user" ? "사용자" : "SafeMaint AI"}</strong>
-              {message.role === "ai" && message.retrievalMode && (
-                <span className={`retrieval-badge ${message.retrievalMode}`}>
-                  {message.generationMode === "openai" && `${message.model ?? "OpenAI"} + `}
-                  {message.generationMode === "qwen" && `${message.model ?? "Qwen"} + `}
-                  {message.sources?.length ? "BGE-M3 문서 근거 검색" : "검증 근거 없음"}
-                </span>
-              )}
-              {message.accidentClassification && (
-                <div className="team-qwen-result">
-                  <span>팀 Qwen LoRA 예측</span>
-                  <strong>{message.accidentClassification.label}</strong>
-                  <small>{message.accidentClassification.model} · {message.accidentClassification.adapter} · 실험용 분류</small>
-                </div>
-              )}
-              {message.role === "ai"
-                ? <ChatAnswerContent
-                    answer={message.text}
-                    structuredAnswer={message.structuredAnswer}
-                    sources={message.sources ?? []}
-                    warning={message.warning}
-                    onOpenDocument={openDocumentViewer}
-                  />
-                : <p className="chat-answer-text">{message.text}</p>}
-              {message.catalogCandidates && message.catalogCandidates.length > 0 && (
-                <div className="catalog-candidate-list">
-                  <strong>사진과 유사한 PDF 페이지 후보</strong>
-                  <div className="catalog-candidate-grid">
-                    {message.catalogCandidates.map((candidate, candidateIndex) => (
-                      <article className="catalog-candidate-card" key={`${candidate.document_id}-${candidate.page}-${candidate.image_index}`}>
-                        <SecureCandidateImage candidate={candidate} alt={`후보 ${candidateIndex + 1}`} />
-                        <div>
-                          <strong>후보 {candidateIndex + 1}{candidate.visual_category ? ` · ${candidate.visual_category}` : ""}</strong>
-                          <span>{candidate.filename} · {candidate.page}페이지</span>
-                          <span>유사도 {(candidate.similarity * 100).toFixed(1)}% · 신뢰 {candidate.confidence}</span>
-                          {candidate.visual_features && candidate.visual_features.length > 0 && <p>{candidate.visual_features.join(" · ")}</p>}
-                          {candidate.page_excerpt && <small>{candidate.page_excerpt}</small>}
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                  <p className="catalog-candidate-caution">벡터 유사도 후보이며 제품명·동일 모델·규격을 확정한 결과가 아닙니다. PDF 원문을 직접 확인해 주세요.</p>
-                </div>
-              )}
+      <details
+        className="mobile-section-drawer console-status-drawer mobile-tab-panel mobile-tab-safety"
+        id="mobile-workspace-panel-safety"
+        role="tabpanel"
+        aria-labelledby="mobile-workspace-tab-safety"
+        open={isStatusPanelOpen}
+        onToggle={(event) => setIsStatusPanelOpen(event.currentTarget.open)}
+      >
+        <summary>
+          <span className="mobile-section-heading"><strong>현재 안전 상태</strong></span>
+          <span className="mobile-section-summary-meta">
+            <small>{highestRisk === "high" ? "작업 중지" : highestRisk === "medium" ? "관리자 확인" : highestRisk === "low" ? "기본조치" : "상담 대기"}</small>
+            <span className="mobile-section-toggle">
+              {isStatusPanelOpen ? "접기" : "펼치기"}
+              <span aria-hidden="true">{isStatusPanelOpen ? "▴" : "▾"}</span>
+            </span>
+          </span>
+        </summary>
+        <div className="mobile-section-drawer-body">
+          <section className={`console-status-strip risk-${highestRisk}`} aria-label="현재 안전 작업 상태">
+            <div className="console-status-primary">
+              <span className="risk-symbol" aria-hidden="true"><span /></span>
+              <span><small>현재 판단</small><strong>{highestRisk === "high" ? "작업 중지 필요" : highestRisk === "medium" ? "관리자 확인 필요" : highestRisk === "low" ? "기본조치 확인" : "상담 대기"}</strong></span>
             </div>
-          ))}
-          {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>안전자료를 검색하고 AI 답변을 생성하고 있습니다…</div>}
+            <dl className="console-status-metrics">
+              <div><dt>예상 위험도</dt><dd>{!result ? "확인 불가" : highestRisk === "high" ? levelLabel.high : highestRisk === "medium" ? levelLabel.medium : levelLabel.low}</dd></div>
+              <div><dt>근거 상태</dt><dd>{result?.evidence_status === "connected" ? `${result.evidence.length}건 연결` : "연결되지 않음"}</dd></div>
+              <div><dt>선택 문서</dt><dd>{selectedDocumentIds.length ? `${selectedDocumentIds.length}개` : "선택되지 않음"}</dd></div>
+              <div><dt>현장 위치</dt><dd>{locationStatus || "확인 불가"}</dd></div>
+            </dl>
+            <div className="console-status-warning">
+              <strong>{result ? `위험요인 ${result.hazards.length}건 확인` : "분석 전"}</strong>
+              <span>{result?.disclaimer || "AI는 작업을 승인하지 않습니다. 표시된 근거와 현장 상태를 직접 확인하세요."}</span>
+            </div>
+          </section>
         </div>
-        <form className="chat-input-row" onSubmit={sendChat}>
-          <button type="button" className="icon-action" aria-label={isRecording ? "녹음 중지" : "음성 입력"} onClick={toggleVoiceInput} disabled={isTranscribing}><InterfaceIcon name={isRecording ? "stop" : "microphone"} /><span>음성</span></button>
-          <label className="icon-action file-icon" aria-label="사진 첨부"><InterfaceIcon name="image" /><span>사진</span><input type="file" accept="image/*" onChange={(event) => void analyzePhoto(event.target.files?.[0])} /></label>
-          <label className="icon-action file-icon" aria-label="문서 첨부"><InterfaceIcon name="paperclip" /><span>문서</span><input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
-          <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={isVisionLoading ? "사진 분석이 끝나면 질문을 보낼 수 있습니다." : "예: 이건 뭐야? 어디에 쓰이는 거야?"} disabled={isChatLoading} />
-          <button type="submit" disabled={isChatLoading || isVisionLoading || !question.trim()}>{isVisionLoading ? "사진 분석 중..." : isChatLoading ? "답변 생성 중..." : "전송"}</button>
-        </form>
-      </section>
+      </details>
+
+      <div className="field-console-grid">
+        <details
+          className="console-documents-panel mobile-tab-panel mobile-tab-evidence"
+          id="mobile-workspace-panel-evidence"
+          role="tabpanel"
+          aria-labelledby="mobile-workspace-tab-evidence"
+          open={isDocumentPanelOpen}
+          onToggle={(event) => setIsDocumentPanelOpen(event.currentTarget.open)}
+        >
+          <summary>
+            <span className="console-documents-heading">
+              <InterfaceIcon name="document" />
+              <strong>근거 자료</strong>
+            </span>
+            <span className="console-documents-summary-meta">
+              <small>{selectedDocumentIds.length}개 선택</small>
+              <span className="console-documents-toggle">
+                {isDocumentPanelOpen ? "접기" : "펼치기"}
+                <span aria-hidden="true">{isDocumentPanelOpen ? "▴" : "▾"}</span>
+              </span>
+            </span>
+          </summary>
+          <div className="console-document-body">
+            <ManualManager
+              manuals={manuals}
+              documents={userDocuments}
+              processingProgress={Object.values(processingProgress)}
+              selectedDocumentIds={selectedDocumentIds}
+              manualStatus={manualStatus}
+              sitePhotoName={sitePhotoName}
+              visionStatus={visionStatus}
+              visionElapsedLabel={visionElapsedMs !== null && visionStatus.startsWith("정밀 분석 완료")
+                ? formatElapsedTime(visionElapsedMs)
+                : null}
+              isVisionLoading={isVisionLoading}
+              onAddManuals={(files) => void addManuals(files)}
+              onAddPhoto={(file) => void analyzePhoto(file)}
+              onReindexDocument={(documentId, filename) => void reindexManual(documentId, filename)}
+              onDeleteDocument={(documentId, filename) => void deleteManual(documentId, filename)}
+              onToggleDocument={(documentId) => {
+                const nextDocumentIds = selectedDocumentIds.includes(documentId)
+                  ? selectedDocumentIds.filter((id) => id !== documentId)
+                  : [...selectedDocumentIds, documentId];
+                setSelectedDocumentIds(nextDocumentIds);
+                setCatalogCandidates([]);
+                setVisionSummary("");
+                if (sitePhotoFileRef.current) {
+                  void analyzePhoto(sitePhotoFileRef.current, nextDocumentIds);
+                }
+              }}
+              onRemoveLegacyManual={(index) => {
+                setManuals((current) => current.filter((_, itemIndex) => itemIndex !== index));
+                setSelectedDocumentIds((current) => current.filter((_, itemIndex) => itemIndex !== index));
+                setCatalogCandidates([]);
+                setVisionSummary("");
+              }}
+              onRefreshDocuments={() => {
+                void refreshMyDocuments()
+                  .catch(() => setManualStatus("문서 상태를 새로고치지 못했습니다."));
+              }}
+            />
+          </div>
+        </details>
+
+        <section
+          className="chat-stage upgraded-chat mobile-tab-panel mobile-tab-chat"
+          id="mobile-workspace-panel-chat"
+          role="tabpanel"
+          aria-labelledby="mobile-workspace-tab-chat chat-title"
+        >
+          <div className="chat-heading"><div><span className="section-number">02</span><div><strong id="chat-title">SafeMaint AI 상담</strong><span>질문과 선택한 근거 문서를 바탕으로 답변합니다.</span></div></div><button type="button" onClick={() => setMessages([])}>대화 지우기</button></div>
+          <div className="chat-history">
+            {messages.length === 0 ? (
+              <div className="chat-empty"><span className="chat-empty-icon"><InterfaceIcon name="document" /></span><strong>무엇을 확인할까요?</strong><p>문서 내용, 부품 용도, 설치·점검 방법을 질문해 보세요.</p><small>예: “라이트커튼 설치 시 주의사항을 알려줘”</small></div>
+            ) : messages.map((message, index) => (
+              <div className={`chat-bubble ${message.role}`} key={`${message.role}-${index}`}>
+                <strong>{message.role === "user" ? "사용자" : "SafeMaint AI"}</strong>
+                {message.role === "ai" && message.retrievalMode && (
+                  <span className={`retrieval-badge ${message.retrievalMode}`}>
+                    {message.generationMode === "openai" && `${message.model ?? "OpenAI"} + `}
+                    {message.generationMode === "qwen" && `${message.model ?? "Qwen"} + `}
+                    {message.sources?.length ? "BGE-M3 문서 근거 검색" : "검증 근거 없음"}
+                  </span>
+                )}
+                {message.accidentClassification && (
+                  <div className="team-qwen-result">
+                    <span>팀 Qwen LoRA 예측</span>
+                    <strong>{message.accidentClassification.label}</strong>
+                    <small>{message.accidentClassification.model} · {message.accidentClassification.adapter} · 실험용 분류</small>
+                  </div>
+                )}
+                {message.role === "ai"
+                  ? <ChatAnswerContent
+                      answer={message.text}
+                      structuredAnswer={message.structuredAnswer}
+                      sources={message.sources ?? []}
+                      warning={message.warning}
+                      onOpenDocument={openDocumentViewer}
+                    />
+                  : <p className="chat-answer-text">{message.text}</p>}
+                {message.catalogCandidates && message.catalogCandidates.length > 0 && (
+                  <div className="catalog-candidate-list">
+                    <strong>사진과 유사한 PDF 페이지 후보</strong>
+                    <div className="catalog-candidate-grid">
+                      {message.catalogCandidates.map((candidate, candidateIndex) => (
+                        <article className="catalog-candidate-card" key={`${candidate.document_id}-${candidate.page}-${candidate.image_index}`}>
+                          <SecureCandidateImage candidate={candidate} alt={`후보 ${candidateIndex + 1}`} />
+                          <div>
+                            <strong>후보 {candidateIndex + 1}{candidate.visual_category ? ` · ${candidate.visual_category}` : ""}</strong>
+                            <span>{candidate.filename} · {candidate.page}페이지</span>
+                            <span>유사도 {(candidate.similarity * 100).toFixed(1)}% · 신뢰 {candidate.confidence}</span>
+                            {candidate.visual_features && candidate.visual_features.length > 0 && <p>{candidate.visual_features.join(" · ")}</p>}
+                            {candidate.page_excerpt && <small>{candidate.page_excerpt}</small>}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                    <p className="catalog-candidate-caution">벡터 유사도 후보이며 제품명·동일 모델·규격을 확정한 결과가 아닙니다. PDF 원문을 직접 확인해 주세요.</p>
+                  </div>
+                )}
+              </div>
+            ))}
+            {isChatLoading && <div className="chat-bubble ai chat-loading"><strong>SafeMaint AI</strong>안전자료를 검색하고 AI 답변을 생성하고 있습니다…</div>}
+          </div>
+          <form className="chat-input-row" onSubmit={sendChat}>
+            <button type="button" className="icon-action" aria-label={isRecording ? "녹음 중지" : "음성 입력"} onClick={toggleVoiceInput} disabled={isTranscribing}><InterfaceIcon name={isRecording ? "stop" : "microphone"} /><span>음성</span></button>
+            <label className="icon-action file-icon" aria-label="사진 첨부"><InterfaceIcon name="image" /><span>사진</span><input type="file" accept="image/*" onChange={(event) => void analyzePhoto(event.target.files?.[0])} /></label>
+            <label className="icon-action file-icon" aria-label="문서 첨부"><InterfaceIcon name="paperclip" /><span>문서</span><input type="file" accept="application/pdf" multiple onChange={(event) => void addManuals(event.target.files)} /></label>
+            <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={isVisionLoading ? "사진 분석이 끝나면 질문을 보낼 수 있습니다." : "예: 이건 뭐야? 어디에 쓰이는 거야?"} disabled={isChatLoading} />
+            <button type="submit" disabled={isChatLoading || isVisionLoading || !question.trim()}>{isVisionLoading ? "사진 분석 중..." : isChatLoading ? "답변 생성 중..." : "전송"}</button>
+          </form>
+        </section>
+
+        <details
+          className="mobile-section-drawer console-safety-drawer mobile-tab-panel mobile-tab-safety"
+          open={isSafetyPanelOpen}
+          onToggle={(event) => setIsSafetyPanelOpen(event.currentTarget.open)}
+        >
+          <summary>
+            <span className="mobile-section-heading"><strong>현장 안전 확인</strong></span>
+            <span className="mobile-section-summary-meta">
+              <small>보호구·TBM</small>
+              <span className="mobile-section-toggle">
+                {isSafetyPanelOpen ? "접기" : "펼치기"}
+                <span aria-hidden="true">{isSafetyPanelOpen ? "▴" : "▾"}</span>
+              </span>
+            </span>
+          </summary>
+          <div className="mobile-section-drawer-body">
+            <aside className="console-safety-column" aria-label="현장 확인">
+              <article className="panel field-status-panel">
+                <div className="panel-heading compact-heading"><h2>현장 확인</h2><span className="panel-tag">실제 상태</span></div>
+                <dl>
+                  <div><dt>문서</dt><dd>{selectedDocumentIds.length ? `${selectedDocumentIds.length}개 선택` : "선택되지 않음"}</dd></div>
+                  <div><dt>근거</dt><dd>{result?.evidence_status === "connected" ? "연결됨" : "연결되지 않음"}</dd></div>
+                  <div><dt>분석</dt><dd>{result ? "결과 확인 필요" : "확인 불가"}</dd></div>
+                  <div><dt>위치</dt><dd>{locationStatus || "확인 불가"}</dd></div>
+                </dl>
+              </article>
+              <article className="panel ppe-panel">
+                <div className="panel-heading compact-heading"><h2>필수 보호구</h2><span className="panel-tag">현장 확인</span></div>
+                <div className="ppe-checklist">
+                  {ppeItems.map((item) => <label className={ppeChecks[item] ? "checked" : ""} key={item}>
+                    <input type="checkbox" checked={Boolean(ppeChecks[item])} onChange={(event) => setPpeChecks((current) => ({ ...current, [item]: event.target.checked }))} />
+                    <span className="ppe-check-icon" aria-hidden="true">✓</span><b>{item}</b><small>{ppeChecks[item] ? "착용 확인" : "확인 필요"}</small>
+                  </label>)}
+                </div>
+                <p className="muted-copy">작업과 화학물질 특성에 따라 추가 보호구가 필요할 수 있습니다.</p>
+              </article>
+              <article className="panel console-tbm-panel">
+                <div className="panel-heading compact-heading">
+                  <h2>TBM 현장 체크</h2>
+                  <span className="panel-tag muted">{latestChecklistMessage || result ? "분석 결과" : "대기"}</span>
+                </div>
+                {latestChecklistMessage ? (
+                  <ChatChecklist
+                    items={latestChecklistMessage.checklistItems ?? []}
+                    savedAssessmentId={latestChecklistMessage.savedAssessmentId ?? null}
+                    isSaving={savingChecklistIndex === latestChecklistMessageIndex}
+                    onSave={(checkedIndices) => void saveChatChecklist(
+                      latestChecklistMessageIndex,
+                      latestChecklistMessage,
+                      checkedIndices,
+                    )}
+                  />
+                ) : result ? (
+                  <TbmChecklist
+                    result={result}
+                    persistence={savedAssessmentId === result.assessment_id ? "saved" : "preview"}
+                    isSavingAssessment={isSavingAssessment}
+                    pendingItemIds={pendingChecklistItemIds}
+                    error={checklistError}
+                    onSave={() => void saveAssessment()}
+                    onToggle={(item, isCompleted) => void updateChecklistItem(item, isCompleted)}
+                  />
+                ) : (
+                  <div className="console-empty-state"><strong>분석 결과가 없습니다.</strong><span>AI 상담 후 생성된 TBM 항목을 이 영역에서 확인할 수 있습니다.</span></div>
+                )}
+              </article>
+            </aside>
+          </div>
+        </details>
       </div>
 
-      <details className="admin-tools-drawer">
-        <summary><span><InterfaceIcon name="document" /><strong>문서 승인 관리</strong></span><small>관리자 권한이 있는 경우에만 내용이 표시됩니다.</small></summary>
+      <details className="admin-tools-drawer mobile-tab-panel mobile-tab-more">
+        <summary>
+          <span><InterfaceIcon name="document" /><strong>문서 승인 관리</strong></span>
+          <small>관리자 권한이 있는 경우에만 내용이 표시됩니다.</small>
+        </summary>
         <DocumentReviewPanel
           apiBaseUrl={getApiBaseUrl()}
           token={getAccessToken()}
@@ -2521,7 +2743,7 @@ function WorkspaceScreen({
       </details>
 
       <details
-        className="admin-tools-drawer"
+        className="admin-tools-drawer mobile-tab-panel mobile-tab-more"
         ref={assessmentsDrawerRef}
         onToggle={(event) => {
           // 패널이 계속 마운트돼 있는 채라(채팅 유지 목적) 열 때마다 최신 상태를
@@ -2533,8 +2755,8 @@ function WorkspaceScreen({
         <AssessmentsPanel key={assessmentsOpenCount} />
       </details>
 
-      {result && <details className="assessment-drawer">
-        <summary><span><span className="section-number">03</span><strong>위험성평가 및 TBM</strong></span><small>저장된 분석 결과와 체크리스트를 검토합니다.</small></summary>
+      {result && <details className="assessment-drawer mobile-tab-panel mobile-tab-safety">
+        <summary><span><span className="section-number">03</span><strong>상세 위험성평가</strong></span><small>분석된 위험요인과 근거를 상세 검토합니다.</small></summary>
         <section className="search-progress">
           <div className="panel-heading compact-heading"><div><span className="section-number">진행</span><h2>분석 과정</h2></div><span className="status-pill">완료</span></div>
           <div className="progress-steps">{["질문 분석", "사고사례 검색", "법령·KOSHA 검색", "매뉴얼 검색", "재정렬", "결과 생성"].map((step) => <div className="done" key={step}><span>✓</span><strong>{step}</strong></div>)}</div>
@@ -2546,25 +2768,78 @@ function WorkspaceScreen({
               <button type="button" className={activeTab === "summary" ? "active" : ""} onClick={() => setActiveTab("summary")}>위험요인</button>
               <button type="button" className={activeTab === "accidents" ? "active" : ""} onClick={() => setActiveTab("accidents")}>유사 사고</button>
               <button type="button" className={activeTab === "evidence" ? "active" : ""} onClick={() => setActiveTab("evidence")}>근거 문서</button>
-              <button type="button" className={activeTab === "tbm" ? "active" : ""} onClick={() => setActiveTab("tbm")}>TBM 체크</button>
             </div>
-            {activeTab === "summary" ? <AssessmentResult result={result} mode="hazards" /> : activeTab === "accidents" ? <SimilarAccidentPanel result={result} /> : activeTab === "evidence" ? <EvidencePanel result={result} manuals={manuals} /> : (
-              <AssessmentResult
-                result={result}
-                mode="tbm"
-                persistence={savedAssessmentId === result.assessment_id ? "saved" : "preview"}
-                isSavingAssessment={isSavingAssessment}
-                pendingItemIds={pendingChecklistItemIds}
-                checklistError={checklistError}
-                onSave={() => void saveAssessment()}
-                onToggle={(item, isCompleted) => void updateChecklistItem(item, isCompleted)}
-              />
-            )}
+            {activeTab === "summary"
+              ? <AssessmentResult result={result} mode="hazards" />
+              : activeTab === "accidents"
+                ? <SimilarAccidentPanel result={result} />
+                : <EvidencePanel result={result} manuals={manuals} />}
           </section>
         </div>
       </details>}
 
-      <footer className="safety-footer">본 결과는 작업 전 검토를 위한 초안이며, 현장 안전관리자의 최종 확인과 승인 없이 작업을 시작할 수 없습니다.</footer>
+      <footer className="safety-footer mobile-tab-panel mobile-tab-safety">본 결과는 작업 전 검토를 위한 초안이며, 현장 안전관리자의 최종 확인과 승인 없이 작업을 시작할 수 없습니다.</footer>
+
+      <nav className="mobile-workspace-tabs" role="tablist" aria-label="모바일 작업 화면">
+        <button
+          type="button"
+          id="mobile-workspace-tab-chat"
+          role="tab"
+          aria-selected={mobileWorkspaceTab === "chat"}
+          aria-controls="mobile-workspace-panel-chat"
+          className={mobileWorkspaceTab === "chat" ? "active" : ""}
+          onClick={() => selectMobileWorkspaceTab("chat")}
+        >
+          <InterfaceIcon name="speaker" />
+          <span>AI 상담</span>
+        </button>
+        <button
+          type="button"
+          id="mobile-workspace-tab-evidence"
+          role="tab"
+          aria-selected={mobileWorkspaceTab === "evidence"}
+          aria-controls="mobile-workspace-panel-evidence"
+          className={mobileWorkspaceTab === "evidence" ? "active" : ""}
+          onClick={() => selectMobileWorkspaceTab("evidence")}
+        >
+          <InterfaceIcon name="document" />
+          <span>근거 자료</span>
+          {selectedDocumentIds.length > 0 && (
+            <small className="mobile-tab-badge" aria-label={`선택 문서 ${selectedDocumentIds.length}개`}>
+              {selectedDocumentIds.length}
+            </small>
+          )}
+        </button>
+        <button
+          type="button"
+          id="mobile-workspace-tab-safety"
+          role="tab"
+          aria-selected={mobileWorkspaceTab === "safety"}
+          aria-controls="mobile-workspace-panel-safety"
+          className={mobileWorkspaceTab === "safety" ? "active" : ""}
+          onClick={() => selectMobileWorkspaceTab("safety")}
+        >
+          <InterfaceIcon name="bell" />
+          <span>안전 확인</span>
+          {result && result.hazards.length > 0 && (
+            <small className="mobile-tab-badge" aria-label={`위험요인 ${result.hazards.length}건`}>
+              {result.hazards.length}
+            </small>
+          )}
+        </button>
+        <button
+          type="button"
+          id="mobile-workspace-tab-more"
+          role="tab"
+          aria-selected={mobileWorkspaceTab === "more"}
+          aria-controls="mobile-workspace-panel-more"
+          className={mobileWorkspaceTab === "more" ? "active" : ""}
+          onClick={() => selectMobileWorkspaceTab("more")}
+        >
+          <InterfaceIcon name="settings" />
+          <span>더보기</span>
+        </button>
+      </nav>
       </div>
       {documentViewerTarget && (
         <DocumentViewerModal target={documentViewerTarget} onClose={() => setDocumentViewerTarget(null)} />
