@@ -15,6 +15,7 @@ import DocumentReviewPanel from "@/components/DocumentReviewPanel";
 import DocumentViewerModal, { type DocumentViewerTarget } from "@/components/DocumentViewerModal";
 import InterfaceIcon from "@/components/InterfaceIcon";
 import ManualManager from "@/components/ManualManager";
+import NotificationCenter from "@/components/NotificationCenter";
 import { ChatChecklist } from "@/components/StructuredChatAnswer";
 import TbmChecklist from "@/components/TbmChecklist";
 import WorkspaceHeader from "@/components/WorkspaceHeader";
@@ -2280,6 +2281,14 @@ function WorkspaceScreen({
           setManualStatus("매뉴얼 선택을 초기화했습니다.");
         }}
         onLogout={onLogout}
+        notificationCenter={(
+          <NotificationCenter
+            apiBaseUrl={getApiBaseUrl()}
+            token={getAccessToken()}
+            onUnauthorized={onLogout}
+            onDocumentApproved={async () => refreshMyDocuments()}
+          />
+        )}
       />
 
       <div

@@ -1,5 +1,7 @@
 "use client";
 
+import type { ReactNode } from "react";
+
 import InterfaceIcon from "@/components/InterfaceIcon";
 
 type FontSize = "small" | "medium" | "large";
@@ -24,6 +26,7 @@ type Props = {
   onClearConversation: () => void;
   onClearManuals: () => void;
   onLogout: () => void;
+  notificationCenter?: ReactNode;
 };
 
 export default function WorkspaceHeader({
@@ -46,6 +49,7 @@ export default function WorkspaceHeader({
   onClearConversation,
   onClearManuals,
   onLogout,
+  notificationCenter,
 }: Props) {
   return (
     <header className="workspace-header">
@@ -80,6 +84,7 @@ export default function WorkspaceHeader({
         <button type="button" className="header-action desktop-header-action" onClick={onAssessments}>
           <InterfaceIcon name="document" /><span>체크리스트</span>
         </button>
+        {notificationCenter}
         <details className="settings-control">
           <summary className="header-action" aria-label="환경 설정"><InterfaceIcon name="settings" /><span>설정</span></summary>
           <aside className="settings-popover">

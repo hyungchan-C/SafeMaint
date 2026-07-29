@@ -1511,8 +1511,28 @@ a {
 
 .notification-button { position: relative; }
 .notification-badge { align-items: center; background: var(--danger); border: 2px solid #fff; border-radius: 999px; color: #fff; display: flex; font-size: 10px; height: 20px; justify-content: center; line-height: 1; min-width: 20px; padding: 0 4px; position: absolute; right: -5px; top: -6px; }
-.notification-backdrop { background: rgba(9, 28, 40, .48); inset: 0; position: fixed; z-index: 1000; }
-.notification-drawer { background: #fff; box-shadow: -18px 0 50px rgba(9, 28, 40, .22); display: flex; flex-direction: column; height: 100%; margin-left: auto; max-width: 100%; overflow: hidden; width: 430px; }
+.notification-backdrop {
+  align-items: flex-start;
+  background: rgba(9, 28, 40, .42);
+  display: flex;
+  inset: 0;
+  justify-content: flex-end;
+  padding: 84px 20px 20px;
+  position: fixed;
+  z-index: 1200;
+}
+.notification-drawer {
+  background: #fff;
+  border: 1px solid rgba(193, 211, 217, .9);
+  border-radius: 17px;
+  box-shadow: 0 24px 70px rgba(9, 28, 40, .26);
+  display: flex;
+  flex-direction: column;
+  height: min(720px, calc(100dvh - 104px));
+  max-width: 100%;
+  overflow: hidden;
+  width: 430px;
+}
 .notification-drawer > header,
 .approval-review-dialog > header { align-items: flex-start; border-bottom: 1px solid var(--line); display: flex; gap: 14px; justify-content: space-between; padding: 20px; }
 .notification-drawer > header > div,
@@ -1949,10 +1969,17 @@ a {
   .gps-drawer > :not(summary) { margin-left: 9px; margin-right: 9px; }
   .progress-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
-  .notification-backdrop,
+  .notification-backdrop {
+    padding: 72px 8px calc(76px + env(safe-area-inset-bottom));
+  }
   .approval-review-backdrop,
   .document-viewer-backdrop { padding: 0; }
-  .notification-drawer,
+  .notification-drawer {
+    border-radius: 14px;
+    height: calc(100dvh - 148px - env(safe-area-inset-bottom));
+    max-height: calc(100dvh - 148px - env(safe-area-inset-bottom));
+    width: 100%;
+  }
   .approval-review-dialog,
   .document-viewer-dialog {
     border-radius: 0;
