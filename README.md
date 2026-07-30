@@ -857,9 +857,19 @@ docker compose `
 `ollama run qwen3.5:9b`만 실행한 결과는 팀 LoRA 모델이 아니므로 팀 분류 검증으로
 간주하면 안 된다.
 
-## 하이브리드 RAG와 임시 GPT-4o-mini 설정
+## 하이브리드 RAG와 Qwen3.5-9B 답변 생성
 
-현재 질의 흐름은 `상황 분석 → 키워드·BGE-M3 후보 검색 → 주제 불일치 제거 → rerank → 근거 답변` 순서입니다. 상황 분석기와 답변 생성기는 같은 OpenAI 호환 provider 인터페이스를 사용합니다. 팀의 Qwen3 서버가 준비되기 전에는 다음처럼 GPT-4o-mini를 사용합니다.
+현재 질의 흐름은 `상황 분석 → 키워드·BGE-M3 후보 검색 → 주제 불일치 제거 → rerank → 근거 답변` 순서입니다. 답변 생성·질문의도 분류·사고유형 분류는 `QWEN_ENABLED`/`QWEN_SERVICE_URL`로 연결하는 팀 자체 파인튜닝 Qwen3.5-9B(+LoRA) 서비스(`ai/qwen_service`)가 담당합니다. 사내 GPU 서버가 준비되기 전까지는 `QWEN_PROVIDER=colab`로 Google Colab 노트북을 ngrok 터널로 서빙합니다. ngrok 주소는 Colab 세션을 재시작할 때마다 바뀌므로 그때그때 `.env`의 `QWEN_SERVICE_URL`을 갱신해야 하며, 사내 GPU 서버로 옮길 때도 애플리케이션 코드를 수정하지 않고 이 값만 새 엔드포인트로 바꾸면 됩니다.
+
+```dotenv
+QWEN_ENABLED=true
+QWEN_PROVIDER=colab
+QWEN_SERVICE_URL=https://현재-실행-중인-colab-ngrok-주소
+QWEN_API_KEY=팀이-공유한-토큰
+QWEN_ALLOW_COMPANY_CONTEXT=true
+```
+
+이와 별도로 `ALLOW_EXTERNAL_LLM`/`LLM_BASE_URL` 환경변수로 켜는 범용 OpenAI 호환 provider 경로도 코드에 남아 있습니다. Qwen 서비스 자체를 아예 쓸 수 없는 상황을 위한 대안이며, 예를 들어 GPT-4o-mini는 다음처럼 켭니다. 기본값은 `ALLOW_EXTERNAL_LLM=false`이고 Qwen 경로가 우선합니다.
 
 ```dotenv
 OPENAI_API_KEY=각자_발급한_키
@@ -871,7 +881,7 @@ LLM_ANALYZER_MAX_OUTPUT_TOKENS=500
 OPENAI_MAX_OUTPUT_TOKENS=1200
 ```
 
-Qwen3가 OpenAI 호환 API로 준비되면 애플리케이션 코드를 수정하지 않고 `LLM_BASE_URL`, `LLM_ANALYZER_MODEL`, `LLM_ANSWER_MODEL`만 변경합니다. 모델 분석 JSON이 잘못되거나 시간 초과가 발생하면 입력값 기반 검색어로 대체합니다. 검색 근거가 없으면 모델이 답을 추측하지 않고 “근거 없음” 응답을 반환합니다. 회사 범위 문서가 결과에 포함된 경우에는 외부 모델 답변 생성을 항상 차단합니다.
+Qwen과 OpenAI 호환 provider 중 어느 쪽을 쓰든, 모델 분석 JSON이 잘못되거나 시간 초과가 발생하면 입력값 기반 검색어로 대체합니다. 검색 근거가 없으면 모델이 답을 추측하지 않고 “근거 없음” 응답을 반환합니다. 회사 범위 문서가 결과에 포함된 경우에는 외부 모델 답변 생성을 항상 차단합니다. Qwen 서비스가 응답하지 않거나 응답 검증에 실패하면 채팅 답변은 검색 근거를 정해진 구조에 맞춰 조합하는 규칙 기반 템플릿 답변으로 자동 대체됩니다.
 
 익명 요청의 검색 범위는 항상 공개 문서뿐입니다. 로그인 요청은 세션 사용자와 DB 권한·사업장 배정을 기준으로 서버가 범위를 생성합니다. 화면에서 선택한 매뉴얼은 파일명이 아니라 아래 UUID 필드로 전달해야 합니다.
 
