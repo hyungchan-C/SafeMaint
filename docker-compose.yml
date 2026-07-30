@@ -1,44 +1,263 @@
+name: safemaint
+
+x-backend-service: &backend-service
+  image: safemaint-backend:0.2.0
+  build:
+    context: ./backend
+  environment:
+    APP_ENV: ${APP_ENV:-production}
+    CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting SafeMaint}
+    SESSION_EXPIRE_MINUTES: ${SESSION_EXPIRE_MINUTES:-60}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    LLM_BASE_URL: ${LLM_BASE_URL:-}
+    LLM_PROVIDER_SCOPE: ${LLM_PROVIDER_SCOPE:-external}
+    LLM_LOCAL_HOSTS: ${LLM_LOCAL_HOSTS:-localhost,127.0.0.1,::1,host.docker.internal,ollama}
+    LLM_ANALYZER_MODEL: ${LLM_ANALYZER_MODEL:-gpt-4o-mini}
+    LLM_ANSWER_MODEL: ${LLM_ANSWER_MODEL:-gpt-4o-mini}
+    LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-none}
+    LLM_ANALYZER_MAX_OUTPUT_TOKENS: ${LLM_ANALYZER_MAX_OUTPUT_TOKENS:-500}
+    OPENAI_TIMEOUT_SECONDS: ${OPENAI_TIMEOUT_SECONDS:-30}
+    OPENAI_MAX_OUTPUT_TOKENS: ${OPENAI_MAX_OUTPUT_TOKENS:-1200}
+    ALLOW_EXTERNAL_LLM: ${ALLOW_EXTERNAL_LLM:-false}
+    QWEN_ENABLED: ${QWEN_ENABLED:-false}
+    QWEN_PROVIDER: ${QWEN_PROVIDER:-local}
+    QWEN_SERVICE_URL: ${QWEN_SERVICE_URL:-http://qwen:8020}
+    QWEN_API_KEY: ${QWEN_API_KEY:-}
+    QWEN_TIMEOUT_SECONDS: ${QWEN_TIMEOUT_SECONDS:-600}
+    QWEN_ALLOW_COMPANY_CONTEXT: ${QWEN_ALLOW_COMPANY_CONTEXT:-false}
+    QWEN_INTENT_CLASSIFY_ENABLED: ${QWEN_INTENT_CLASSIFY_ENABLED:-true}
+    QWEN_ACCIDENT_CLASSIFY_ENABLED: ${QWEN_ACCIDENT_CLASSIFY_ENABLED:-true}
+    QUESTION_INTENT_CONFIDENCE_THRESHOLD: ${QUESTION_INTENT_CONFIDENCE_THRESHOLD:-0.8}
+    QWEN_SOURCE_EXCERPT_CHARS: ${QWEN_SOURCE_EXCERPT_CHARS:-180}
+    QWEN_DOCUMENT_SOURCE_LIMIT: ${QWEN_DOCUMENT_SOURCE_LIMIT:-2}
+    QWEN_COMPONENT_SOURCE_LIMIT: ${QWEN_COMPONENT_SOURCE_LIMIT:-2}
+    QWEN_MAINTENANCE_SOURCE_LIMIT: ${QWEN_MAINTENANCE_SOURCE_LIMIT:-5}
+    QWEN_ANSWER_LOAD_IN_4BIT: ${QWEN_ANSWER_LOAD_IN_4BIT:-false}
+    QWEN_CLASSIFIER_ENABLED: ${QWEN_CLASSIFIER_ENABLED:-false}
+    QWEN_CLASSIFIER_URL: ${QWEN_CLASSIFIER_URL:-}
+    QWEN_CLASSIFIER_TIMEOUT_SECONDS: ${QWEN_CLASSIFIER_TIMEOUT_SECONDS:-300}
+    DOCUMENT_STORAGE_DIR: /data/documents
+    # Zero explicitly disables the application-level PDF size limit.
+    DOCUMENT_MAX_UPLOAD_BYTES: ${DOCUMENT_MAX_UPLOAD_BYTES:-209715200}
+    PACKAGE_STORAGE_DIR: /data/packages
+    PUBLIC_PACKAGE_PUBLIC_KEY: ${PUBLIC_PACKAGE_PUBLIC_KEY:-}
+    PUBLIC_PACKAGE_PRIVATE_KEY: ${PUBLIC_PACKAGE_PRIVATE_KEY:-}
+    PUBLIC_PACKAGE_MAX_BYTES: ${PUBLIC_PACKAGE_MAX_BYTES:-1073741824}
+    RAG_MODEL: ${RAG_MODEL:-BAAI/bge-m3}
+    RAG_EMBEDDING_DIMENSION: ${RAG_EMBEDDING_DIMENSION:-1024}
+    RAG_SERVICE_URL: http://rag:8010
+    TTS_VOICE: ${TTS_VOICE:-F1}
+    TTS_LANGUAGE: ${TTS_LANGUAGE:-ko}
+    TTS_STEPS: ${TTS_STEPS:-8}
+    TTS_NUM_THREADS: ${TTS_NUM_THREADS:-4}
+    STT_MODEL: ${STT_MODEL:-small}
+    STT_LANGUAGE: ${STT_LANGUAGE:-ko}
+    STT_DEVICE: ${STT_DEVICE:-cpu}
+    STT_COMPUTE_TYPE: ${STT_COMPUTE_TYPE:-int8}
+    HF_HOME: /root/.cache/huggingface
+    XDG_CACHE_HOME: /root/.cache
+  volumes:
+    - safemaint_model_cache:/root/.cache
+    - safemaint_documents:/data/documents
+    - safemaint_packages:/data/packages
+
 services:
   db:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.2-pg16-bookworm
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-safemaint}
       POSTGRES_USER: ${POSTGRES_USER:-safemaint}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before starting SafeMaint}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - safemaint_postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init/001-enable-vector.sql:/docker-entrypoint-initdb.d/001-enable-vector.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-safemaint} -d ${POSTGRES_DB:-safemaint}"]
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-safemaint} -d ${POSTGRES_DB:-safemaint}
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
+      start_period: 10s
 
-  backend:
-    build:
-      context: ./backend
-    environment:
-      APP_ENV: ${APP_ENV:-development}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://safemaint:change-me@db:5432/safemaint}
-    ports:
-      - "8000:8000"
+  migrate:
+    <<: *backend-service
+    command: ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"]
+    restart: "no"
     depends_on:
       db:
         condition: service_healthy
 
+  seed:
+    <<: *backend-service
+    command: ["python", "-m", "app.db.seed"]
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  backend:
+    <<: *backend-service
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_BIND_ADDRESS:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  rag:
+    image: safemaint-rag:0.3.0
+    build:
+      context: .
+      dockerfile: ai/Dockerfile.rag
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting SafeMaint}
+      RAG_MODEL: ${RAG_MODEL:-BAAI/bge-m3}
+      RAG_MODEL_CACHE_DIR: /models
+      RAG_DEVICE: ${RAG_DEVICE:-cpu}
+      RAG_TOP_K: ${RAG_TOP_K:-5}
+      RAG_DOCUMENT_TOP_K: ${RAG_DOCUMENT_TOP_K:-6}
+      RAG_DOCUMENT_NEIGHBOR_WINDOW: ${RAG_DOCUMENT_NEIGHBOR_WINDOW:-1}
+      RAG_COMPONENT_TOP_K: ${RAG_COMPONENT_TOP_K:-5}
+      RAG_MAINTENANCE_TOP_K: ${RAG_MAINTENANCE_TOP_K:-16}
+      RAG_CANDIDATE_K: ${RAG_CANDIDATE_K:-30}
+      RAG_MAX_CHUNKS_PER_DOCUMENT: ${RAG_MAX_CHUNKS_PER_DOCUMENT:-2}
+      RAG_MIN_SIMILARITY: ${RAG_MIN_SIMILARITY:-0.25}
+      RAG_MIN_KEYWORD_SCORE: ${RAG_MIN_KEYWORD_SCORE:-0.08}
+      RAG_SOURCE_TYPES: ${RAG_SOURCE_TYPES:-}
+      RAG_MAINTENANCE_MANUAL_QUOTA: ${RAG_MAINTENANCE_MANUAL_QUOTA:-4}
+      RAG_MAINTENANCE_COMPANY_POLICY_QUOTA: ${RAG_MAINTENANCE_COMPANY_POLICY_QUOTA:-2}
+      RAG_MAINTENANCE_LAW_QUOTA: ${RAG_MAINTENANCE_LAW_QUOTA:-2}
+      RAG_MAINTENANCE_GUIDE_QUOTA: ${RAG_MAINTENANCE_GUIDE_QUOTA:-3}
+      RAG_MAINTENANCE_INCIDENT_QUOTA: ${RAG_MAINTENANCE_INCIDENT_QUOTA:-2}
+    volumes:
+      - safemaint_model_cache:/models
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8010/health/live', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  worker:
+    image: safemaint-rag:0.3.0
+    build:
+      context: .
+      dockerfile: ai/Dockerfile.rag
+    command: ["python", "-m", "rag_service.worker"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env before starting SafeMaint}
+      RAG_MODEL: ${RAG_MODEL:-BAAI/bge-m3}
+      RAG_MODEL_CACHE_DIR: /models
+      RAG_DEVICE: ${RAG_DEVICE:-cpu}
+      DOCUMENT_WORKER_POLL_SECONDS: ${DOCUMENT_WORKER_POLL_SECONDS:-2}
+      DOCUMENT_WORKER_CHUNK_CHARACTERS: ${DOCUMENT_WORKER_CHUNK_CHARACTERS:-1200}
+      DOCUMENT_WORKER_CHUNK_OVERLAP: ${DOCUMENT_WORKER_CHUNK_OVERLAP:-150}
+      DOCUMENT_WORKER_EMBEDDING_BATCH_SIZE: ${DOCUMENT_WORKER_EMBEDDING_BATCH_SIZE:-16}
+      DOCUMENT_WORKER_MAX_ATTEMPTS: ${DOCUMENT_WORKER_MAX_ATTEMPTS:-3}
+      DOCUMENT_WORKER_RETRY_DELAY_SECONDS: ${DOCUMENT_WORKER_RETRY_DELAY_SECONDS:-10}
+      DOCUMENT_WORKER_STALE_AFTER_SECONDS: ${DOCUMENT_WORKER_STALE_AFTER_SECONDS:-1800}
+      DOCUMENT_WORKER_HEARTBEAT_SECONDS: ${DOCUMENT_WORKER_HEARTBEAT_SECONDS:-30}
+      QWEN_ENABLED: ${QWEN_ENABLED:-false}
+      QWEN_SERVICE_URL: ${QWEN_SERVICE_URL:-http://qwen:8020}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      QWEN_TIMEOUT_SECONDS: ${QWEN_TIMEOUT_SECONDS:-600}
+      DOCUMENT_PROFILE_EXTRACTION_ENABLED: ${DOCUMENT_PROFILE_EXTRACTION_ENABLED:-}
+      DOCLING_REQUIRED: ${DOCLING_REQUIRED:-true}
+      DOCLING_ALLOW_PYMUPDF_FALLBACK: ${DOCLING_ALLOW_PYMUPDF_FALLBACK:-true}
+      DOCLING_OFFLINE: ${DOCLING_OFFLINE:-false}
+      DOCLING_ARTIFACTS_PATH: ${DOCLING_ARTIFACTS_PATH:-/models/docling}
+      # Zero means unlimited; finite defaults protect ordinary installations.
+      DOCLING_MAX_FILE_BYTES: ${DOCLING_MAX_FILE_BYTES:-209715200}
+      DOCLING_MAX_PAGES: ${DOCLING_MAX_PAGES:-500}
+      DOCLING_NUM_THREADS: ${DOCLING_NUM_THREADS:-4}
+      DOCLING_ACCELERATOR_DEVICE: ${DOCLING_ACCELERATOR_DEVICE:-auto}
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
+    volumes:
+      - safemaint_model_cache:/models
+      - safemaint_documents:/data/documents
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
+  qwen:
+    image: safemaint-qwen:0.1.0
+    build:
+      context: .
+      dockerfile: ai/Dockerfile.qwen
+    profiles: ["qwen-local"]
+    restart: unless-stopped
+    environment:
+      QWEN_BASE_MODEL: ${QWEN_BASE_MODEL:-Qwen/Qwen3.5-9B}
+      QWEN_LORA_ADAPTER: ${QWEN_LORA_ADAPTER:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      QWEN_DEVICE: ${QWEN_DEVICE:-cuda}
+      QWEN_LOAD_IN_4BIT: ${QWEN_LOAD_IN_4BIT:-true}
+      QWEN_ANSWER_LOAD_IN_4BIT: ${QWEN_ANSWER_LOAD_IN_4BIT:-false}
+      QWEN_MAX_NEW_TOKENS: ${QWEN_MAX_NEW_TOKENS:-768}
+      QWEN_CLASSIFY_MAX_NEW_TOKENS: ${QWEN_CLASSIFY_MAX_NEW_TOKENS:-64}
+      HF_HOME: /models
+      TRANSFORMERS_CACHE: /models
+    volumes:
+      - safemaint_model_cache:/models
+    ports:
+      - "${QWEN_BIND_ADDRESS:-127.0.0.1}:${QWEN_PORT:-8020}:8020"
+    gpus: all
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8020/health/live', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   frontend:
+    image: safemaint-frontend:0.2.0
     build:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     ports:
-      - "3000:3000"
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PORT:-3000}:3000"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
-  postgres_data:
+  safemaint_postgres_data:
+    name: ${POSTGRES_VOLUME_NAME:-safemaint_postgres_data}
+  safemaint_model_cache:
+    name: ${MODEL_CACHE_VOLUME_NAME:-safemaint_model_cache}
+  safemaint_documents:
+    name: ${DOCUMENT_VOLUME_NAME:-safemaint_documents}
+  safemaint_packages:
+    name: ${PACKAGE_VOLUME_NAME:-safemaint_packages}

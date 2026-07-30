@@ -1,0 +1,43 @@
+services:
+  e2e:
+    image: safemaint-rag-e2e:test
+    build:
+      context: .
+      dockerfile: ai/Dockerfile.rag
+      target: test
+    command:
+      - python
+      - -m
+      - pytest
+      - -q
+      - -x
+      - /app/ai/tests/test_pdf_rag_llm_e2e.py
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set an isolated _test DATABASE_URL}
+      BACKEND_E2E_URL: http://backend:8000
+      RAG_E2E_URL: http://rag:8010
+      DOCUMENT_STORAGE_DIR: /data/documents
+      RUN_DB_INTEGRATION: "1"
+      ALLOW_TEST_DB_MUTATION: "1"
+      RUN_RAG_E2E: ${RUN_RAG_E2E:-1}
+      RUN_EXTERNAL_LLM_E2E: ${RUN_EXTERNAL_LLM_E2E:-0}
+      ALLOW_EXTERNAL_LLM: ${ALLOW_EXTERNAL_LLM:-false}
+      E2E_USER_PASSWORD: ${E2E_USER_PASSWORD:?Set an ephemeral E2E user password}
+      E2E_RUN_ID: ${E2E_RUN_ID:?Set a non-secret E2E run identifier}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_ANSWER_MODEL: ${LLM_ANSWER_MODEL:-gpt-4o-mini}
+      RAG_MODEL: ${RAG_MODEL:-BAAI/bge-m3}
+      RAG_MODEL_CACHE_DIR: /models
+      RAG_DEVICE: ${RAG_DEVICE:-cpu}
+      RAG_E2E_TIMEOUT_SECONDS: ${RAG_E2E_TIMEOUT_SECONDS:-1200}
+    volumes:
+      - safemaint_model_cache:/models
+      - safemaint_documents:/data/documents
+    depends_on:
+      backend:
+        condition: service_healthy
+      rag:
+        condition: service_started
+      worker:
+        condition: service_started
+    profiles: ["e2e"]

@@ -1,0 +1,11 @@
+# Compatibility overlay. The common Compose file owns the RAG/worker services;
+# this file only keeps the former extended backend timeout and never publishes
+# the internal RAG port to the host.
+services:
+  backend:
+    environment:
+      RAG_SERVICE_URL: http://rag:8010
+      RAG_REQUEST_TIMEOUT_SECONDS: ${RAG_REQUEST_TIMEOUT_SECONDS:-180}
+    depends_on:
+      rag:
+        condition: service_healthy

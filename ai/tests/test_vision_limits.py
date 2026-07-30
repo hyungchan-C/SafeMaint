@@ -1,0 +1,320 @@
+from io import BytesIO
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException, UploadFile
+from PIL import Image
+from starlette.datastructures import Headers
+
+from vision_service import main as vision_main
+from vision_service.catalog_matcher import CatalogMatchSignals
+from vision_service.config import _limit_env
+from vision_service.main import (
+    _read_limited,
+    _stage_pdf_upload,
+    _validate_image,
+    match_catalog,
+)
+from vision_service.schemas import CatalogAnalysisResponse, CatalogCandidate
+
+
+def _png(width: int = 4, height: int = 4) -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (width, height), "white").save(output, format="PNG")
+    return output.getvalue()
+
+
+def test_internal_service_rejects_oversized_upload() -> None:
+    upload = UploadFile(filename="large.png", file=BytesIO(b"x" * 6))
+    with pytest.raises(HTTPException) as error:
+        _read_limited(upload, 5)
+    assert error.value.status_code == 413
+
+
+def test_pdf_upload_streams_without_limit(tmp_path: Path) -> None:
+    content = b"%PDF-" + (b"x" * 1024)
+    upload = UploadFile(filename="large.pdf", file=BytesIO(content))
+
+    path = _stage_pdf_upload(upload, None)
+    try:
+        assert path.read_bytes() == content
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_pdf_upload_keeps_positive_limit() -> None:
+    upload = UploadFile(filename="large.pdf", file=BytesIO(b"%PDF-" + b"x" * 6))
+
+    with pytest.raises(HTTPException) as error:
+        _stage_pdf_upload(upload, 10)
+
+    assert error.value.status_code == 413
+
+
+def test_pdf_upload_rejects_empty_and_spoofed_files() -> None:
+    with pytest.raises(HTTPException) as empty_error:
+        _stage_pdf_upload(UploadFile(filename="empty.pdf", file=BytesIO(b"")), None)
+    assert empty_error.value.status_code == 422
+
+    with pytest.raises(HTTPException) as header_error:
+        _stage_pdf_upload(
+            UploadFile(filename="fake.pdf", file=BytesIO(b"not-a-pdf")),
+            None,
+        )
+    assert header_error.value.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "expected"),
+    [
+        ("VISION_PDF_MAX_UPLOAD_BYTES", "0", None),
+        ("VISION_PDF_MAX_PAGES", "0", None),
+        ("VISION_CATALOG_MAX_IMAGES", "0", None),
+        ("VISION_PDF_MAX_PAGES", "500", 500),
+    ],
+)
+def test_vision_limit_env_supports_zero_as_unlimited(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    expected: int | None,
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    assert _limit_env(name, 2000) == expected
+
+
+def test_vision_limit_env_rejects_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VISION_CATALOG_MAX_IMAGES", "-1")
+
+    with pytest.raises(ValueError, match="zero or greater"):
+        _limit_env("VISION_CATALOG_MAX_IMAGES", 12000)
+
+
+def test_internal_service_validates_image_bytes() -> None:
+    _validate_image(_png())
+
+    with pytest.raises(HTTPException) as error:
+        _validate_image(b"not-an-image")
+    assert error.value.status_code == 422
+
+
+def test_internal_service_rejects_non_list_catalog_ids() -> None:
+    upload = UploadFile(
+        filename="photo.png",
+        file=BytesIO(_png()),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    with pytest.raises(HTTPException) as error:
+        match_catalog(upload, '{"unexpected": "value"}')
+    assert error.value.status_code == 422
+
+
+def test_fast_mode_skips_heavy_analyzer(monkeypatch: pytest.MonkeyPatch) -> None:
+    upload = UploadFile(
+        filename="photo.png",
+        file=BytesIO(_png()),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    monkeypatch.setattr(
+        vision_main.matcher,
+        "match_with_signals",
+        lambda *_args, **_kwargs: CatalogMatchSignals([], False, 0.0, 0.0),
+    )
+    monkeypatch.setattr(
+        vision_main.analyzer,
+        "analyze",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("heavy analyzer called")),
+    )
+
+    response = match_catalog(upload, "[]", "fast")
+
+    assert response.catalog_candidates == []
+    assert response.models == [vision_main.settings.embedding_model]
+
+
+def _candidate(similarity: float) -> CatalogCandidate:
+    return CatalogCandidate(
+        catalog_id="a" * 20,
+        filename="catalog.pdf",
+        page=1,
+        image_index=1,
+        similarity=similarity,
+        confidence="high",
+        note="shape candidate",
+    )
+
+
+def test_deep_mode_skips_qwen_for_confident_siglip_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upload = UploadFile(
+        filename="photo.png",
+        file=BytesIO(_png()),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    candidate = _candidate(0.95).model_copy(
+        update={"visual_category": "unverified class", "visual_features": ["guess"]}
+    )
+    monkeypatch.setattr(
+        vision_main.matcher,
+        "match_with_signals",
+        lambda *_args, **_kwargs: CatalogMatchSignals([candidate], False, 0.95, 0.95),
+    )
+    monkeypatch.setattr(
+        vision_main.analyzer,
+        "analyze",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Qwen/OCR called")),
+    )
+
+    response = match_catalog(upload, '["aaaaaaaaaaaaaaaaaaaa"]', "deep")
+
+    assert len(response.catalog_candidates) == 1
+    assert response.catalog_candidates[0].visual_category is None
+    assert response.catalog_candidates[0].visual_features == []
+    assert response.models == [vision_main.settings.embedding_model]
+
+
+def test_deep_mode_runs_ocr_only_when_siglip_detects_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upload = UploadFile(
+        filename="label.png",
+        file=BytesIO(_png()),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    candidate = _candidate(0.95)
+    monkeypatch.setattr(
+        vision_main.matcher,
+        "match_with_signals",
+        lambda *_args, **_kwargs: CatalogMatchSignals([candidate], True, 0.95, 0.95),
+    )
+    calls: list[tuple[bool, bool]] = []
+
+    def fake_analyze(*_args, include_ocr: bool, include_qwen: bool, **_kwargs):
+        calls.append((include_ocr, include_qwen))
+        return CatalogAnalysisResponse(
+            filename="label.png",
+            items=[],
+            extracted_markdown="16 GB",
+            models=[vision_main.settings.paddle_model],
+        )
+
+    monkeypatch.setattr(vision_main.analyzer, "analyze", fake_analyze)
+
+    response = match_catalog(upload, '["aaaaaaaaaaaaaaaaaaaa"]', "deep")
+
+    assert calls == [(True, False)]
+    assert response.extracted_markdown == "16 GB"
+
+
+def test_deep_mode_keeps_one_strong_siglip_fallback_when_qwen_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upload = UploadFile(
+        filename="photo.png",
+        file=BytesIO(_png()),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    candidate = _candidate(0.80).model_copy(
+        update={"visual_category": "unverified class", "visual_features": ["guess"]}
+    )
+    monkeypatch.setattr(
+        vision_main.matcher,
+        "match_with_signals",
+        lambda *_args, **_kwargs: CatalogMatchSignals([candidate], False, 0.80, 0.80),
+    )
+    monkeypatch.setattr(vision_main.matcher, "image_path", lambda *_args: Path("candidate.jpg"))
+    monkeypatch.setattr(
+        vision_main.analyzer,
+        "rerank_catalog_candidates",
+        lambda *_args, **_kwargs: [],
+    )
+
+    response = match_catalog(upload, '["aaaaaaaaaaaaaaaaaaaa"]', "deep")
+
+    assert len(response.catalog_candidates) == 1
+    assert response.catalog_candidates[0].confidence == "낮음"
+    assert response.catalog_candidates[0].visual_category is None
+    assert response.catalog_candidates[0].visual_features == []
+    assert "참고 후보 1개" in response.warnings[0]
+
+
+def test_deep_mode_sends_only_top_three_candidates_to_qwen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upload = UploadFile(
+        filename="photo.png",
+        file=BytesIO(_png()),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    candidates = [_candidate(0.80 - index * 0.01) for index in range(5)]
+    monkeypatch.setattr(
+        vision_main.matcher,
+        "match_with_signals",
+        lambda *_args, **_kwargs: CatalogMatchSignals(candidates, False, 0.80, 0.01),
+    )
+    monkeypatch.setattr(
+        vision_main.matcher,
+        "image_path",
+        lambda candidate: Path(f"candidate-{candidate.similarity}.jpg"),
+    )
+    received: list[CatalogCandidate] = []
+
+    def fake_rerank(_field_image, qwen_candidates, _candidate_paths, **_kwargs):
+        received.extend(qwen_candidates)
+        return []
+
+    monkeypatch.setattr(
+        vision_main.analyzer,
+        "rerank_catalog_candidates",
+        fake_rerank,
+    )
+
+    match_catalog(upload, '["aaaaaaaaaaaaaaaaaaaa"]', "deep")
+
+    assert received == candidates[:3]
+
+
+def test_deep_mode_discards_unverified_siglip_category_without_catalog_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upload = UploadFile(
+        filename="usb.png",
+        file=BytesIO(_png()),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    monkeypatch.setattr(
+        vision_main.matcher,
+        "match_with_signals",
+        lambda *_args, **_kwargs: CatalogMatchSignals(
+            [],
+            True,
+            0.0,
+            0.0,
+            "사진상 USB 플래시 메모리",
+            ("USB 단자와 휴대용 저장장치 몸체가 보임",),
+        ),
+    )
+    monkeypatch.setattr(
+        vision_main.analyzer,
+        "analyze",
+        lambda *_args, **_kwargs: CatalogAnalysisResponse(filename="usb.png", items=[]),
+    )
+
+    response = match_catalog(upload, "[]", "deep")
+
+    assert response.items == []
+
+
+def test_internal_service_rejects_unknown_analysis_mode() -> None:
+    upload = UploadFile(
+        filename="photo.png",
+        file=BytesIO(_png()),
+        headers=Headers({"content-type": "image/png"}),
+    )
+    with pytest.raises(HTTPException) as error:
+        match_catalog(upload, "[]", "turbo")
+    assert error.value.status_code == 422

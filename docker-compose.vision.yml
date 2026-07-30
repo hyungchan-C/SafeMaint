@@ -1,0 +1,64 @@
+services:
+  vision:
+    image: safemaint-vision:0.1.0
+    build:
+      context: ./ai
+      dockerfile: Dockerfile.vision
+    restart: unless-stopped
+    environment:
+      VISION_QWEN_MODEL: ${VISION_QWEN_MODEL:-Qwen/Qwen3-VL-2B-Instruct}
+      VISION_API_KEY: ${VISION_API_KEY:-}
+      VISION_PADDLE_MODEL: ${VISION_PADDLE_MODEL:-PaddlePaddle/PaddleOCR-VL}
+      VISION_MODEL_CACHE_DIR: /models
+      VISION_DEVICE: ${VISION_DEVICE:-cuda}
+      VISION_PADDLE_DEVICE: ${VISION_PADDLE_DEVICE:-cpu}
+      VISION_LOAD_IN_4BIT: ${VISION_LOAD_IN_4BIT:-true}
+      VISION_ENABLE_PADDLE: ${VISION_ENABLE_PADDLE:-true}
+      # Vector-only experiment. Override with true to restore Qwen3-VL.
+      VISION_ENABLE_QWEN: ${VISION_ENABLE_QWEN:-false}
+      VISION_PRELOAD_MODELS: ${VISION_PRELOAD_MODELS:-false}
+      VISION_MAX_NEW_TOKENS: ${VISION_MAX_NEW_TOKENS:-96}
+      VISION_QWEN_MAX_PIXELS: ${VISION_QWEN_MAX_PIXELS:-524288}
+      VISION_EMBEDDING_MODEL: ${VISION_EMBEDDING_MODEL:-google/siglip2-base-patch16-naflex}
+      VISION_EMBEDDING_DEVICE: ${VISION_EMBEDDING_DEVICE:-cpu}
+      VISION_CATALOG_INDEX_DIR: /catalog-index
+      VISION_CATALOG_MATCH_THRESHOLD: ${VISION_CATALOG_MATCH_THRESHOLD:-0.55}
+      VISION_ADAPTIVE_CONFIDENCE_THRESHOLD: ${VISION_ADAPTIVE_CONFIDENCE_THRESHOLD:-0.90}
+      VISION_ADAPTIVE_MARGIN_THRESHOLD: ${VISION_ADAPTIVE_MARGIN_THRESHOLD:-0.06}
+      VISION_FALLBACK_CANDIDATE_THRESHOLD: ${VISION_FALLBACK_CANDIDATE_THRESHOLD:-0.78}
+      VISION_IMAGE_MAX_UPLOAD_BYTES: ${VISION_IMAGE_MAX_UPLOAD_BYTES:-10485760}
+      # PDF-only limits accept zero as unlimited. Image limits remain bounded.
+      VISION_PDF_MAX_UPLOAD_BYTES: ${VISION_PDF_MAX_UPLOAD_BYTES:-209715200}
+      VISION_IMAGE_MAX_PIXELS: ${VISION_IMAGE_MAX_PIXELS:-40000000}
+      VISION_PDF_MAX_PAGES: ${VISION_PDF_MAX_PAGES:-2000}
+      VISION_CATALOG_MAX_IMAGES: ${VISION_CATALOG_MAX_IMAGES:-12000}
+      TORCH_HOME: /models/torch
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      HF_HOME: /models/huggingface
+      PADDLE_PDX_CACHE_HOME: /models/paddlex
+      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: ${PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK:-false}
+    volumes:
+      - safemaint_vision_models:/models
+      - safemaint_catalog_index:/catalog-index
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  backend:
+    environment:
+      VISION_SERVICE_URL: http://vision:8020
+      VISION_API_KEY: ${VISION_API_KEY:-}
+      VISION_IMAGE_MAX_UPLOAD_BYTES: ${VISION_IMAGE_MAX_UPLOAD_BYTES:-10485760}
+    depends_on:
+      vision:
+        condition: service_started
+
+volumes:
+  safemaint_vision_models:
+    name: ${VISION_MODEL_VOLUME_NAME:-safemaint_vision_models}
+  safemaint_catalog_index:
+    name: ${VISION_CATALOG_INDEX_VOLUME_NAME:-safemaint_catalog_index}

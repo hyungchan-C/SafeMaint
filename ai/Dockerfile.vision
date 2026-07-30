@@ -1,0 +1,24 @@
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements-vision.txt ./
+RUN python3 -m pip install --no-cache-dir -r requirements-vision.txt
+RUN python3 -m pip install --no-cache-dir "torchvision>=0.22,<1.0"
+# PaddleOCR-VL 문서 파이프라인은 CPU Paddle 런타임을 사용한다. Qwen만 GPU를
+# 사용하도록 분리하면 6GB VRAM 환경에서도 두 모델을 안정적으로 함께 쓸 수 있다.
+RUN python3 -m pip install --no-cache-dir "paddlepaddle>=3.2,<4.0"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential libgomp1 python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY vision_service ./vision_service
+
+EXPOSE 8020
+CMD ["python3", "-m", "uvicorn", "vision_service.main:app", "--host", "0.0.0.0", "--port", "8020"]

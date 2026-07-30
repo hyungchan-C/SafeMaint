@@ -1,0 +1,227 @@
+﻿[CmdletBinding()]
+param(
+    [string]$EnvFile = ".env",
+    [string]$ProjectName = "",
+    [int]$TimeoutSeconds = 300
+)
+
+$ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "dev-common.ps1")
+
+$composeArguments = $null
+$repoRoot = Get-SafeMaintRepoRoot
+
+# Optional profile services (for example vision or Qwen) can remain running
+# between development sessions. Compose should leave them untouched and should
+# not turn its harmless orphan warning into a terminating PowerShell error.
+$env:COMPOSE_IGNORE_ORPHANS = "true"
+
+function Initialize-SafeMaintRapidOcrModels {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$ComposeArguments
+    )
+
+    $rapidOcrModelPath = "/models/docling/RapidOcr/onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx"
+    & docker @ComposeArguments run --rm --no-deps worker python -c `
+        "from pathlib import Path; raise SystemExit(0 if Path('$rapidOcrModelPath').is_file() else 1)"
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "      RapidOCR 모델 준비 완료"
+        return
+    }
+
+    Write-Host "      이미지형 PDF 처리를 위한 RapidOCR 모델을 준비합니다."
+    & docker @ComposeArguments run --rm --no-deps worker `
+        python -m docling.cli.models download rapidocr -o /models/docling
+    if ($LASTEXITCODE -ne 0) {
+        throw "RapidOCR 모델 다운로드에 실패했습니다. 네트워크를 확인한 뒤 다시 실행해 주세요."
+    }
+}
+
+function Import-SafeMaintPublicRagPackageIfNeeded {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$ComposeArguments,
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $statusResult = Invoke-SafeMaintNativeCapture -Command {
+        & docker @ComposeArguments run --rm backend python -m app.commands.public_rag_package status
+    }
+    if ($statusResult.ExitCode -ne 0) {
+        Write-Host "      public RAG 상태 확인 실패; 자동 import를 건너뜁니다." -ForegroundColor Yellow
+        Write-Host (($statusResult.CombinedOutput | Out-String).Trim()) -ForegroundColor Yellow
+        return
+    }
+
+    $packages = @()
+    try {
+        $packages = @($statusResult.StandardOutput | Out-String | ConvertFrom-Json)
+    }
+    catch {
+        Write-Host "      public RAG 상태 응답을 해석하지 못해 자동 import를 건너뜁니다." -ForegroundColor Yellow
+        return
+    }
+
+    $activePackages = @(
+        foreach ($package in $packages) {
+            if (
+                $null -ne $package -and
+                $package.PSObject.Properties.Match("status").Count -gt 0 -and
+                $package.status -eq "active"
+            ) {
+                $package
+            }
+        }
+    )
+    if ($activePackages.Count -gt 0) {
+        Write-Host "      active public RAG package가 이미 있어 import를 건너뜁니다."
+        return
+    }
+
+    $packageOutputDir = Join-Path $RepoRoot "safemaint_api_data\safemaint_public_rag_package\output"
+    $packagePath = Get-ChildItem -LiteralPath $packageOutputDir -Filter "public_safety_rag_package_*.zip" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1
+    $publicKeyPath = Join-Path $packageOutputDir "public_rag_ed25519_public.pem"
+    if (
+        $null -eq $packagePath -or
+        -not (Test-Path -LiteralPath $publicKeyPath -PathType Leaf)
+    ) {
+        Write-Host "      public RAG package zip/pem이 없어 자동 import를 건너뜁니다." -ForegroundColor Yellow
+        Write-Host "      필요 위치: $packageOutputDir" -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "      public RAG package를 PostgreSQL에 import합니다."
+    $volume = "${packageOutputDir}:/packages:ro"
+    $packageName = $packagePath.Name
+    $importResult = Invoke-SafeMaintNativeCapture -Command {
+        & docker @ComposeArguments run --rm --volume $volume backend `
+            python -m app.commands.public_rag_package import `
+            "/packages/$packageName" `
+            --public-key "/packages/public_rag_ed25519_public.pem"
+    }
+    if ($importResult.ExitCode -eq 0) {
+        Write-Host "      public RAG package import 완료"
+        return
+    }
+    $importText = ($importResult.CombinedOutput | Out-String)
+    if ($importText -match "already installed") {
+        Write-Host "      public RAG package가 이미 설치되어 import를 건너뜁니다."
+        return
+    }
+    throw "public RAG package import에 실패했습니다.`n$importText"
+}
+
+try {
+    Write-Host "[1/8] Docker 설치와 엔진 상태 확인"
+    $dockerVersion = Assert-SafeMaintDocker
+    Write-Host "      Docker Engine $dockerVersion"
+
+    Write-Host "[2/8] 개발 환경변수 확인"
+    $envPath = Resolve-SafeMaintEnvPath -EnvFile $EnvFile
+    $envValues = Read-SafeMaintEnvFile -Path $envPath
+    Assert-SafeMaintEnvValues -Values $envValues
+    $composeArguments = New-SafeMaintComposeArguments -EnvPath $envPath -ProjectName $ProjectName
+    $postgresPort = Get-SafeMaintEnvValue -Values $envValues -Name "POSTGRES_PORT" -Default "5432"
+    $backendPort = Get-SafeMaintEnvValue -Values $envValues -Name "BACKEND_PORT" -Default "8000"
+    $frontendPort = Get-SafeMaintEnvValue -Values $envValues -Name "FRONTEND_PORT" -Default "3000"
+
+    Push-Location $repoRoot
+    try {
+        Write-Host "[3/8] Docker Compose 구성 검증"
+        & docker @composeArguments config --quiet
+        if ($LASTEXITCODE -ne 0) {
+            throw "docker compose config 검증에 실패했습니다."
+        }
+
+        Write-Host "[4/8] 개발용 DB, migration, seed, backend, RAG, worker, frontend 실행"
+        # docker-compose.override.yml(있는 경우)이 COMPOSE_PROFILES=cpu/gpu에 따라
+        # worker(CPU) 또는 worker-gpu 중 하나만 활성화한다. 실제로 어느 쪽이 켜졌는지는
+        # `compose config --services`로 확인해야 정확하다(COMPOSE_PROFILES는 .env뿐
+        # 아니라 셸 환경변수로도 줄 수 있어서, .env만 파싱해서는 틀릴 수 있음).
+        $activeServicesResult = Invoke-SafeMaintNativeCapture -Command {
+            & docker @composeArguments config --services
+        }
+        if ($activeServicesResult.ExitCode -ne 0) {
+            throw "docker compose config --services 실행에 실패했습니다.`n$(($activeServicesResult.CombinedOutput | Out-String).Trim())"
+        }
+        $activeServices = @(
+            $activeServicesResult.StandardOutput | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ -ne "" }
+        )
+        $workerService = if ($activeServices -contains "worker-gpu") {
+            "worker-gpu"
+        } elseif ($activeServices -contains "worker") {
+            "worker"
+        } else {
+            throw (
+                "worker 또는 worker-gpu 서비스가 활성화되어 있지 않습니다. " +
+                "docker-compose.override.yml을 포함했다면 .env의 COMPOSE_PROFILES를 " +
+                "cpu 또는 gpu로 설정하세요."
+            )
+        }
+        Write-Host "      사용할 문서 처리 worker: $workerService"
+
+        # migrate/seed/backend and rag/worker share images. Building via
+        # `up --build` asks BuildKit to build the same image concurrently on
+        # Docker Desktop, which can fail with a duplicated gRPC session. worker-gpu
+        # uses a separate image (safemaint-rag:*-gpu), so it needs its own build
+        # entry only when it's the service actually in use.
+        $buildTargets = @("backend", "rag", "frontend")
+        if ($workerService -eq "worker-gpu") {
+            $buildTargets += "worker-gpu"
+        }
+        & docker @composeArguments build @buildTargets
+        if ($LASTEXITCODE -ne 0) {
+            throw "docker compose build 실행에 실패했습니다."
+        }
+        Initialize-SafeMaintRapidOcrModels -ComposeArguments $composeArguments
+        & docker @composeArguments up -d --no-build
+        if ($LASTEXITCODE -ne 0) {
+            throw "docker compose up 실행에 실패했습니다."
+        }
+
+        Write-Host "[5/8] PostgreSQL healthcheck 확인"
+        $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "db" -Expected "healthy" -TimeoutSeconds $TimeoutSeconds
+
+        Write-Host "[6/8] Alembic migration과 seed 종료 코드 확인"
+        $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "migrate" -Expected "completed" -TimeoutSeconds $TimeoutSeconds
+        $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "seed" -Expected "completed" -TimeoutSeconds $TimeoutSeconds
+
+        Write-Host "[7/8] backend, RAG, worker와 frontend 상태 확인"
+        $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "backend" -Expected "healthy" -TimeoutSeconds $TimeoutSeconds
+        $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "rag" -Expected "healthy" -TimeoutSeconds $TimeoutSeconds
+        $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service $workerService -Expected "running" -TimeoutSeconds $TimeoutSeconds
+        $null = Wait-SafeMaintService -ComposeArguments $composeArguments -Service "frontend" -Expected "running" -TimeoutSeconds $TimeoutSeconds
+        $null = Wait-SafeMaintHttp -Url "http://127.0.0.1:$backendPort/health/ready" -TimeoutSeconds $TimeoutSeconds
+        $null = Wait-SafeMaintHttp -Url "http://127.0.0.1:$frontendPort" -TimeoutSeconds $TimeoutSeconds
+
+        Write-Host "[8/8] public RAG package 자동 import 확인"
+        Import-SafeMaintPublicRagPackageIfNeeded -ComposeArguments $composeArguments -RepoRoot $repoRoot
+    }
+    finally {
+        Pop-Location
+    }
+
+    Write-Host "`nSafeMaint 개발 환경이 정상적으로 실행되었습니다." -ForegroundColor Green
+    Write-Host "- Frontend: http://127.0.0.1:$frontendPort"
+    Write-Host "- Backend readiness: http://127.0.0.1:$backendPort/health/ready"
+    Write-Host "- Local RAG and document worker ($workerService): running"
+    Write-Host "- DBeaver: 127.0.0.1:$postgresPort / DB=$($envValues['POSTGRES_DB']) / User=$($envValues['POSTGRES_USER'])"
+    Write-Host "- 상세 검증: .\scripts\verify-db.ps1"
+    exit 0
+}
+catch {
+    Write-Host "`nSafeMaint 개발 환경 설정 실패: $($_.Exception.Message)" -ForegroundColor Red
+    if ($null -ne $composeArguments) {
+        try {
+            Show-SafeMaintDiagnostics -ComposeArguments $composeArguments
+        }
+        catch {
+            Write-Host "진단 로그를 가져오지 못했습니다." -ForegroundColor Yellow
+        }
+    }
+    exit 1
+}

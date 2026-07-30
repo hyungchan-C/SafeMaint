@@ -10,6 +10,7 @@ __pycache__/
 *.egg-info/
 .venv/
 .pytest_cache/
+.pytest_tmp_*/
 .ruff_cache/
 .coverage
 htmlcov/
@@ -30,10 +31,39 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 
+# Local dev-only Docker overrides (e.g. exposing db port for manual testing)
+docker-compose.override.yml
+
 # Local data and model artifacts
-data/raw/
-data/processed/
-models/
-uploads/
+/ai/data/raw/
+/ai/data/processed/
+/ai/.model-cache/
+/ai/.venv-embedding/
+/전처리된데이터/
+/models/
+/uploads/
+/local_assets/
+/tmp/
+/backups/
+/artifacts/
+*.backup
+*.dump
 *.gguf
 *.safetensors
+
+.history/
+/.rag_delivery_validation/
+
+# Personal notes (not shared)
+sr_할 일.md
+
+# One-off local test scripts (not shared)
+ai/preprocessing/run_test_other_pdf.py
+ai/preprocessing/run_test_phox_pdf.py
+ai/preprocessing/run_test_pq_pdf.py
+
+# SafeMaint API data generated artifacts stay local and are never committed
+/safemaint_api_data/**/output/
+/safemaint_api_data/safemaint_public_rag_package/output/
+/safemaint_api_data/safemaint_qwen35_9b_finetuning_result/01_finetuned_model/best_adapter/
+/safemaint_api_data/safemaint_qwen35_9b_finetuning_result/01_finetuned_model/tokenizer/

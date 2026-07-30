@@ -1,0 +1,512 @@
+from pathlib import Path
+
+import fitz
+import pytest
+
+from ai.preprocessing import pdf_pipeline
+
+
+def _save_text_pdf(path: Path, pages: int = 1) -> None:
+    pdf = fitz.open()
+    for _ in range(pages):
+        page = pdf.new_page()
+        page.insert_text((72, 72), "SafeMaint PDF pipeline test")
+    pdf.save(path)
+    pdf.close()
+
+
+def _sections(text: str = "작업 전 전원을 차단합니다") -> list[dict]:
+    return [
+        {
+            "header": "안전",
+            "section_path": ["안전"],
+            "start_page": 1,
+            "end_page": 1,
+            "blocks": [{"type": "text", "text": text}],
+        }
+    ]
+
+
+def test_docling_accelerator_uses_automatic_detection() -> None:
+    assert pdf_pipeline.DOCLING_ACCELERATOR_DEVICE == "auto"
+
+
+def test_long_sentence_is_bounded_by_chunk_size() -> None:
+    chunks = pdf_pipeline.chunk_text("가" * 1400, chunk_size=600, overlap=100)
+
+    assert len(chunks) == 3
+    assert all(0 < len(chunk) <= 600 for chunk in chunks)
+
+
+def test_long_table_row_is_bounded_by_chunk_size() -> None:
+    chunks = pdf_pipeline.chunk_table(
+        {"header": "| 항목 | 내용 |", "rows": [f"| 안전조치 | {'가' * 900} |"]},
+        chunk_size=600,
+    )
+
+    assert len(chunks) == 2
+    assert all(0 < len(chunk) <= 600 for chunk in chunks)
+
+
+@pytest.mark.parametrize(
+    ("chunk_size", "overlap"),
+    ((0, 0), (100, -1), (100, 100)),
+)
+def test_invalid_chunk_options_are_rejected(
+    chunk_size: int,
+    overlap: int,
+) -> None:
+    with pytest.raises(ValueError):
+        pdf_pipeline.chunk_text("안전", chunk_size=chunk_size, overlap=overlap)
+
+
+def test_repeated_section_titles_create_unique_chunk_index(monkeypatch, tmp_path) -> None:
+    pdf_path = tmp_path / "sample.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake content for hashing only")
+
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "extract_sections",
+        lambda _path, **_kwargs: pdf_pipeline.SectionExtractionResult(
+            sections=[
+                {
+                    "header": "주의",
+                    "section_path": ["주의"],
+                    "start_page": 1,
+                    "end_page": 1,
+                    "blocks": [{"type": "text", "text": "첫 번째 내용"}],
+                },
+                {
+                    "header": "주의",
+                    "section_path": ["주의"],
+                    "start_page": 2,
+                    "end_page": 2,
+                    "blocks": [{"type": "text", "text": "두 번째 내용"}],
+                },
+            ],
+            processing_metadata={
+                "extractor": "docling",
+                "extractor_version": "2.113.0",
+                "fallback_used": False,
+                "fallback_reason": None,
+                "ocr_used": False,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("PDF hashing must stream from the file")
+        ),
+    )
+
+    result = pdf_pipeline.process_pdf(
+        str(pdf_path),
+        product_type="센서",
+        model_name="M1",
+        manufacturer="테스트 제조사",
+        exclude_sections=[],
+    )
+    chunks = result["chunks"]
+
+    assert result["document"]["document_type_code"] == "equipment_manual"
+    assert len(chunks) == 2
+    assert [c["chunk_index"] for c in chunks] == [0, 1]
+    assert all(c["document_external_id"] == result["document"]["external_id"] for c in chunks)
+    assert len({c["content_hash"] for c in chunks}) == 2
+    assert result["processing_metadata"]["extractor"] == "docling"
+
+
+def test_pipeline_progress_holds_chunking_percent_until_total_is_known(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "progress.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 progress")
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "extract_sections",
+        lambda _path, **_kwargs: pdf_pipeline.SectionExtractionResult(
+            sections=[
+                {
+                    "header": "안전",
+                    "section_path": ["안전"],
+                    "start_page": 1,
+                    "end_page": 1,
+                    "blocks": [{"type": "text", "text": "전원을 차단합니다."}],
+                },
+                {
+                    "header": "점검",
+                    "section_path": ["점검"],
+                    "start_page": 2,
+                    "end_page": 2,
+                    "blocks": [{"type": "text", "text": "잠금 상태를 확인합니다."}],
+                },
+            ],
+            processing_metadata={"extractor": "docling"},
+        ),
+    )
+    updates: list[tuple[str, int, dict[str, int]]] = []
+
+    result = pdf_pipeline.process_pdf(
+        str(pdf_path),
+        product_type="센서",
+        model_name="M1",
+        total_pages=2,
+        progress_callback=lambda stage, percent, _message, counters: updates.append(
+            (stage, percent, dict(counters))
+        ),
+    )
+
+    chunking_updates = [update for update in updates if update[0] == "chunking"]
+    assert result["chunks"]
+    assert all(percent == 50 for _, percent, _ in chunking_updates[:-1])
+    assert chunking_updates[-1][1] == 65
+    assert chunking_updates[-1][2]["total_chunks"] == len(result["chunks"])
+
+
+def test_docling_success_does_not_call_pymupdf(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "docling-success.pdf"
+    _save_text_pdf(path)
+    runtime = pdf_pipeline.DoclingRuntimeSettings()
+    monkeypatch.setattr(
+        pdf_pipeline, "validate_docling_runtime", lambda _runtime: "2.113.0"
+    )
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "extract_sections_with_docling",
+        lambda _path, _runtime: (_sections(), False),
+    )
+
+    def unexpected_fallback(_path: str):
+        raise AssertionError("PyMuPDF fallback must not be called")
+
+    monkeypatch.setattr(
+        pdf_pipeline, "extract_sections_with_pymupdf", unexpected_fallback
+    )
+
+    result = pdf_pipeline.extract_sections(str(path), runtime=runtime)
+
+    assert result.sections == _sections()
+    assert result.processing_metadata == {
+        "extractor": "docling",
+        "extractor_version": "2.113.0",
+        "fallback_used": False,
+        "fallback_reason": None,
+        "ocr_used": False,
+    }
+
+
+def test_docling_conversion_failure_uses_logged_pymupdf_fallback(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    path = tmp_path / "docling-failure.pdf"
+    _save_text_pdf(path)
+    runtime = pdf_pipeline.DoclingRuntimeSettings()
+    monkeypatch.setattr(
+        pdf_pipeline, "validate_docling_runtime", lambda _runtime: "2.113.0"
+    )
+
+    def fail_docling(_path: str, _runtime):
+        raise UnicodeDecodeError("utf-8", b"x", 0, 1, "invalid")
+
+    monkeypatch.setattr(
+        pdf_pipeline, "extract_sections_with_docling", fail_docling
+    )
+    monkeypatch.setattr(
+        pdf_pipeline, "extract_sections_with_pymupdf", lambda _path: _sections()
+    )
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "_installed_version",
+        lambda name: "1.28.0" if name == "PyMuPDF" else "2.113.0",
+    )
+
+    with caplog.at_level("WARNING"):
+        result = pdf_pipeline.extract_sections(
+            str(path),
+            runtime=runtime,
+            log_context={
+                "document_id": "doc-1",
+                "document_version_id": "version-1",
+            },
+        )
+
+    assert result.processing_metadata["extractor"] == "pymupdf"
+    assert result.processing_metadata["fallback_used"] is True
+    assert "Docling conversion failed" in result.processing_metadata["fallback_reason"]
+    assert "document_id=doc-1" in caplog.text
+    assert "extractor=pymupdf" in caplog.text
+
+
+def test_missing_docling_is_not_swallowed_when_required(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "missing-docling.pdf"
+    _save_text_pdf(path)
+    runtime = pdf_pipeline.DoclingRuntimeSettings(required=True)
+
+    def missing(_runtime):
+        raise pdf_pipeline.DoclingDeploymentError(
+            "Docling runtime import failed: ModuleNotFoundError"
+        )
+
+    monkeypatch.setattr(pdf_pipeline, "validate_docling_runtime", missing)
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "extract_sections_with_pymupdf",
+        lambda _path: pytest.fail("fallback must not run"),
+    )
+
+    with pytest.raises(pdf_pipeline.DoclingDeploymentError, match="ModuleNotFoundError"):
+        pdf_pipeline.extract_sections(str(path), runtime=runtime)
+
+
+def test_empty_docling_sections_use_pymupdf_fallback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "empty-docling.pdf"
+    _save_text_pdf(path)
+    runtime = pdf_pipeline.DoclingRuntimeSettings()
+    monkeypatch.setattr(
+        pdf_pipeline, "validate_docling_runtime", lambda _runtime: "2.113.0"
+    )
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "extract_sections_with_docling",
+        lambda _path, _runtime: ([], False),
+    )
+    monkeypatch.setattr(
+        pdf_pipeline, "extract_sections_with_pymupdf", lambda _path: _sections()
+    )
+    monkeypatch.setattr(
+        pdf_pipeline, "_installed_version", lambda _name: "1.28.0"
+    )
+
+    result = pdf_pipeline.extract_sections(str(path), runtime=runtime)
+
+    assert result.sections
+    assert result.processing_metadata["fallback_used"] is True
+    assert result.processing_metadata["fallback_reason"] == "Docling returned no sections"
+
+
+def test_pdf_file_and_page_limits_are_rejected(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "limits.pdf"
+    _save_text_pdf(path, pages=2)
+
+    with pytest.raises(pdf_pipeline.PdfProcessingLimitError, match="file size"):
+        pdf_pipeline.extract_sections(
+            str(path),
+            runtime=pdf_pipeline.DoclingRuntimeSettings(
+                max_file_bytes=path.stat().st_size - 1
+            ),
+        )
+
+    with pytest.raises(pdf_pipeline.PdfProcessingLimitError, match="page count"):
+        pdf_pipeline.extract_sections(
+            str(path),
+            runtime=pdf_pipeline.DoclingRuntimeSettings(
+                max_file_bytes=path.stat().st_size,
+                max_pages=1,
+            ),
+        )
+
+
+def test_docling_file_and_page_zero_parse_as_unlimited(monkeypatch) -> None:
+    monkeypatch.setenv("DOCLING_MAX_FILE_BYTES", "0")
+    monkeypatch.setenv("DOCLING_MAX_PAGES", "0")
+
+    runtime = pdf_pipeline.DoclingRuntimeSettings.from_env()
+
+    assert runtime.max_file_bytes is None
+    assert runtime.max_pages is None
+
+
+def test_docling_negative_limit_is_rejected(monkeypatch) -> None:
+    monkeypatch.setenv("DOCLING_MAX_PAGES", "-1")
+
+    with pytest.raises(ValueError, match="zero or greater"):
+        pdf_pipeline.DoclingRuntimeSettings.from_env()
+
+
+def test_unlimited_docling_runtime_skips_preflight_limits(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "unlimited.pdf"
+    _save_text_pdf(path, pages=2)
+    runtime = pdf_pipeline.DoclingRuntimeSettings(
+        max_file_bytes=None,
+        max_pages=None,
+    )
+    monkeypatch.setattr(
+        pdf_pipeline, "validate_docling_runtime", lambda _runtime: "2.113.0"
+    )
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "extract_sections_with_docling",
+        lambda _path, _runtime: (_sections(), False),
+    )
+
+    result = pdf_pipeline.extract_sections(str(path), runtime=runtime)
+
+    assert result.sections == _sections()
+
+
+def test_unlimited_docling_convert_omits_limit_arguments(monkeypatch) -> None:
+    calls: list[dict[str, int]] = []
+
+    class EmptyDocument:
+        @staticmethod
+        def iterate_items():
+            return iter(())
+
+    class FakeConverter:
+        @staticmethod
+        def convert(_path: str, **kwargs):
+            calls.append(kwargs)
+            return type("Result", (), {"document": EmptyDocument()})()
+
+    monkeypatch.setattr(pdf_pipeline, "_needs_ocr", lambda _path: False)
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "_build_converter",
+        lambda _do_ocr, _runtime: FakeConverter(),
+    )
+
+    pdf_pipeline.extract_sections_with_docling(
+        "unlimited.pdf",
+        pdf_pipeline.DoclingRuntimeSettings(
+            max_file_bytes=None,
+            max_pages=None,
+        ),
+    )
+
+    assert calls == [{}]
+
+
+def test_positive_docling_convert_passes_limit_arguments(monkeypatch) -> None:
+    calls: list[dict[str, int]] = []
+
+    class EmptyDocument:
+        @staticmethod
+        def iterate_items():
+            return iter(())
+
+    class FakeConverter:
+        @staticmethod
+        def convert(_path: str, **kwargs):
+            calls.append(kwargs)
+            return type("Result", (), {"document": EmptyDocument()})()
+
+    monkeypatch.setattr(pdf_pipeline, "_needs_ocr", lambda _path: False)
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "_build_converter",
+        lambda _do_ocr, _runtime: FakeConverter(),
+    )
+
+    pdf_pipeline.extract_sections_with_docling(
+        "limited.pdf",
+        pdf_pipeline.DoclingRuntimeSettings(
+            max_file_bytes=100,
+            max_pages=5,
+        ),
+    )
+
+    assert calls == [{"max_file_size": 100, "max_num_pages": 5}]
+
+
+def test_broken_multiscript_font_mapping_requires_ocr() -> None:
+    corrupted = (
+        "\u0a95\u0a96\u0a97\u0a98\u0a99 "
+        "\u0985\u0986\u0987\u0988\u0989 "
+        "\u0b85\u0b86\u0b87\u0b88\u0b89 "
+        "\u0d05\u0d06\u0d07\u0d08\u0d09 "
+    ) * 20
+    sections = [{
+        "section_path": [corrupted],
+        "blocks": [{"type": "text", "text": corrupted}],
+    }]
+
+    assert pdf_pipeline._looks_like_broken_font_mapping(sections) is True
+
+
+def test_normal_korean_sections_do_not_require_ocr_retry() -> None:
+    korean = "단열 깊은 홈 볼 베어링의 교체와 설치 절차를 확인합니다. " * 20
+    sections = [{
+        "section_path": ["베어링 교체"],
+        "blocks": [{"type": "text", "text": korean}],
+    }]
+
+    assert pdf_pipeline._looks_like_broken_font_mapping(sections) is False
+
+
+def test_replacement_character_font_mapping_requires_ocr() -> None:
+    corrupted = ("������� �������İ� Ư¡ " * 30)
+    sections = [{
+        "section_path": [],
+        "blocks": [{"type": "text", "text": corrupted}],
+    }]
+
+    assert pdf_pipeline._looks_like_broken_font_mapping(sections) is True
+
+
+def test_docling_settings_parse_false_and_thread_count(monkeypatch) -> None:
+    monkeypatch.setenv("DOCLING_REQUIRED", "false")
+    monkeypatch.setenv("DOCLING_ALLOW_PYMUPDF_FALLBACK", "true")
+    monkeypatch.setenv("DOCLING_NUM_THREADS", "6")
+
+    runtime = pdf_pipeline.DoclingRuntimeSettings.from_env()
+
+    assert runtime.required is False
+    assert runtime.allow_pymupdf_fallback is True
+    assert runtime.num_threads == 6
+
+
+def test_configured_artifacts_require_model_weights_and_config(tmp_path: Path) -> None:
+    runtime = pdf_pipeline.DoclingRuntimeSettings(artifacts_path=str(tmp_path))
+
+    with pytest.raises(pdf_pipeline.DoclingDeploymentError, match="does not contain"):
+        pdf_pipeline._validate_artifacts_path(runtime)
+
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(pdf_pipeline.DoclingDeploymentError, match="missing"):
+        pdf_pipeline._validate_artifacts_path(runtime)
+
+    (tmp_path / "model.safetensors").write_bytes(b"test")
+    assert pdf_pipeline._validate_artifacts_path(runtime) == tmp_path
+
+
+def test_missing_docling_model_is_not_silently_fallback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "missing-model.pdf"
+    _save_text_pdf(path)
+    runtime = pdf_pipeline.DoclingRuntimeSettings()
+    monkeypatch.setattr(
+        pdf_pipeline, "validate_docling_runtime", lambda _runtime: "2.113.0"
+    )
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "extract_sections_with_docling",
+        lambda _path, _runtime: (_ for _ in ()).throw(
+            FileNotFoundError("Missing safe tensors file: model.safetensors")
+        ),
+    )
+    monkeypatch.setattr(
+        pdf_pipeline,
+        "extract_sections_with_pymupdf",
+        lambda _path: pytest.fail("model configuration failures must not fallback"),
+    )
+
+    with pytest.raises(pdf_pipeline.DoclingDeploymentError, match="model/configuration"):
+        pdf_pipeline.extract_sections(str(path), runtime=runtime)

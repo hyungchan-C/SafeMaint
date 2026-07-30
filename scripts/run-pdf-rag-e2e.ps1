@@ -1,0 +1,150 @@
+[CmdletBinding()]
+param(
+    [switch]$RunExternalLlm,
+    [switch]$KeepServices
+)
+
+$ErrorActionPreference = "Stop"
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$composeFiles = @(
+    "-f", (Join-Path $repoRoot "docker-compose.yml"),
+    "-f", (Join-Path $repoRoot "docker-compose.e2e.yml")
+)
+$savedLocation = Get-Location
+$savedEnvironment = @{}
+$composeEnvironmentReady = $false
+$environmentNames = @(
+    "COMPOSE_PROJECT_NAME", "POSTGRES_DB", "POSTGRES_USER",
+    "POSTGRES_PASSWORD", "DATABASE_URL", "POSTGRES_VOLUME_NAME",
+    "DOCUMENT_VOLUME_NAME", "PACKAGE_VOLUME_NAME", "BACKEND_PORT",
+    "RUN_RAG_E2E", "RUN_EXTERNAL_LLM_E2E", "ALLOW_TEST_DB_MUTATION",
+    "E2E_USER_PASSWORD", "E2E_RUN_ID", "ALLOW_EXTERNAL_LLM",
+    "LLM_BASE_URL", "LLM_ANALYZER_MODEL", "LLM_ANSWER_MODEL",
+    "DOCLING_ARTIFACTS_PATH", "DOCLING_OFFLINE"
+)
+foreach ($name in $environmentNames) {
+    $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+}
+
+function Invoke-Compose {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+    & docker compose @composeFiles @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker Compose E2E command failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Get-AvailableLoopbackPort {
+    $listener = [System.Net.Sockets.TcpListener]::new(
+        [System.Net.IPAddress]::Loopback,
+        0
+    )
+    try {
+        $listener.Start()
+        return ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    }
+    finally {
+        $listener.Stop()
+    }
+}
+
+try {
+    Set-Location $repoRoot
+    docker version --format "{{.Server.Version}}" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Docker Engine is not available. Start Docker Desktop and retry."
+    }
+
+    $runId = [guid]::NewGuid().ToString("N").Substring(0, 12)
+    $env:COMPOSE_PROJECT_NAME = "safemaint-pdf-rag-e2e"
+    $env:POSTGRES_DB = "safemaint_e2e_test"
+    $env:POSTGRES_USER = "safemaint"
+    $env:POSTGRES_PASSWORD = "E2EDb$([guid]::NewGuid().ToString('N'))"
+    $env:DATABASE_URL = "postgresql+psycopg://safemaint:$($env:POSTGRES_PASSWORD)@db:5432/safemaint_e2e_test"
+    # Every run receives new test-only storage so a preserved PostgreSQL volume
+    # can never retain credentials from an earlier run. The model cache remains
+    # shared because it contains no document or database data.
+    $env:POSTGRES_VOLUME_NAME = "safemaint_e2e_postgres_$runId"
+    $env:DOCUMENT_VOLUME_NAME = "safemaint_e2e_documents_$runId"
+    $env:PACKAGE_VOLUME_NAME = "safemaint_e2e_packages_$runId"
+    # The E2E client reaches the backend through the Compose network, so the
+    # host port is only needed to satisfy the shared development definition.
+    # Pick a free loopback port to avoid disrupting another local test stack.
+    $env:BACKEND_PORT = [string](Get-AvailableLoopbackPort)
+    $env:RUN_RAG_E2E = "1"
+    $env:ALLOW_TEST_DB_MUTATION = "1"
+    $env:E2E_USER_PASSWORD = "E2E-$([guid]::NewGuid().ToString('N'))-Aa1!"
+    $env:E2E_RUN_ID = $runId
+    $env:RUN_EXTERNAL_LLM_E2E = "0"
+    $env:ALLOW_EXTERNAL_LLM = "false"
+    $env:DOCLING_ARTIFACTS_PATH = "/models/docling"
+    $env:DOCLING_OFFLINE = "false"
+    $composeEnvironmentReady = $true
+
+    if ($RunExternalLlm) {
+        if ([string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)) {
+            Write-Warning "OPENAI_API_KEY is unavailable; external LLM E2E will be skipped."
+        }
+        else {
+            $env:RUN_EXTERNAL_LLM_E2E = "1"
+            $env:ALLOW_EXTERNAL_LLM = "true"
+            $env:LLM_BASE_URL = ""
+            $env:LLM_ANALYZER_MODEL = "gpt-4o-mini"
+            $env:LLM_ANSWER_MODEL = "gpt-4o-mini"
+        }
+    }
+
+    Write-Host "[1/6] Building current backend, RAG, worker, and E2E images"
+    # backend/migrate/seed and rag/worker share build definitions. Building the
+    # shared images concurrently can make Docker Desktop reuse a broken BuildKit
+    # session, so build each unique image once in a deterministic order.
+    Invoke-Compose -Arguments @("--profile", "e2e", "build", "backend")
+    Invoke-Compose -Arguments @("--profile", "e2e", "build", "rag")
+    Invoke-Compose -Arguments @("--profile", "e2e", "build", "e2e")
+
+    Write-Host "[2/6] Preparing Docling models in the shared model cache"
+    Invoke-Compose -Arguments @(
+        "--profile", "e2e", "run", "--rm", "--no-deps", "worker",
+        "docling-tools", "models", "download", "-o", "/models/docling"
+    )
+    # E2E conversion must prove the downloaded artifacts are sufficient without
+    # silently reaching the network while a PDF job is being processed.
+    $env:DOCLING_OFFLINE = "true"
+
+    Write-Host "[3/6] Starting isolated DB, migrations, seed, backend, RAG, and worker"
+    Invoke-Compose -Arguments @("--profile", "e2e", "up", "-d", "db", "migrate", "seed", "backend", "rag", "worker")
+
+    Write-Host "[4/6] Checking isolated service status"
+    Invoke-Compose -Arguments @("--profile", "e2e", "ps", "-a")
+
+    Write-Host "[5/6] Running fake-PDF upload, worker, BGE-M3, RAG, and optional LLM E2E"
+    Invoke-Compose -Arguments @("--profile", "e2e", "run", "--rm", "e2e")
+
+    Write-Host "[6/6] PDF RAG E2E completed successfully"
+}
+catch {
+    Write-Host "SafeMaint PDF RAG E2E failed: $($_.Exception.Message)" -ForegroundColor Red
+    try {
+        if ($composeEnvironmentReady) {
+            & docker compose @composeFiles --profile e2e logs --tail 200 db migrate seed worker backend rag
+        }
+    }
+    catch {
+        Write-Warning "Unable to collect E2E service logs."
+    }
+    throw
+}
+finally {
+    if ($composeEnvironmentReady -and -not $KeepServices) {
+        try {
+            & docker compose @composeFiles --profile e2e down --remove-orphans | Out-Null
+        }
+        catch {
+            Write-Warning "Unable to stop E2E services automatically."
+        }
+    }
+    foreach ($name in $environmentNames) {
+        [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")
+    }
+    Set-Location $savedLocation
+}
