@@ -168,7 +168,7 @@ docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml b
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml up -d --no-build backend
 ```
 
-설정이 끝나면 로컬에서 실행 중인 `npm run dev`와 `uvicorn`을 먼저 `Ctrl+C`로 종료합니다. 로컬 프로세스가 3000·8000 포트를 사용 중이면 Docker의 `frontend`·`backend` 컨테이너가 `Created` 상태에 머물며 브라우저에는 `Failed to fetch`가 표시됩니다.
+설정이 끝나면 로컬에서 실행 중인 `npm run dev`와 `uvicorn`을 먼저 `Ctrl+C`로 종료합니다. 로컬 프로세스가 `.env`의 `FRONTEND_PORT`(기본 3200)·`BACKEND_PORT`(기본 8000) 포트를 사용 중이면 Docker의 `frontend`·`backend` 컨테이너가 `Created` 상태에 머물며 브라우저에는 `Failed to fetch`가 표시됩니다.
 
 이후 다음 명령 하나로 DB, migration, seed, backend, frontend를 모두 Docker에서 실행합니다.
 
@@ -205,7 +205,7 @@ docker compose `
 db healthy → migrate 종료 코드 0 → seed 종료 코드 0 → backend/RAG/worker → frontend
 ```
 
-- 대시보드: <http://localhost:3000>
+- 대시보드: <http://localhost:3200> (`.env`의 `FRONTEND_PORT` 기본값)
 - API 문서: <http://localhost:8000/docs>
 - 준비 상태: <http://localhost:8000/health/ready>
 
@@ -242,13 +242,13 @@ POSTGRES_PORT=5433
 
 이 경우 DBeaver도 5433 포트로 연결합니다. `DATABASE_URL`의 `db:5432`는 컨테이너 내부 주소이므로 변경하지 않습니다.
 
-Windows가 3000 포트를 사용 중이거나 예약한 경우에는 `.env`의 호스트 포트만 바꿉니다.
+`.env.example`은 Windows가 3000 포트를 예약해 두는 문제를 피하기 위해 `FRONTEND_PORT` 기본값을 3200으로 지정합니다. 이 포트마저 다른 프로세스와 충돌하면 `.env`의 호스트 포트만 바꿉니다.
 
 ```dotenv
-FRONTEND_PORT=3030
+FRONTEND_PORT=3300
 ```
 
-이 경우 대시보드 주소는 `http://localhost:3030`입니다. 컨테이너 내부 포트는 계속 3000이므로 다른 설정은 변경하지 않습니다.
+이 경우 대시보드 주소는 `http://localhost:3300`입니다. 컨테이너 내부 포트는 계속 3000이므로 다른 설정은 변경하지 않습니다.
 
 ### DBeaver 연결
 
@@ -298,7 +298,7 @@ FROM users
 ORDER BY employee_number;
 ```
 
-최초 seed 후 `roles`에는 `admin`, `safety_manager`, `worker` 3건이 보이고 `users`는 비어 있는 것이 정상입니다. 실제 사용자와 비밀번호는 seed나 Git으로 배포하지 않습니다.
+최초 seed 후 `roles`에는 `worker`, `safety_manager`, `document_manager`, `admin` 4건이 보이고 `users`는 비어 있는 것이 정상입니다. 실제 사용자와 비밀번호는 seed나 Git으로 배포하지 않습니다.
 
 ### 팀원별 DB와 Git 공유 범위
 
@@ -310,7 +310,7 @@ Git으로 공유되는 것은 Docker Compose 설정, SQLAlchemy 모델, Alembic 
 - 실제 사업장 문서와 제조사 비공개 자료
 - 개인정보와 고객 데이터
 
-각 팀원은 동일한 주요 테이블 16개, `reference_codes` seed 25건과 역할 seed 3건을 갖지만, `users`나 `assessments` 등에 직접 입력한 데이터는 다른 팀원에게 자동으로 전달되지 않습니다. 각자 `setup-dev.ps1` 실행 후 DBeaver로 자신의 로컬 DB에 접속해 확인합니다.
+각 팀원은 동일한 주요 테이블 16개, `reference_codes` seed 25건과 역할 seed 4건을 갖지만, `users`나 `assessments` 등에 직접 입력한 데이터는 다른 팀원에게 자동으로 전달되지 않습니다. 각자 `setup-dev.ps1` 실행 후 DBeaver로 자신의 로컬 DB에 접속해 확인합니다.
 
 ```text
 팀원 A → 팀원 A PC의 Docker DB
@@ -385,7 +385,7 @@ DB 볼륨과 마찬가지로 모델 캐시를 유지하려면 `docker compose do
 
 ## 선택 실행: 프론트엔드 앱은 로컬
 
-프론트엔드 코드를 Hot Reload로 개발할 때만 사용합니다. Docker의 `frontend`가 실행 중이면 3000 포트가 충돌하므로 먼저 해당 컨테이너를 중지합니다. 백엔드는 Docker 또는 로컬 방식 중 하나로 8000 포트에서 실행되어 있어야 합니다.
+프론트엔드 코드를 Hot Reload로 개발할 때만 사용합니다. `npm.cmd run dev`(Next.js 기본값)는 3000 포트를 사용하므로 Docker의 `frontend`(기본 호스트 포트 3200)와는 충돌하지 않지만, 같은 화면을 보려면 Docker의 `frontend` 컨테이너를 먼저 중지하는 것이 좋습니다. 백엔드는 Docker 또는 로컬 방식 중 하나로 8000 포트에서 실행되어 있어야 합니다.
 
 ```powershell
 docker compose --env-file .env -f docker-compose.yml -f docker-compose.dev.yml stop frontend
@@ -399,7 +399,7 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-- 대시보드: <http://localhost:3000>
+- 대시보드: <http://localhost:3000> (로컬 `npm run dev` 기본 포트)
 - 회원가입: <http://localhost:3000/signup>
 
 ### `Failed to fetch` 점검
@@ -820,7 +820,7 @@ Set-Location "C:\Users\Chan\Desktop\3차프로젝트_코드"
 입력해 확인한다.
 
 ```text
-http://localhost:3000
+http://localhost:3200
 ```
 
 수동 실행은 다음 세 Compose 파일을 함께 사용한다.
@@ -857,9 +857,19 @@ docker compose `
 `ollama run qwen3.5:9b`만 실행한 결과는 팀 LoRA 모델이 아니므로 팀 분류 검증으로
 간주하면 안 된다.
 
-## 하이브리드 RAG와 임시 GPT-4o-mini 설정
+## 하이브리드 RAG와 Qwen3.5-9B 답변 생성
 
-현재 질의 흐름은 `상황 분석 → 키워드·BGE-M3 후보 검색 → 주제 불일치 제거 → rerank → 근거 답변` 순서입니다. 상황 분석기와 답변 생성기는 같은 OpenAI 호환 provider 인터페이스를 사용합니다. 팀의 Qwen3 서버가 준비되기 전에는 다음처럼 GPT-4o-mini를 사용합니다.
+현재 질의 흐름은 `상황 분석 → 키워드·BGE-M3 후보 검색 → 주제 불일치 제거 → rerank → 근거 답변` 순서입니다. 답변 생성·질문의도 분류·사고유형 분류는 `QWEN_ENABLED`/`QWEN_SERVICE_URL`로 연결하는 팀 자체 파인튜닝 Qwen3.5-9B(+LoRA) 서비스(`ai/qwen_service`)가 담당합니다. 사내 GPU 서버가 준비되기 전까지는 `QWEN_PROVIDER=colab`로 Google Colab 노트북을 ngrok 터널로 서빙합니다. ngrok 주소는 Colab 세션을 재시작할 때마다 바뀌므로 그때그때 `.env`의 `QWEN_SERVICE_URL`을 갱신해야 하며, 사내 GPU 서버로 옮길 때도 애플리케이션 코드를 수정하지 않고 이 값만 새 엔드포인트로 바꾸면 됩니다.
+
+```dotenv
+QWEN_ENABLED=true
+QWEN_PROVIDER=colab
+QWEN_SERVICE_URL=https://현재-실행-중인-colab-ngrok-주소
+QWEN_API_KEY=팀이-공유한-토큰
+QWEN_ALLOW_COMPANY_CONTEXT=true
+```
+
+이와 별도로 `ALLOW_EXTERNAL_LLM`/`LLM_BASE_URL` 환경변수로 켜는 범용 OpenAI 호환 provider 경로도 코드에 남아 있습니다. Qwen 서비스 자체를 아예 쓸 수 없는 상황을 위한 대안이며, 예를 들어 GPT-4o-mini는 다음처럼 켭니다. 기본값은 `ALLOW_EXTERNAL_LLM=false`이고 Qwen 경로가 우선합니다.
 
 ```dotenv
 OPENAI_API_KEY=각자_발급한_키
@@ -871,7 +881,7 @@ LLM_ANALYZER_MAX_OUTPUT_TOKENS=500
 OPENAI_MAX_OUTPUT_TOKENS=1200
 ```
 
-Qwen3가 OpenAI 호환 API로 준비되면 애플리케이션 코드를 수정하지 않고 `LLM_BASE_URL`, `LLM_ANALYZER_MODEL`, `LLM_ANSWER_MODEL`만 변경합니다. 모델 분석 JSON이 잘못되거나 시간 초과가 발생하면 입력값 기반 검색어로 대체합니다. 검색 근거가 없으면 모델이 답을 추측하지 않고 “근거 없음” 응답을 반환합니다. 회사 범위 문서가 결과에 포함된 경우에는 외부 모델 답변 생성을 항상 차단합니다.
+Qwen과 OpenAI 호환 provider 중 어느 쪽을 쓰든, 모델 분석 JSON이 잘못되거나 시간 초과가 발생하면 입력값 기반 검색어로 대체합니다. 검색 근거가 없으면 모델이 답을 추측하지 않고 “근거 없음” 응답을 반환합니다. 회사 범위 문서가 결과에 포함된 경우에는 외부 모델 답변 생성을 항상 차단합니다. Qwen 서비스가 응답하지 않거나 응답 검증에 실패하면 채팅 답변은 검색 근거를 정해진 구조에 맞춰 조합하는 규칙 기반 템플릿 답변으로 자동 대체됩니다.
 
 익명 요청의 검색 범위는 항상 공개 문서뿐입니다. 로그인 요청은 세션 사용자와 DB 권한·사업장 배정을 기준으로 서버가 범위를 생성합니다. 화면에서 선택한 매뉴얼은 파일명이 아니라 아래 UUID 필드로 전달해야 합니다.
 
@@ -897,7 +907,7 @@ RAG_CANDIDATE_K=30
 RAG_DOCUMENT_TOP_K=6
 RAG_DOCUMENT_NEIGHBOR_WINDOW=1
 RAG_COMPONENT_TOP_K=5
-RAG_MAINTENANCE_TOP_K=8
+RAG_MAINTENANCE_TOP_K=16
 RAG_MAX_CHUNKS_PER_DOCUMENT=2
 RAG_MIN_KEYWORD_SCORE=0.08
 RAG_MAINTENANCE_MANUAL_QUOTA=4
@@ -906,10 +916,10 @@ RAG_MAINTENANCE_LAW_QUOTA=2
 RAG_MAINTENANCE_GUIDE_QUOTA=3
 RAG_MAINTENANCE_INCIDENT_QUOTA=2
 QUESTION_INTENT_CONFIDENCE_THRESHOLD=0.8
-QWEN_SOURCE_EXCERPT_CHARS=900
-QWEN_DOCUMENT_SOURCE_LIMIT=6
-QWEN_COMPONENT_SOURCE_LIMIT=5
-QWEN_MAINTENANCE_SOURCE_LIMIT=8
+QWEN_SOURCE_EXCERPT_CHARS=180
+QWEN_DOCUMENT_SOURCE_LIMIT=2
+QWEN_COMPONENT_SOURCE_LIMIT=2
+QWEN_MAINTENANCE_SOURCE_LIMIT=5
 ```
 
 AI 상담은 사용자가 명시한 질문 목적을 가장 먼저 사용하고, 그다음 Qwen 분석을
